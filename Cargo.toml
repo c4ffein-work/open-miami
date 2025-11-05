@@ -20,6 +20,7 @@ web-sys = { version = "0.3", features = [
     "MouseEvent",
     "EventTarget",
     "Performance",
+    "console",
 ] }
 
 [lib]

@@ -18,11 +18,15 @@ impl Graphics {
     pub fn new() -> Result<Self, String> {
         let window = web_sys::window().ok_or("No window found")?;
         let document = window.document().ok_or("No document found")?;
+
+        // Debug: log what we're looking for
+        web_sys::console::log_1(&"Looking for canvas with id: glcanvas".into());
+
         let canvas = document
             .get_element_by_id("glcanvas")
-            .ok_or("No canvas")?
+            .ok_or("No canvas element found with id 'glcanvas'")?
             .dyn_into::<HtmlCanvasElement>()
-            .map_err(|_| "Element is not a canvas")?;
+            .map_err(|_| "Element with id 'glcanvas' is not a canvas")?;
 
         let context = canvas
             .get_context("2d")

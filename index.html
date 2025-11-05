@@ -51,6 +51,8 @@
             try {
                 // Initialize the WASM module
                 await init();
+                // Ensure DOM is loaded before starting game
+                console.log('Canvas element:', document.getElementById('glcanvas'));
                 // Start the game
                 start();
                 document.getElementById('loading').style.display = 'none';
@@ -62,7 +64,12 @@
             }
         }
 
-        run();
+        // Wait for DOM to be fully loaded
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', run);
+        } else {
+            run();
+        }
     </script>
 </body>
 </html>
