@@ -1,4 +1,4 @@
-use super::{Component, ComponentId, Entity};
+use super::{Component, Entity};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 

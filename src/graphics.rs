@@ -1,12 +1,19 @@
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 use crate::math::{Vec2, Color};
 
+#[cfg(target_arch = "wasm32")]
 pub struct Graphics {
     context: CanvasRenderingContext2d,
     canvas: HtmlCanvasElement,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Graphics;
+
+#[cfg(target_arch = "wasm32")]
 impl Graphics {
     pub fn new() -> Result<Self, String> {
         let window = web_sys::window().ok_or("No window found")?;

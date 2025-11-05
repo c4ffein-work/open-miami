@@ -321,10 +321,10 @@ mod tests {
         assert_eq!(weapon.fire_timer, 0.5);
 
         weapon.update(0.3);
-        assert_eq!(weapon.fire_timer, 0.2);
+        assert!((weapon.fire_timer - 0.2).abs() < 0.001); // Use approximate comparison for floats
 
         weapon.update(0.3);
-        assert_eq!(weapon.fire_timer, -0.1);
+        assert!((weapon.fire_timer - (-0.1)).abs() < 0.001);
         assert!(weapon.can_fire()); // Can fire again after cooldown
     }
 

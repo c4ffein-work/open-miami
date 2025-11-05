@@ -7,19 +7,6 @@ license = "MIT"
 description = "An open-source Hotline Miami clone in Rust for the browser"
 
 [dependencies]
-wasm-bindgen = "0.2"
-console_error_panic_hook = "0.1"
-web-sys = { version = "0.3", features = [
-    "Window",
-    "Document",
-    "Element",
-    "HtmlCanvasElement",
-    "CanvasRenderingContext2d",
-    "console",
-    "KeyboardEvent",
-    "MouseEvent",
-    "Performance",
-] }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
