@@ -1,0 +1,179 @@
+name: Generate Screenshots
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  screenshot:
+    name: Generate Game Screenshots
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libasound2-dev \
+            xvfb \
+            scrot \
+            imagemagick
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry/index
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-index-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-screenshot-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-screenshot-
+
+      - name: Build game (release mode)
+        run: cargo build --release
+
+      - name: Create screenshots directory
+        run: mkdir -p screenshots
+
+      - name: Start Xvfb (virtual display)
+        run: |
+          Xvfb :99 -screen 0 1024x768x24 &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          sleep 2
+
+      - name: Run game and capture screenshots
+        continue-on-error: true
+        timeout-minutes: 2
+        run: |
+          # Run the game in background
+          ./target/release/open-miami &
+          GAME_PID=$!
+
+          # Wait for game to start
+          sleep 3
+
+          # Capture initial gameplay
+          scrot screenshots/screenshot_001_initial.png
+          echo "Screenshot 1 captured"
+          sleep 2
+
+          # Simulate some gameplay time
+          scrot screenshots/screenshot_002_gameplay.png
+          echo "Screenshot 2 captured"
+          sleep 2
+
+          # Capture one more
+          scrot screenshots/screenshot_003_action.png
+          echo "Screenshot 3 captured"
+
+          # Kill the game
+          kill $GAME_PID || true
+
+          # List captured screenshots
+          ls -lh screenshots/
+
+      - name: Optimize screenshots
+        if: always()
+        run: |
+          if [ -d "screenshots" ] && [ "$(ls -A screenshots)" ]; then
+            for img in screenshots/*.png; do
+              if [ -f "$img" ]; then
+                convert "$img" -resize 960x720 -quality 85 "$img" || true
+              fi
+            done
+            echo "Screenshots optimized"
+          else
+            echo "No screenshots to optimize"
+          fi
+
+      - name: Upload screenshots as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-screenshots-pr-${{ github.event.pull_request.number }}
+          path: screenshots/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Comment on PR with screenshots
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const screenshotsDir = 'screenshots';
+            let screenshotsList = '';
+
+            try {
+              if (fs.existsSync(screenshotsDir)) {
+                const files = fs.readdirSync(screenshotsDir);
+                if (files.length > 0) {
+                  screenshotsList = files.map(f => `- ${f}`).join('\n');
+                }
+              }
+            } catch (err) {
+              console.log('No screenshots directory found');
+            }
+
+            const prNumber = context.payload.pull_request.number;
+            const runId = context.runId;
+            const artifactUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
+
+            let body = `## 📸 Game Screenshots Generated\n\n`;
+
+            if (screenshotsList) {
+              body += `Screenshots have been captured and uploaded as artifacts:\n\n${screenshotsList}\n\n`;
+              body += `🔗 [Download screenshots from this workflow run](${artifactUrl})\n\n`;
+              body += `The screenshots show the current state of the game with your changes.`;
+            } else {
+              body += `⚠️ No screenshots were captured. The game may have failed to start or render.\n\n`;
+              body += `Check the [workflow logs](${artifactUrl}) for more details.`;
+            }
+
+            // Find existing screenshot comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('📸 Game Screenshots Generated')
+            );
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: body
+              });
+            }

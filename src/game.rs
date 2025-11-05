@@ -1,6 +1,6 @@
 // Game setup and entity spawning helpers
-use crate::ecs::{World, Entity};
 use crate::components::*;
+use crate::ecs::{Entity, World};
 use macroquad::prelude::Vec2;
 
 /// Spawn a player entity
@@ -49,7 +49,8 @@ pub fn initialize_game(world: &mut World) {
 /// Check if player is alive
 pub fn is_player_alive(world: &World) -> bool {
     let players: Vec<Entity> = world.query::<Player>();
-    players.first()
+    players
+        .first()
         .and_then(|&e| world.get_component::<Health>(e))
         .map(|h| h.is_alive())
         .unwrap_or(false)
@@ -58,7 +59,8 @@ pub fn is_player_alive(world: &World) -> bool {
 /// Get player health for UI
 pub fn get_player_health(world: &World) -> i32 {
     let players: Vec<Entity> = world.query::<Player>();
-    players.first()
+    players
+        .first()
         .and_then(|&e| world.get_component::<Health>(e))
         .map(|h| h.current)
         .unwrap_or(0)
@@ -67,7 +69,8 @@ pub fn get_player_health(world: &World) -> i32 {
 /// Get player ammo for UI
 pub fn get_player_ammo(world: &World) -> i32 {
     let players: Vec<Entity> = world.query::<Player>();
-    players.first()
+    players
+        .first()
         .and_then(|&e| world.get_component::<Weapon>(e))
         .map(|w| w.ammo)
         .unwrap_or(0)
@@ -76,7 +79,8 @@ pub fn get_player_ammo(world: &World) -> i32 {
 /// Get player position
 pub fn get_player_position(world: &World) -> Option<Vec2> {
     let players: Vec<Entity> = world.query::<Player>();
-    players.first()
+    players
+        .first()
         .and_then(|&e| world.get_component::<Position>(e))
         .map(|p| p.to_vec2())
 }
@@ -84,9 +88,11 @@ pub fn get_player_position(world: &World) -> Option<Vec2> {
 /// Count alive enemies
 pub fn count_alive_enemies(world: &World) -> usize {
     let enemies: Vec<Entity> = world.query::<Enemy>();
-    enemies.iter()
+    enemies
+        .iter()
         .filter(|&&e| {
-            world.get_component::<Health>(e)
+            world
+                .get_component::<Health>(e)
                 .map(|h| h.is_alive())
                 .unwrap_or(false)
         })
@@ -146,7 +152,10 @@ mod tests {
 
         // Kill player
         let player = world.query::<Player>()[0];
-        world.get_component_mut::<Health>(player).unwrap().take_damage(100);
+        world
+            .get_component_mut::<Health>(player)
+            .unwrap()
+            .take_damage(100);
 
         assert!(!is_player_alive(&world));
     }
@@ -159,7 +168,10 @@ mod tests {
         assert_eq!(get_player_health(&world), 100);
 
         let player = world.query::<Player>()[0];
-        world.get_component_mut::<Health>(player).unwrap().take_damage(30);
+        world
+            .get_component_mut::<Health>(player)
+            .unwrap()
+            .take_damage(30);
 
         assert_eq!(get_player_health(&world), 70);
     }
@@ -173,7 +185,10 @@ mod tests {
 
         // Kill one enemy
         let enemy = world.query::<Enemy>()[0];
-        world.get_component_mut::<Health>(enemy).unwrap().take_damage(100);
+        world
+            .get_component_mut::<Health>(enemy)
+            .unwrap()
+            .take_damage(100);
 
         assert_eq!(count_alive_enemies(&world), 3);
     }

@@ -1,5 +1,5 @@
-use crate::ecs::{World, System, Entity};
-use crate::components::{Position, AI, AIState, Velocity, Speed, Enemy, Player};
+use crate::components::{AIState, Enemy, Player, Position, Speed, Velocity, AI};
+use crate::ecs::{Entity, System, World};
 
 /// System that handles enemy AI behavior
 pub struct AISystem;
@@ -7,7 +7,8 @@ pub struct AISystem;
 impl AISystem {
     fn find_player_position(world: &World) -> Option<Position> {
         let players: Vec<Entity> = world.query::<Player>();
-        players.first()
+        players
+            .first()
             .and_then(|&entity| world.get_component::<Position>(entity))
             .copied()
     }
@@ -76,7 +77,8 @@ impl System for AISystem {
             if let Some(velocity) = world.get_component_mut::<Velocity>(entity) {
                 match ai.state {
                     AIState::Chase => {
-                        let (dir_x, dir_y) = Self::calculate_move_direction(&enemy_pos, &player_pos);
+                        let (dir_x, dir_y) =
+                            Self::calculate_move_direction(&enemy_pos, &player_pos);
                         velocity.x = dir_x * speed.value;
                         velocity.y = dir_y * speed.value;
                     }

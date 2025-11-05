@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use super::{Component, ComponentId, Entity};
 use std::any::{Any, TypeId};
-use super::{Entity, Component, ComponentId};
+use std::collections::HashMap;
 
 /// ComponentStorage stores all components of a specific type
 type ComponentStorage = HashMap<Entity, Box<dyn Any>>;
@@ -41,7 +41,8 @@ impl World {
     /// Get an immutable reference to a component
     pub fn get_component<T: Component>(&self, entity: Entity) -> Option<&T> {
         let type_id = TypeId::of::<T>();
-        self.components.get(&type_id)?
+        self.components
+            .get(&type_id)?
             .get(&entity)?
             .downcast_ref::<T>()
     }
@@ -49,7 +50,8 @@ impl World {
     /// Get a mutable reference to a component
     pub fn get_component_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
         let type_id = TypeId::of::<T>();
-        self.components.get_mut(&type_id)?
+        self.components
+            .get_mut(&type_id)?
             .get_mut(&entity)?
             .downcast_mut::<T>()
     }
@@ -66,7 +68,8 @@ impl World {
     /// Remove a component from an entity
     pub fn remove_component<T: Component>(&mut self, entity: Entity) -> Option<T> {
         let type_id = TypeId::of::<T>();
-        self.components.get_mut(&type_id)?
+        self.components
+            .get_mut(&type_id)?
             .remove(&entity)?
             .downcast::<T>()
             .ok()
@@ -274,7 +277,13 @@ mod tests {
         let e1 = world.spawn();
         world.add_component(e1, Position { x: 1.0, y: 2.0 });
         world.add_component(e1, Velocity { x: 1.0, y: 1.0 });
-        world.add_component(e1, Health { current: 100, max: 100 });
+        world.add_component(
+            e1,
+            Health {
+                current: 100,
+                max: 100,
+            },
+        );
 
         let e2 = world.spawn();
         world.add_component(e2, Position { x: 3.0, y: 4.0 });
@@ -292,14 +301,26 @@ mod tests {
         // Create 100 entities with various components
         for i in 0..100 {
             let entity = world.spawn();
-            world.add_component(entity, Position { x: i as f32, y: i as f32 });
+            world.add_component(
+                entity,
+                Position {
+                    x: i as f32,
+                    y: i as f32,
+                },
+            );
 
             if i % 2 == 0 {
                 world.add_component(entity, Velocity { x: 1.0, y: 1.0 });
             }
 
             if i % 3 == 0 {
-                world.add_component(entity, Health { current: 100, max: 100 });
+                world.add_component(
+                    entity,
+                    Health {
+                        current: 100,
+                        max: 100,
+                    },
+                );
             }
         }
 
@@ -314,7 +335,13 @@ mod tests {
 
         for i in 0..10 {
             let entity = world.spawn();
-            world.add_component(entity, Position { x: i as f32, y: 0.0 });
+            world.add_component(
+                entity,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                },
+            );
         }
 
         assert_eq!(world.entities().len(), 10);

@@ -79,22 +79,41 @@ This will build the WASM version and provide instructions for serving it.
 
 ## Development
 
-The project is structured as follows:
+The project is structured using a custom Entity-Component-System (ECS) architecture:
 
 ```
 open-miami/
 ├── src/
-│   ├── main.rs          # Main game loop
-│   ├── player.rs        # Player character logic
-│   ├── enemy.rs         # Enemy AI and behavior
-│   ├── weapon.rs        # Weapon types and stats
-│   ├── level.rs         # Level rendering
-│   ├── camera.rs        # Camera system
-│   └── collision.rs     # Collision detection utilities
-├── index.html           # Web interface
-├── Cargo.toml          # Rust dependencies
-└── README.md           # This file
+│   ├── main.rs              # Main game loop
+│   ├── lib.rs               # Library exports
+│   ├── ecs/                 # Custom ECS engine
+│   │   ├── entity.rs        # Entity (unique IDs)
+│   │   ├── component.rs     # Component trait system
+│   │   ├── world.rs         # World/storage management
+│   │   ├── query.rs         # Query system for entities
+│   │   └── system.rs        # System trait
+│   ├── components/          # Game data components
+│   │   └── mod.rs           # Position, Health, Weapon, AI, etc.
+│   ├── systems/             # Game logic systems
+│   │   ├── movement.rs      # Movement logic
+│   │   ├── ai.rs            # Enemy AI
+│   │   ├── combat.rs        # Combat and damage
+│   │   ├── weapon.rs        # Weapon updates
+│   │   └── input.rs         # Player input handling
+│   ├── game.rs              # Entity spawning helpers
+│   ├── render.rs            # Rendering system
+│   └── legacy/              # Deprecated OOP code (reference)
+├── tests/
+│   └── integration_tests.rs # 89 comprehensive tests
+├── index.html               # Web interface
+├── build-wasm.sh            # WASM build script
+├── Cargo.toml               # Rust dependencies
+├── ECS_ARCHITECTURE.md      # Detailed ECS documentation
+├── TESTING.md               # Testing strategy guide
+└── README.md                # This file
 ```
+
+For detailed information about the ECS architecture and design decisions, see [ECS_ARCHITECTURE.md](ECS_ARCHITECTURE.md).
 
 ## Roadmap
 

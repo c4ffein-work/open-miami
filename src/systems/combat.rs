@@ -1,5 +1,5 @@
-use crate::ecs::{World, System, Entity};
-use crate::components::{Position, Health, AI, AIState, Player, Enemy, Weapon, Radius};
+use crate::components::{AIState, Enemy, Health, Player, Position, Radius, Weapon, AI};
+use crate::ecs::{Entity, System, World};
 
 /// System that handles combat damage dealing
 pub struct CombatSystem;
@@ -42,7 +42,12 @@ impl CombatSystem {
     }
 
     /// Process shooting from one position to another
-    pub fn process_shoot(world: &mut World, shooter_pos: Position, target_pos: Position, damage: i32) -> bool {
+    pub fn process_shoot(
+        world: &mut World,
+        shooter_pos: Position,
+        target_pos: Position,
+        damage: i32,
+    ) -> bool {
         let enemies: Vec<Entity> = world.query::<Enemy>();
 
         for enemy in enemies {
@@ -61,7 +66,12 @@ impl CombatSystem {
             }
 
             // Check if bullet line hits enemy circle
-            if Self::line_circle_collision(&shooter_pos, &target_pos, &enemy_pos, enemy_radius.value) {
+            if Self::line_circle_collision(
+                &shooter_pos,
+                &target_pos,
+                &enemy_pos,
+                enemy_radius.value,
+            ) {
                 // Deal damage
                 if let Some(health) = world.get_component_mut::<Health>(enemy) {
                     health.take_damage(damage);
@@ -74,7 +84,13 @@ impl CombatSystem {
     }
 
     /// Process melee attack in a cone
-    pub fn process_melee(world: &mut World, attacker_pos: Position, target_pos: Position, damage: i32, range: f32) -> bool {
+    pub fn process_melee(
+        world: &mut World,
+        attacker_pos: Position,
+        target_pos: Position,
+        damage: i32,
+        range: f32,
+    ) -> bool {
         let enemies: Vec<Entity> = world.query::<Enemy>();
 
         // Direction to target
@@ -193,7 +209,9 @@ mod tests {
         let circle = Position::new(50.0, 5.0);
         let radius = 10.0;
 
-        assert!(CombatSystem::line_circle_collision(&start, &end, &circle, radius));
+        assert!(CombatSystem::line_circle_collision(
+            &start, &end, &circle, radius
+        ));
     }
 
     #[test]
@@ -203,7 +221,9 @@ mod tests {
         let circle = Position::new(50.0, 20.0);
         let radius = 10.0;
 
-        assert!(!CombatSystem::line_circle_collision(&start, &end, &circle, radius));
+        assert!(!CombatSystem::line_circle_collision(
+            &start, &end, &circle, radius
+        ));
     }
 
     #[test]
@@ -213,7 +233,9 @@ mod tests {
         let circle = Position::new(50.0, 0.0); // Directly on line
         let radius = 5.0;
 
-        assert!(CombatSystem::line_circle_collision(&start, &end, &circle, radius));
+        assert!(CombatSystem::line_circle_collision(
+            &start, &end, &circle, radius
+        ));
     }
 
     #[test]
@@ -267,7 +289,13 @@ mod tests {
         world.add_component(enemy, Enemy);
         world.add_component(enemy, Position::new(50.0, 0.0));
         world.add_component(enemy, Radius::new(10.0));
-        world.add_component(enemy, Health { current: 0, max: 100 });
+        world.add_component(
+            enemy,
+            Health {
+                current: 0,
+                max: 100,
+            },
+        );
 
         let shooter_pos = Position::new(0.0, 0.0);
         let target_pos = Position::new(100.0, 0.0);

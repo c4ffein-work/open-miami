@@ -1,12 +1,12 @@
 use macroquad::prelude::*;
 
 // Import game modules
-use open_miami::ecs::World;
-use open_miami::systems::*;
-use open_miami::game::*;
-use open_miami::render::*;
-use open_miami::level::Level;
 use open_miami::camera::Camera;
+use open_miami::ecs::World;
+use open_miami::game::*;
+use open_miami::level::Level;
+use open_miami::render::*;
+use open_miami::systems::*;
 
 #[macroquad::main("Open Miami - ECS Edition")]
 async fn main() {

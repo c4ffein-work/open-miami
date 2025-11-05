@@ -1,17 +1,17 @@
 // Custom ECS Engine
 // Simple, testable architecture with minimal dependencies
 
-pub mod entity;
 pub mod component;
-pub mod world;
+pub mod entity;
 pub mod query;
 pub mod system;
+pub mod world;
 
-pub use entity::Entity;
 pub use component::Component;
-pub use world::World;
+pub use entity::Entity;
 pub use query::{Query, QueryMut};
 pub use system::System;
+pub use world::World;
 
 // Re-export common types
 pub use macroquad::prelude::Vec2;

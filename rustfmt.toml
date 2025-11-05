@@ -1,0 +1,34 @@
+# Rust formatting configuration
+# Only stable features to ensure CI compatibility
+# See https://rust-lang.github.io/rustfmt/ for all options
+
+# Edition must match Cargo.toml
+edition = "2021"
+
+# Maximum line width
+max_width = 100
+
+# Hard tabs or spaces
+hard_tabs = false
+tab_spaces = 4
+
+# Use field initialization shorthand if possible
+use_field_init_shorthand = true
+
+# Use try shorthand
+use_try_shorthand = true
+
+# Reorder imports alphabetically
+reorder_imports = true
+
+# Merge consecutive derives
+merge_derives = true
+
+# Use small heuristics for minor stylistic choices
+use_small_heuristics = "Default"
+
+# Maximum width of a chain before wrapping
+chain_width = 60
+
+# Force explicit calls to .into_iter() when using for loops
+force_explicit_abi = true

@@ -1,5 +1,5 @@
-use crate::ecs::{World, System};
 use crate::components::{Position, Velocity};
+use crate::ecs::{System, World};
 
 /// System that applies velocity to position
 pub struct MovementSystem;

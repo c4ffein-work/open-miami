@@ -6,13 +6,19 @@ pub struct Camera {
     pub zoom: f32,
 }
 
-impl Camera {
-    pub fn new() -> Self {
+impl Default for Camera {
+    fn default() -> Self {
         Self {
             target: Vec2::ZERO,
             offset: Vec2::ZERO,
             zoom: 1.0,
         }
+    }
+}
+
+impl Camera {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn follow_player(&mut self, player_pos: Vec2) {
@@ -40,9 +46,6 @@ impl Camera {
         let offset_x = screen_width() / 2.0 - self.target.x;
         let offset_y = screen_height() / 2.0 - self.target.y;
 
-        Vec2::new(
-            screen_pos.x - offset_x,
-            screen_pos.y - offset_y,
-        )
+        Vec2::new(screen_pos.x - offset_x, screen_pos.y - offset_y)
     }
 }

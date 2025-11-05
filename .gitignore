@@ -2,7 +2,8 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# Note: Cargo.lock is committed for applications to ensure reproducible builds
+# It should only be ignored for libraries
 
 # WASM build artifacts
 *.wasm

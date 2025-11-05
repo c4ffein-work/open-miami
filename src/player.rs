@@ -1,6 +1,6 @@
-use macroquad::prelude::*;
-use crate::weapon::{Weapon, WeaponType};
 use crate::enemy::Enemy;
+use crate::weapon::{Weapon, WeaponType};
+use macroquad::prelude::*;
 
 pub struct Player {
     pub pos: Vec2,
@@ -59,7 +59,12 @@ impl Player {
         self.rotation = dir.y.atan2(dir.x);
 
         // Draw player body
-        draw_circle(self.pos.x, self.pos.y, 15.0, Color::from_rgba(255, 100, 100, 255));
+        draw_circle(
+            self.pos.x,
+            self.pos.y,
+            15.0,
+            Color::from_rgba(255, 100, 100, 255),
+        );
 
         // Draw direction indicator
         let indicator_end = self.pos + Vec2::new(self.rotation.cos(), self.rotation.sin()) * 20.0;

@@ -1,4 +1,4 @@
-use super::{World, Entity, Component};
+use super::{Component, Entity, World};
 
 /// Query provides iteration over entities with specific components
 pub struct Query<'a, T: Component> {
@@ -18,7 +18,9 @@ impl<'a, T: Component> Query<'a, T> {
 
     pub fn iter(&self) -> impl Iterator<Item = (Entity, &T)> {
         self.entities.iter().filter_map(|&entity| {
-            self.world.get_component::<T>(entity).map(|comp| (entity, comp))
+            self.world
+                .get_component::<T>(entity)
+                .map(|comp| (entity, comp))
         })
     }
 }
@@ -44,10 +46,10 @@ impl<'a, T: Component> QueryMut<'a, T> {
         // We need to use unsafe here to work around Rust's borrow checker
         // This is safe because we're not allowing overlapping mutable borrows
         let world_ptr = self.world as *mut World;
-        self.entities.iter().filter_map(move |&entity| {
-            unsafe {
-                (*world_ptr).get_component_mut::<T>(entity).map(|comp| (entity, comp))
-            }
+        self.entities.iter().filter_map(move |&entity| unsafe {
+            (*world_ptr)
+                .get_component_mut::<T>(entity)
+                .map(|comp| (entity, comp))
         })
     }
 }

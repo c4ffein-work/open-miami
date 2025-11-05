@@ -1,9 +1,9 @@
 // Integration tests for the complete game system
-use open_miami::ecs::*;
-use open_miami::components::*;
-use open_miami::systems::*;
-use open_miami::game::*;
 use macroquad::prelude::Vec2;
+use open_miami::components::*;
+use open_miami::ecs::*;
+use open_miami::game::*;
+use open_miami::systems::*;
 
 #[test]
 fn test_player_spawning() {
@@ -58,7 +58,10 @@ fn test_player_takes_damage_and_dies() {
     assert!(is_player_alive(&world));
 
     // Deal fatal damage
-    world.get_component_mut::<Health>(player).unwrap().take_damage(100);
+    world
+        .get_component_mut::<Health>(player)
+        .unwrap()
+        .take_damage(100);
 
     assert!(!is_player_alive(&world));
     assert_eq!(get_player_health(&world), 0);
@@ -177,7 +180,8 @@ fn test_complete_game_scenario_player_clears_room() {
     assert_eq!(count_alive_enemies(&world), 4);
 
     // Get all enemy positions
-    let enemy_positions: Vec<Position> = world.query::<Enemy>()
+    let enemy_positions: Vec<Position> = world
+        .query::<Enemy>()
         .iter()
         .filter_map(|&e| world.get_component::<Position>(e).copied())
         .collect();
@@ -302,7 +306,10 @@ fn test_weapon_ammo_depletion() {
     // Fire until out of ammo
     for _ in 0..initial_ammo {
         world.get_component_mut::<Weapon>(player).unwrap().fire();
-        world.get_component_mut::<Weapon>(player).unwrap().fire_timer = 0.0; // Reset cooldown
+        world
+            .get_component_mut::<Weapon>(player)
+            .unwrap()
+            .fire_timer = 0.0; // Reset cooldown
     }
 
     let weapon = world.get_component::<Weapon>(player).unwrap();

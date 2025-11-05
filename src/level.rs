@@ -6,13 +6,19 @@ pub struct Level {
     tile_size: f32,
 }
 
-impl Level {
-    pub fn new() -> Self {
+impl Default for Level {
+    fn default() -> Self {
         Self {
             width: 2000.0,
             height: 2000.0,
             tile_size: 50.0,
         }
+    }
+}
+
+impl Level {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn render(&self) {

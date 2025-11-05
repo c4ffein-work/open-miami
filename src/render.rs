@@ -1,6 +1,6 @@
 // Rendering system for drawing entities
-use crate::ecs::{World, Entity};
 use crate::components::*;
+use crate::ecs::{Entity, World};
 use macroquad::prelude::*;
 
 /// Render all entities in the world
@@ -49,11 +49,13 @@ fn render_player(world: &World) {
         None => return,
     };
 
-    let rotation = world.get_component::<Rotation>(player)
+    let rotation = world
+        .get_component::<Rotation>(player)
         .map(|r| r.angle)
         .unwrap_or(0.0);
 
-    let health = world.get_component::<Health>(player)
+    let health = world
+        .get_component::<Health>(player)
         .map(|h| h.current)
         .unwrap_or(0);
 
@@ -72,20 +74,8 @@ fn render_player(world: &World) {
 /// Render UI (health, ammo, etc.)
 pub fn render_ui(health: i32, ammo: i32, enemies_alive: usize, player_alive: bool) {
     if player_alive {
-        draw_text(
-            &format!("Health: {}", health),
-            10.0,
-            30.0,
-            30.0,
-            WHITE,
-        );
-        draw_text(
-            &format!("Ammo: {}", ammo),
-            10.0,
-            60.0,
-            30.0,
-            WHITE,
-        );
+        draw_text(&format!("Health: {}", health), 10.0, 30.0, 30.0, WHITE);
+        draw_text(&format!("Ammo: {}", ammo), 10.0, 60.0, 30.0, WHITE);
         draw_text(
             &format!("Enemies: {}", enemies_alive),
             10.0,

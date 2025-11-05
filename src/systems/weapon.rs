@@ -1,5 +1,5 @@
-use crate::ecs::{World, System};
 use crate::components::Weapon;
+use crate::ecs::{System, World};
 
 /// System that updates weapon timers
 pub struct WeaponUpdateSystem;

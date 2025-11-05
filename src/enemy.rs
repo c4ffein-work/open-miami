@@ -1,5 +1,5 @@
-use macroquad::prelude::*;
 use crate::player::Player;
+use macroquad::prelude::*;
 
 #[derive(PartialEq)]
 pub enum EnemyState {
@@ -70,7 +70,12 @@ impl Enemy {
     pub fn render(&self) {
         if !self.alive {
             // Draw dead enemy
-            draw_circle(self.pos.x, self.pos.y, self.radius, Color::from_rgba(100, 20, 20, 255));
+            draw_circle(
+                self.pos.x,
+                self.pos.y,
+                self.radius,
+                Color::from_rgba(100, 20, 20, 255),
+            );
             return;
         }
 
