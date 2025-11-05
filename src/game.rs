@@ -1,7 +1,7 @@
 // Game setup and entity spawning helpers
 use crate::components::*;
 use crate::ecs::{Entity, World};
-use macroquad::prelude::Vec2;
+use crate::math::Vec2;
 
 /// Spawn a player entity
 pub fn spawn_player(world: &mut World, position: Vec2) -> Entity {

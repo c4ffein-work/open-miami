@@ -1,8 +1,12 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
+#[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
 use web_sys::{KeyboardEvent, MouseEvent};
 use crate::math::Vec2;
 
@@ -12,6 +16,7 @@ thread_local! {
     static MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
+#[cfg(target_arch = "wasm32")]
 pub fn setup_input_handlers() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or("No window")?;
     let document = window.document().ok_or("No document")?;
