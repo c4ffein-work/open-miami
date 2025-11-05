@@ -9,6 +9,9 @@ description = "An open-source Hotline Miami clone in Rust for the browser"
 [dependencies]
 macroquad = "0.4"
 
+[patch.crates-io]
+getrandom = { version = "0.2", features = ["js"] }
+
 [profile.release]
 opt-level = 3
 lto = true
