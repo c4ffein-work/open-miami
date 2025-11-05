@@ -3,6 +3,9 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Open Miami - Hotline Miami Clone</title>
     <style>
         body {
@@ -45,31 +48,33 @@
         <p>An open-source Hotline Miami clone in Rust</p>
     </div>
     <script type="module">
-        import init, { start } from './open_miami.js';
-
-        async function run() {
-            try {
-                // Initialize the WASM module
-                await init();
-                // Ensure DOM is loaded before starting game
-                console.log('Canvas element:', document.getElementById('glcanvas'));
-                // Start the game
-                start();
-                document.getElementById('loading').style.display = 'none';
-                console.log('Game loaded successfully!');
-            } catch (error) {
-                console.error('Failed to load game:', error);
-                document.getElementById('loading').textContent = 'Failed to load game. Check console for details.';
-                document.getElementById('loading').style.color = '#ff0000';
+        // Cache busting - add version timestamp
+        const version = Date.now();
+        import(`./open_miami.js?v=${version}`).then(async ({ default: init, start }) => {
+            async function run() {
+                try {
+                    // Initialize the WASM module
+                    await init();
+                    // Ensure DOM is loaded before starting game
+                    console.log('Canvas element:', document.getElementById('glcanvas'));
+                    // Start the game
+                    start();
+                    document.getElementById('loading').style.display = 'none';
+                    console.log('Game loaded successfully!');
+                } catch (error) {
+                    console.error('Failed to load game:', error);
+                    document.getElementById('loading').textContent = 'Failed to load game. Check console for details.';
+                    document.getElementById('loading').style.color = '#ff0000';
+                }
             }
-        }
 
-        // Wait for DOM to be fully loaded
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', run);
-        } else {
-            run();
-        }
+            // Wait for DOM to be fully loaded
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', run);
+            } else {
+                run();
+            }
+        });
     </script>
 </body>
 </html>
