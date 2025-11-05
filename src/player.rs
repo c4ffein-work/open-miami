@@ -1,6 +1,7 @@
 use crate::enemy::Enemy;
+use crate::input::{is_key_down, keys};
+use crate::math::{Color, Vec2};
 use crate::weapon::{Weapon, WeaponType};
-use macroquad::prelude::*;
 
 pub struct Player {
     pub pos: Vec2,
@@ -23,27 +24,29 @@ impl Player {
         }
     }
 
+    const ZERO: Vec2 = Vec2::new(0.0, 0.0);
+
     pub fn update(&mut self, dt: f32) {
         if !self.alive {
             return;
         }
 
-        let mut movement = Vec2::ZERO;
+        let mut movement = Self::ZERO;
 
-        if is_key_down(KeyCode::W) {
+        if is_key_down(keys::W) {
             movement.y -= 1.0;
         }
-        if is_key_down(KeyCode::S) {
+        if is_key_down(keys::S) {
             movement.y += 1.0;
         }
-        if is_key_down(KeyCode::A) {
+        if is_key_down(keys::A) {
             movement.x -= 1.0;
         }
-        if is_key_down(KeyCode::D) {
+        if is_key_down(keys::D) {
             movement.x += 1.0;
         }
 
-        if movement != Vec2::ZERO {
+        if movement != Self::ZERO {
             movement = movement.normalize();
             self.pos += movement * self.speed * dt;
         }
@@ -58,24 +61,9 @@ impl Player {
         let dir = mouse_world_pos - self.pos;
         self.rotation = dir.y.atan2(dir.x);
 
-        // Draw player body
-        draw_circle(
-            self.pos.x,
-            self.pos.y,
-            15.0,
-            Color::from_rgba(255, 100, 100, 255),
-        );
-
-        // Draw direction indicator
-        let indicator_end = self.pos + Vec2::new(self.rotation.cos(), self.rotation.sin()) * 20.0;
-        draw_line(
-            self.pos.x,
-            self.pos.y,
-            indicator_end.x,
-            indicator_end.y,
-            3.0,
-            WHITE,
-        );
+        // Legacy rendering code - stubbed out
+        // Would draw player circle and direction indicator
+        // Now handled by the ECS rendering system
     }
 
     pub fn shoot(&mut self, target_pos: Vec2, enemies: &mut Vec<Enemy>) {
@@ -110,16 +98,9 @@ impl Player {
             }
         }
 
-        // Visual feedback - draw bullet trail
-        let end_pos = self.pos + dir * bullet_range;
-        draw_line(
-            self.pos.x,
-            self.pos.y,
-            end_pos.x,
-            end_pos.y,
-            2.0,
-            Color::from_rgba(255, 255, 100, 100),
-        );
+        // Visual feedback - bullet trail rendering
+        // Stubbed out - now handled by ECS rendering system
+        let _end_pos = self.pos + dir * bullet_range;
     }
 
     pub fn melee_attack(&mut self, target_pos: Vec2, enemies: &mut Vec<Enemy>) {
@@ -148,19 +129,8 @@ impl Player {
             }
         }
 
-        // Visual feedback - draw attack arc
-        for i in 0..8 {
-            let angle = self.rotation - 0.5 + (i as f32 * 0.125);
-            let end = self.pos + Vec2::new(angle.cos(), angle.sin()) * melee_range;
-            draw_line(
-                self.pos.x,
-                self.pos.y,
-                end.x,
-                end.y,
-                3.0,
-                Color::from_rgba(255, 100, 100, 50),
-            );
-        }
+        // Visual feedback - attack arc rendering
+        // Stubbed out - now handled by ECS rendering system
     }
 
     pub fn take_damage(&mut self, damage: i32) {

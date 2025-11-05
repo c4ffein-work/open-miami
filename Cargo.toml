@@ -8,6 +8,18 @@ description = "An open-source Hotline Miami clone in Rust for the browser"
 
 [dependencies]
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "KeyboardEvent",
+    "MouseEvent",
+    "EventTarget",
+] }
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

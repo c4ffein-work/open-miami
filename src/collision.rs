@@ -1,7 +1,7 @@
-use macroquad::prelude::*;
+use crate::math::Vec2;
 
 pub fn circle_circle_collision(pos1: Vec2, radius1: f32, pos2: Vec2, radius2: f32) -> bool {
-    let distance = (pos2 - pos1).length();
+    let distance = pos1.distance(pos2);
     distance < radius1 + radius2
 }
 

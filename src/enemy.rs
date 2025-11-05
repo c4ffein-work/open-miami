@@ -1,5 +1,5 @@
+use crate::math::{Color, Vec2};
 use crate::player::Player;
-use macroquad::prelude::*;
 
 #[derive(PartialEq)]
 pub enum EnemyState {
@@ -45,7 +45,7 @@ impl Enemy {
 
         self.attack_timer -= dt;
 
-        let distance_to_player = (player_pos - self.pos).length();
+        let distance_to_player = self.pos.distance(player_pos);
 
         // State machine
         if distance_to_player < self.attack_range {
@@ -68,45 +68,15 @@ impl Enemy {
     }
 
     pub fn render(&self) {
-        if !self.alive {
-            // Draw dead enemy
-            draw_circle(
-                self.pos.x,
-                self.pos.y,
-                self.radius,
-                Color::from_rgba(100, 20, 20, 255),
-            );
-            return;
-        }
-
-        let color = match self.state {
+        // Legacy rendering code - stubbed out
+        // Would draw enemy circle with state-based colors and health bar
+        // Now handled by the ECS rendering system
+        let _color = match self.state {
             EnemyState::Idle => Color::from_rgba(100, 100, 200, 255),
             EnemyState::Patrol => Color::from_rgba(100, 150, 200, 255),
             EnemyState::Chase => Color::from_rgba(200, 150, 100, 255),
             EnemyState::Attack => Color::from_rgba(200, 100, 100, 255),
         };
-
-        draw_circle(self.pos.x, self.pos.y, self.radius, color);
-
-        // Draw health bar
-        if self.health < 50 {
-            let bar_width = 30.0;
-            let health_percent = self.health as f32 / 50.0;
-            draw_rectangle(
-                self.pos.x - bar_width / 2.0,
-                self.pos.y - self.radius - 10.0,
-                bar_width,
-                4.0,
-                Color::from_rgba(50, 50, 50, 255),
-            );
-            draw_rectangle(
-                self.pos.x - bar_width / 2.0,
-                self.pos.y - self.radius - 10.0,
-                bar_width * health_percent,
-                4.0,
-                Color::from_rgba(200, 50, 50, 255),
-            );
-        }
     }
 
     pub fn try_attack_player(&mut self, player: &mut Player) {
