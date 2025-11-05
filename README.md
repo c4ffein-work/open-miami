@@ -47,35 +47,61 @@ cargo run --release
 
 ### Building for the Web (WASM)
 
+#### Prerequisites
+
 1. Add the WASM target:
 ```bash
 rustup target add wasm32-unknown-unknown
 ```
 
-2. Build the WASM bundle:
+2. Install wasm-bindgen-cli (required for generating JavaScript glue code):
 ```bash
-cargo build --release --target wasm32-unknown-unknown
+cargo install wasm-bindgen-cli
 ```
 
-3. Serve the game (you'll need a local web server):
-```bash
-# Using Python
-python3 -m http.server 8000
+#### Quick Build (Recommended)
 
-# Or using any other static file server
-```
-
-4. Open `http://localhost:8000` in your browser
-
-### Quick WASM Build Script
-
-For convenience, you can use the provided build script:
+Use the provided build script:
 
 ```bash
 ./build-wasm.sh
 ```
 
-This will build the WASM version and provide instructions for serving it.
+This will:
+1. Build the WASM binary
+2. Generate the wasm-bindgen JavaScript glue code
+3. Prepare all files for deployment
+
+#### Manual Build
+
+If you prefer to build manually:
+
+```bash
+# Build the WASM binary
+cargo build --release --target wasm32-unknown-unknown
+
+# Generate wasm-bindgen JavaScript glue
+wasm-bindgen target/wasm32-unknown-unknown/release/open_miami.wasm \
+    --out-dir . \
+    --target web \
+    --no-typescript
+```
+
+#### Running the Game
+
+After building, serve the game with any static file server:
+
+```bash
+# Using Python
+python3 -m http.server 8000
+
+# Or using Node.js
+npx http-server
+
+# Or any other static file server
+```
+
+Then open `http://localhost:8000` in your browser.
 
 ## Development
 
@@ -133,8 +159,9 @@ Future improvements planned:
 ## Technology
 
 - **Rust** - Systems programming language
-- **macroquad** - Simple and easy to use game library
+- **wasm-bindgen** - WebAssembly bindings for Rust
 - **WebAssembly** - Run Rust in the browser
+- **Custom ECS** - Entity-Component-System architecture built from scratch
 
 ## Contributing
 

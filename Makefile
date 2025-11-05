@@ -56,7 +56,9 @@ check-e2e:
 	@echo "$(YELLOW)Running end-to-end tests...$(NC)"
 	@echo "Building WASM..."
 	cargo build --release --target wasm32-unknown-unknown
-	cp target/wasm32-unknown-unknown/release/open_miami.wasm .
+	@echo "Generating wasm-bindgen JavaScript glue..."
+	@which wasm-bindgen > /dev/null || (echo "$(YELLOW)Installing wasm-bindgen-cli...$(NC)" && cargo install wasm-bindgen-cli)
+	wasm-bindgen target/wasm32-unknown-unknown/release/open_miami.wasm --out-dir . --target web --no-typescript
 	@echo "Installing E2E test dependencies..."
 	cd tests/e2e && npm install && npx playwright install --with-deps chromium
 	@echo "Running E2E tests..."

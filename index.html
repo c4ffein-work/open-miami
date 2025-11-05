@@ -44,12 +44,22 @@
         <canvas id="glcanvas" tabindex='1' width="960" height="720"></canvas>
         <p>An open-source Hotline Miami clone in Rust</p>
     </div>
-    <script src="./open_miami.js"></script>
-    <script>
-        window.addEventListener('load', () => {
-            document.getElementById('loading').style.display = 'none';
-            load("open_miami.wasm");
-        });
+    <script type="module">
+        import init from './open_miami.js';
+
+        async function run() {
+            try {
+                await init();
+                document.getElementById('loading').style.display = 'none';
+                console.log('Game loaded successfully!');
+            } catch (error) {
+                console.error('Failed to load game:', error);
+                document.getElementById('loading').textContent = 'Failed to load game. Check console for details.';
+                document.getElementById('loading').style.color = '#ff0000';
+            }
+        }
+
+        run();
     </script>
 </body>
 </html>
