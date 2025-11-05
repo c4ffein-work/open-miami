@@ -1,3 +1,4 @@
+use crate::math::Vec2;
 use std::cell::RefCell;
 use std::collections::HashSet;
 #[cfg(target_arch = "wasm32")]
@@ -8,7 +9,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{KeyboardEvent, MouseEvent};
-use crate::math::Vec2;
 
 thread_local! {
     static PRESSED_KEYS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -36,7 +36,8 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
         });
     }) as Box<dyn FnMut(_)>);
 
-    document.add_event_listener_with_callback("keydown", keydown_closure.as_ref().unchecked_ref())?;
+    document
+        .add_event_listener_with_callback("keydown", keydown_closure.as_ref().unchecked_ref())?;
     document.add_event_listener_with_callback("keyup", keyup_closure.as_ref().unchecked_ref())?;
 
     keydown_closure.forget();
@@ -67,8 +68,14 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
         });
     }) as Box<dyn FnMut(_)>);
 
-    canvas.add_event_listener_with_callback("mousemove", mousemove_closure.as_ref().unchecked_ref())?;
-    canvas.add_event_listener_with_callback("mousedown", mousedown_closure.as_ref().unchecked_ref())?;
+    canvas.add_event_listener_with_callback(
+        "mousemove",
+        mousemove_closure.as_ref().unchecked_ref(),
+    )?;
+    canvas.add_event_listener_with_callback(
+        "mousedown",
+        mousedown_closure.as_ref().unchecked_ref(),
+    )?;
     canvas.add_event_listener_with_callback("mouseup", mouseup_closure.as_ref().unchecked_ref())?;
 
     mousemove_closure.forget();

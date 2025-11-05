@@ -71,7 +71,7 @@ fn test_player_takes_damage_and_dies() {
 fn test_enemy_ai_chases_player() {
     let mut world = World::new();
 
-    let player = spawn_player(&mut world, Vec2::new(200.0, 0.0));
+    let _player = spawn_player(&mut world, Vec2::new(200.0, 0.0));
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
     let mut ai_system = AISystem;
@@ -90,7 +90,7 @@ fn test_enemy_ai_chases_player() {
 fn test_enemy_ai_attacks_when_close() {
     let mut world = World::new();
 
-    let player = spawn_player(&mut world, Vec2::new(30.0, 0.0));
+    let _player = spawn_player(&mut world, Vec2::new(30.0, 0.0));
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
     let mut ai_system = AISystem;
@@ -110,7 +110,7 @@ fn test_enemy_ai_attacks_when_close() {
 fn test_enemy_ai_idle_when_far() {
     let mut world = World::new();
 
-    let player = spawn_player(&mut world, Vec2::new(500.0, 0.0));
+    let _player = spawn_player(&mut world, Vec2::new(500.0, 0.0));
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
     let mut ai_system = AISystem;
@@ -249,8 +249,8 @@ fn test_multiple_systems_integration() {
     }
 
     // Game should still be in a valid state
-    assert!(world.query::<Player>().len() > 0);
-    assert!(world.query::<Enemy>().len() > 0);
+    assert!(!world.query::<Player>().is_empty());
+    assert!(!world.query::<Enemy>().is_empty());
 }
 
 #[test]

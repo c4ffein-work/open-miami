@@ -48,7 +48,7 @@ impl System for AISystem {
         let enemies: Vec<Entity> = world.query::<Enemy>();
 
         for entity in enemies {
-            let (enemy_pos, ai, speed) = match (
+            let (enemy_pos, _ai, speed) = match (
                 world.get_component::<Position>(entity),
                 world.get_component::<AI>(entity),
                 world.get_component::<Speed>(entity),

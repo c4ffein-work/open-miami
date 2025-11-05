@@ -1,4 +1,4 @@
-use crate::components::{AIState, Enemy, Health, Player, Position, Radius, Weapon, AI};
+use crate::components::{AIState, Enemy, Health, Player, Position, Radius, AI};
 use crate::ecs::{Entity, System, World};
 
 /// System that handles combat damage dealing

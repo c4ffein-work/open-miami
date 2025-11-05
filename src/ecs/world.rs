@@ -34,7 +34,7 @@ impl World {
     /// Add a component to an entity
     pub fn add_component<T: Component>(&mut self, entity: Entity, component: T) {
         let type_id = TypeId::of::<T>();
-        let storage = self.components.entry(type_id).or_insert_with(HashMap::new);
+        let storage = self.components.entry(type_id).or_default();
         storage.insert(entity, Box::new(component));
     }
 

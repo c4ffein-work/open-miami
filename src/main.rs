@@ -2,14 +2,14 @@
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_main {
-    use wasm_bindgen::prelude::*;
-    use wasm_bindgen::JsCast;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
 
     // Import game modules
     use open_miami::camera::Camera;
-    use open_miami::ecs::{World, System};
+    use open_miami::ecs::{System, World};
     use open_miami::game::*;
     use open_miami::graphics::Graphics;
     use open_miami::input;
@@ -55,7 +55,7 @@ mod wasm_main {
             self.last_time = current_time;
 
             // Clear background
-            graphics.clear(Color::new(20.0/255.0, 12.0/255.0, 28.0/255.0, 1.0));
+            graphics.clear(Color::new(20.0 / 255.0, 12.0 / 255.0, 28.0 / 255.0, 1.0));
 
             // Get player state for UI and camera
             let player_alive = is_player_alive(&self.world);

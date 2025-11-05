@@ -30,9 +30,9 @@ impl Level {
         for x in 0..tiles_x {
             for y in 0..tiles_y {
                 let color = if (x + y) % 2 == 0 {
-                    Color::new(40.0/255.0, 35.0/255.0, 45.0/255.0, 1.0)
+                    Color::new(40.0 / 255.0, 35.0 / 255.0, 45.0 / 255.0, 1.0)
                 } else {
-                    Color::new(35.0/255.0, 30.0/255.0, 40.0/255.0, 1.0)
+                    Color::new(35.0 / 255.0, 30.0 / 255.0, 40.0 / 255.0, 1.0)
                 };
 
                 graphics.draw_rectangle(
@@ -56,7 +56,7 @@ impl Level {
             Vec2::new(x, y),
             width,
             height,
-            Color::new(80.0/255.0, 60.0/255.0, 70.0/255.0, 1.0),
+            Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
         );
         // Border for visual depth
         graphics.draw_rectangle_lines(
@@ -64,7 +64,7 @@ impl Level {
             width,
             height,
             2.0,
-            Color::new(100.0/255.0, 80.0/255.0, 90.0/255.0, 1.0),
+            Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
         );
     }
 }

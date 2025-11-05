@@ -14,10 +14,7 @@ impl System for MovementSystem {
             let vel = world.get_component::<Velocity>(entity).copied();
 
             // Then get position (mutable borrow) and update it
-            if let (Some(pos), Some(vel)) = (
-                world.get_component_mut::<Position>(entity),
-                vel,
-            ) {
+            if let (Some(pos), Some(vel)) = (world.get_component_mut::<Position>(entity), vel) {
                 pos.x += vel.x * dt;
                 pos.y += vel.y * dt;
             }

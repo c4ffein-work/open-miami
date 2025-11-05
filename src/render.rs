@@ -30,7 +30,7 @@ fn render_enemies(world: &World, graphics: &Graphics) {
         let color = if health.is_alive() {
             Color::RED
         } else {
-            Color::new(100.0/255.0, 0.0, 0.0, 1.0) // Dark red for dead
+            Color::new(100.0 / 255.0, 0.0, 0.0, 1.0) // Dark red for dead
         };
 
         graphics.draw_circle(Vec2::new(pos.x, pos.y), radius.value, color);
@@ -78,19 +78,40 @@ fn render_player(world: &World, graphics: &Graphics) {
 }
 
 /// Render UI (health, ammo, etc.)
-pub fn render_ui(graphics: &Graphics, health: i32, ammo: i32, enemies_alive: usize, player_alive: bool) {
+pub fn render_ui(
+    graphics: &Graphics,
+    health: i32,
+    ammo: i32,
+    enemies_alive: usize,
+    player_alive: bool,
+) {
     let screen_width = graphics.width();
     let screen_height = graphics.height();
 
     if player_alive {
         graphics.draw_text("Health:", Vec2::new(10.0, 30.0), 20.0, Color::WHITE);
-        graphics.draw_text(&format!("{}", health), Vec2::new(100.0, 30.0), 20.0, Color::WHITE);
+        graphics.draw_text(
+            &format!("{}", health),
+            Vec2::new(100.0, 30.0),
+            20.0,
+            Color::WHITE,
+        );
 
         graphics.draw_text("Ammo:", Vec2::new(10.0, 60.0), 20.0, Color::WHITE);
-        graphics.draw_text(&format!("{}", ammo), Vec2::new(100.0, 60.0), 20.0, Color::WHITE);
+        graphics.draw_text(
+            &format!("{}", ammo),
+            Vec2::new(100.0, 60.0),
+            20.0,
+            Color::WHITE,
+        );
 
         graphics.draw_text("Enemies:", Vec2::new(10.0, 90.0), 20.0, Color::WHITE);
-        graphics.draw_text(&format!("{}", enemies_alive), Vec2::new(120.0, 90.0), 20.0, Color::WHITE);
+        graphics.draw_text(
+            &format!("{}", enemies_alive),
+            Vec2::new(120.0, 90.0),
+            20.0,
+            Color::WHITE,
+        );
     } else {
         graphics.draw_text(
             "YOU DIED",

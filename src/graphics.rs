@@ -1,8 +1,8 @@
+use crate::math::{Color, Vec2};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
-use crate::math::{Vec2, Color};
 
 #[cfg(target_arch = "wasm32")]
 pub struct Graphics {
@@ -44,18 +44,28 @@ impl Graphics {
 
     pub fn clear(&self, color: Color) {
         self.context.set_fill_style(&color.to_css_string().into());
-        self.context.fill_rect(0.0, 0.0, self.width() as f64, self.height() as f64);
+        self.context
+            .fill_rect(0.0, 0.0, self.width() as f64, self.height() as f64);
     }
 
     pub fn draw_rectangle(&self, pos: Vec2, width: f32, height: f32, color: Color) {
         self.context.set_fill_style(&color.to_css_string().into());
-        self.context.fill_rect(pos.x as f64, pos.y as f64, width as f64, height as f64);
+        self.context
+            .fill_rect(pos.x as f64, pos.y as f64, width as f64, height as f64);
     }
 
-    pub fn draw_rectangle_lines(&self, pos: Vec2, width: f32, height: f32, thickness: f32, color: Color) {
+    pub fn draw_rectangle_lines(
+        &self,
+        pos: Vec2,
+        width: f32,
+        height: f32,
+        thickness: f32,
+        color: Color,
+    ) {
         self.context.set_stroke_style(&color.to_css_string().into());
         self.context.set_line_width(thickness as f64);
-        self.context.stroke_rect(pos.x as f64, pos.y as f64, width as f64, height as f64);
+        self.context
+            .stroke_rect(pos.x as f64, pos.y as f64, width as f64, height as f64);
     }
 
     pub fn draw_circle(&self, center: Vec2, radius: f32, color: Color) {
@@ -82,7 +92,8 @@ impl Graphics {
 
     pub fn draw_text(&self, text: &str, pos: Vec2, font_size: f32, color: Color) {
         self.context.set_fill_style(&color.to_css_string().into());
-        self.context.set_font(&format!("{}px sans-serif", font_size));
+        self.context
+            .set_font(&format!("{}px sans-serif", font_size));
         let _ = self.context.fill_text(text, pos.x as f64, pos.y as f64);
     }
 }
