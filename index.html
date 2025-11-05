@@ -45,11 +45,14 @@
         <p>An open-source Hotline Miami clone in Rust</p>
     </div>
     <script type="module">
-        import init from './open_miami.js';
+        import init, { start } from './open_miami.js';
 
         async function run() {
             try {
+                // Initialize the WASM module
                 await init();
+                // Start the game
+                start();
                 document.getElementById('loading').style.display = 'none';
                 console.log('Game loaded successfully!');
             } catch (error) {

@@ -148,7 +148,7 @@ mod wasm_entry {
         }
     }
 
-    #[wasm_bindgen(start)]
+    #[wasm_bindgen]
     pub fn start() -> Result<(), JsValue> {
         // Setup input handlers
         input::setup_input_handlers()?;
