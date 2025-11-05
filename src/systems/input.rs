@@ -45,8 +45,8 @@ impl InputSystem {
             None => return,
         };
 
-        let mut move_x = 0.0;
-        let mut move_y = 0.0;
+        let mut move_x: f32 = 0.0;
+        let mut move_y: f32 = 0.0;
 
         if input::is_key_down(input::keys::W) || input::is_key_down(input::keys::ARROW_UP) {
             move_y -= 1.0;
