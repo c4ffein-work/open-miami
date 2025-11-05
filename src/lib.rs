@@ -1,3 +1,8 @@
+// Core modules
+pub mod math;
+pub mod graphics;
+pub mod input;
+
 // Library module for game logic (enables testing)
 pub mod components;
 pub mod ecs;

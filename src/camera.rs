@@ -1,4 +1,4 @@
-use macroquad::prelude::*;
+use crate::math::Vec2;
 
 pub struct Camera {
     pub target: Vec2,
@@ -9,8 +9,8 @@ pub struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            target: Vec2::ZERO,
-            offset: Vec2::ZERO,
+            target: Vec2::zero(),
+            offset: Vec2::zero(),
             zoom: 1.0,
         }
     }
@@ -26,26 +26,22 @@ impl Camera {
     }
 
     pub fn apply(&self) {
-        let offset_x = screen_width() / 2.0 - self.target.x;
-        let offset_y = screen_height() / 2.0 - self.target.y;
-
-        set_camera(&Camera2D {
-            target: self.target,
-            offset: vec2(-offset_x, -offset_y),
-            rotation: 0.0,
-            zoom: vec2(2.0 / screen_width(), 2.0 / screen_height()) * self.zoom,
-            ..Default::default()
-        });
+        // In a pure canvas implementation, we would apply transformations here
+        // For now, this is a placeholder for potential canvas transform operations
     }
 
     pub fn reset(&self) {
-        set_default_camera();
+        // Reset camera transformations
+        // Placeholder for canvas transform reset
     }
 
     pub fn screen_to_world(&self, screen_pos: Vec2) -> Vec2 {
-        let offset_x = screen_width() / 2.0 - self.target.x;
-        let offset_y = screen_height() / 2.0 - self.target.y;
+        // For now, we'll implement a simple screen-to-world conversion
+        // This assumes the camera is centered on the target
+        // In a full implementation, you'd apply the inverse of the camera transform
 
-        Vec2::new(screen_pos.x - offset_x, screen_pos.y - offset_y)
+        // Simplified version: just return screen_pos for now
+        // This can be enhanced later with proper transformation math
+        screen_pos
     }
 }

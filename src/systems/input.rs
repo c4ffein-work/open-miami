@@ -1,7 +1,8 @@
 use crate::components::{Player, Position, Rotation, Speed, Velocity, Weapon, WeaponType};
 use crate::ecs::{Entity, World};
+use crate::input;
+use crate::math::Vec2;
 use crate::systems::combat::CombatSystem;
-use macroquad::prelude::*;
 
 /// System that handles player input
 pub struct InputSystem;
@@ -47,16 +48,16 @@ impl InputSystem {
         let mut move_x = 0.0;
         let mut move_y = 0.0;
 
-        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
+        if input::is_key_down(input::keys::W) || input::is_key_down(input::keys::ARROW_UP) {
             move_y -= 1.0;
         }
-        if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down) {
+        if input::is_key_down(input::keys::S) || input::is_key_down(input::keys::ARROW_DOWN) {
             move_y += 1.0;
         }
-        if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
+        if input::is_key_down(input::keys::A) || input::is_key_down(input::keys::ARROW_LEFT) {
             move_x -= 1.0;
         }
-        if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
+        if input::is_key_down(input::keys::D) || input::is_key_down(input::keys::ARROW_RIGHT) {
             move_x += 1.0;
         }
 
@@ -75,7 +76,7 @@ impl InputSystem {
 
     /// Handle shooting input
     pub fn handle_shoot_input(world: &mut World, mouse_world_pos: Vec2) -> bool {
-        if !is_mouse_button_pressed(MouseButton::Left) {
+        if !input::is_mouse_button_down(input::mouse_buttons::LEFT) {
             return false;
         }
 
@@ -122,13 +123,13 @@ impl InputSystem {
             None => return,
         };
 
-        let new_weapon_type = if is_key_pressed(KeyCode::Key1) {
+        let new_weapon_type = if input::is_key_down("1") {
             Some(WeaponType::Pistol)
-        } else if is_key_pressed(KeyCode::Key2) {
+        } else if input::is_key_down("2") {
             Some(WeaponType::Shotgun)
-        } else if is_key_pressed(KeyCode::Key3) {
+        } else if input::is_key_down("3") {
             Some(WeaponType::MachineGun)
-        } else if is_key_pressed(KeyCode::Key4) {
+        } else if input::is_key_down("4") {
             Some(WeaponType::Melee)
         } else {
             None
@@ -142,12 +143,9 @@ impl InputSystem {
     }
 }
 
-// Note: Input system tests require mocking macroquad input, which is complex
-// We'll test this through integration tests instead
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::Enemy;
 
     #[test]
     fn test_find_player() {
@@ -165,7 +163,4 @@ mod tests {
         let found = InputSystem::find_player(&world);
         assert_eq!(found, None);
     }
-
-    // Additional input tests would require mocking macroquad's input system
-    // This is better tested through integration tests with the actual game loop
 }

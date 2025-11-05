@@ -14,4 +14,4 @@ pub use system::System;
 pub use world::World;
 
 // Re-export common types
-pub use macroquad::prelude::Vec2;
+pub use crate::math::Vec2;

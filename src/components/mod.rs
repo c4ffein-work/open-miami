@@ -1,5 +1,5 @@
 // Game Components - Pure data structures
-use macroquad::prelude::Vec2;
+use crate::math::Vec2;
 
 /// Position in 2D space
 #[derive(Debug, Clone, Copy, PartialEq)]

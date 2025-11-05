@@ -1,8 +1,8 @@
 // Integration tests for the complete game system
-use macroquad::prelude::Vec2;
 use open_miami::components::*;
 use open_miami::ecs::*;
 use open_miami::game::*;
+use open_miami::math::Vec2;
 use open_miami::systems::*;
 
 #[test]

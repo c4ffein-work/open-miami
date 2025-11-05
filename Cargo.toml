@@ -7,10 +7,22 @@ license = "MIT"
 description = "An open-source Hotline Miami clone in Rust for the browser"
 
 [dependencies]
-macroquad = "0.4"
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "console",
+    "KeyboardEvent",
+    "MouseEvent",
+    "Performance",
+] }
 
-[patch.crates-io]
-getrandom = { version = "0.2", features = ["js"] }
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 opt-level = 3
