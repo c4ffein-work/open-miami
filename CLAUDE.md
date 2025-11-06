@@ -17,3 +17,10 @@
 - E2E tests are excluded from `make verify` but can be run separately with `make verify-all`
 - The `make check-e2e` target will automatically install wasm-bindgen-cli if not present
 - E2E tests require the wasm32-unknown-unknown Rust target and Playwright dependencies
+
+#### **CRITICAL: E2E Test Timeout Enforcement**
+- **ALWAYS** run E2E tests via `make check-e2e` - this is the ONLY acceptable way to run these tests
+- **NEVER** run e2e tests directly with `npm test` or `playwright test` commands
+- The Makefile enforces a 20-second timeout to prevent tests from hanging indefinitely
+- Running tests without timeout can cause Claude Code instances to be terminated (they will be considered stuck)
+- Both the Playwright config and Makefile enforce this 20-second timeout for safety

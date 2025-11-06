@@ -7,6 +7,8 @@ module.exports = defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
+  timeout: 20000, // 20 second timeout per test
+  globalTimeout: 20000, // 20 second global timeout
 
   use: {
     baseURL: 'http://localhost:8000',
