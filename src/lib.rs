@@ -59,6 +59,7 @@ mod wasm_entry {
     enum GameScreen {
         LevelSelect,
         InGame,
+        Paused,
         Settings,
         About,
     }
@@ -70,10 +71,17 @@ mod wasm_entry {
         About,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PauseOption {
+        Continue,
+        Stop,
+    }
+
     struct GameState {
         screen: GameScreen,
         selected_level: usize,
         selected_menu_option: MenuOption,
+        selected_pause_option: PauseOption,
         world: World,
         movement_system: MovementSystem,
         weapon_system: WeaponUpdateSystem,
@@ -94,6 +102,7 @@ mod wasm_entry {
                 screen: GameScreen::LevelSelect,
                 selected_level: 0,
                 selected_menu_option: MenuOption::Play,
+                selected_pause_option: PauseOption::Continue,
                 world: World::new(),
                 movement_system: MovementSystem,
                 weapon_system: WeaponUpdateSystem,
@@ -111,7 +120,7 @@ mod wasm_entry {
 
         fn start_game(&mut self) {
             self.world.clear();
-            initialize_game(&mut self.world);
+            initialize_game(&mut self.world, self.selected_level);
             self.screen = GameScreen::InGame;
             self.death_time = 0.0;
             self.level_complete_time = 0.0;
@@ -135,6 +144,9 @@ mod wasm_entry {
                 GameScreen::InGame => {
                     self.update_game(graphics, dt);
                 }
+                GameScreen::Paused => {
+                    self.update_paused(graphics);
+                }
                 GameScreen::Settings => {
                     self.update_settings(graphics);
                 }
@@ -151,8 +163,11 @@ mod wasm_entry {
             let screen_width = graphics.width();
             let screen_height = graphics.height();
 
-            // Handle input
-            if input::is_key_pressed("ArrowLeft") {
+            // Handle input - Left (Arrow, A for QWERTY, Q for AZERTY)
+            if input::is_key_pressed("ArrowLeft")
+                || input::is_key_pressed("a")
+                || input::is_key_pressed("q")
+            {
                 if self.selected_menu_option == MenuOption::Play {
                     self.selected_level = if self.selected_level == 0 {
                         11
@@ -161,19 +176,25 @@ mod wasm_entry {
                     };
                 }
             }
-            if input::is_key_pressed("ArrowRight") {
+            // Handle input - Right (Arrow, D)
+            if input::is_key_pressed("ArrowRight") || input::is_key_pressed("d") {
                 if self.selected_menu_option == MenuOption::Play {
                     self.selected_level = (self.selected_level + 1) % 12;
                 }
             }
-            if input::is_key_pressed("ArrowDown") {
+            // Handle input - Down (Arrow, S)
+            if input::is_key_pressed("ArrowDown") || input::is_key_pressed("s") {
                 self.selected_menu_option = match self.selected_menu_option {
                     MenuOption::Play => MenuOption::Settings,
                     MenuOption::Settings => MenuOption::About,
                     MenuOption::About => MenuOption::Play,
                 };
             }
-            if input::is_key_pressed("ArrowUp") {
+            // Handle input - Up (Arrow, W for QWERTY, Z for AZERTY)
+            if input::is_key_pressed("ArrowUp")
+                || input::is_key_pressed("w")
+                || input::is_key_pressed("z")
+            {
                 self.selected_menu_option = match self.selected_menu_option {
                     MenuOption::Play => MenuOption::About,
                     MenuOption::Settings => MenuOption::Play,
@@ -280,8 +301,8 @@ mod wasm_entry {
 
             // Controls hint
             graphics.draw_text(
-                "Arrow Keys to navigate | Enter to select",
-                Vec2::new(screen_width / 2.0 - 200.0, screen_height - 40.0),
+                "Arrow Keys or WASD/ZQSD to navigate | Enter to select",
+                Vec2::new(screen_width / 2.0 - 280.0, screen_height - 40.0),
                 16.0,
                 Color::GRAY,
             );
@@ -367,6 +388,96 @@ mod wasm_entry {
             );
         }
 
+        fn update_paused(&mut self, graphics: &Graphics) {
+            let screen_width = graphics.width();
+            let screen_height = graphics.height();
+
+            // Handle input - ESC to resume
+            if input::is_key_pressed("Escape") {
+                self.screen = GameScreen::InGame;
+                return;
+            }
+
+            // Handle arrow keys and WASD/ZQSD
+            if input::is_key_pressed("ArrowDown")
+                || input::is_key_pressed("ArrowUp")
+                || input::is_key_pressed("w")
+                || input::is_key_pressed("z")
+                || input::is_key_pressed("s")
+            {
+                self.selected_pause_option = match self.selected_pause_option {
+                    PauseOption::Continue => PauseOption::Stop,
+                    PauseOption::Stop => PauseOption::Continue,
+                };
+            }
+
+            // Handle Enter
+            if input::is_key_pressed("Enter") {
+                match self.selected_pause_option {
+                    PauseOption::Continue => {
+                        self.screen = GameScreen::InGame;
+                        return;
+                    }
+                    PauseOption::Stop => {
+                        self.screen = GameScreen::LevelSelect;
+                        return;
+                    }
+                }
+            }
+
+            // Render semi-transparent overlay
+            graphics.draw_rectangle(
+                Vec2::new(0.0, 0.0),
+                screen_width,
+                screen_height,
+                Color::new(0.0, 0.0, 0.0, 0.7),
+            );
+
+            // Render title
+            graphics.draw_text(
+                "PAUSED",
+                Vec2::new(screen_width / 2.0 - 100.0, 100.0),
+                60.0,
+                Color::new(1.0, 0.09, 0.26, 1.0),
+            );
+
+            // Render menu options
+            let menu_y = screen_height / 2.0;
+            let menu_spacing = 60.0;
+
+            let continue_color = if self.selected_pause_option == PauseOption::Continue {
+                Color::new(1.0, 0.09, 0.26, 1.0)
+            } else {
+                Color::WHITE
+            };
+            graphics.draw_text(
+                "Keep going.",
+                Vec2::new(screen_width / 2.0 - 80.0, menu_y),
+                30.0,
+                continue_color,
+            );
+
+            let stop_color = if self.selected_pause_option == PauseOption::Stop {
+                Color::new(1.0, 0.09, 0.26, 1.0)
+            } else {
+                Color::WHITE
+            };
+            graphics.draw_text(
+                "STOP!",
+                Vec2::new(screen_width / 2.0 - 40.0, menu_y + menu_spacing),
+                30.0,
+                stop_color,
+            );
+
+            // Controls hint
+            graphics.draw_text(
+                "WASD/ZQSD/Arrows to navigate | Enter to select | ESC to resume",
+                Vec2::new(screen_width / 2.0 - 320.0, screen_height - 40.0),
+                16.0,
+                Color::GRAY,
+            );
+        }
+
         fn update_game(&mut self, graphics: &Graphics, dt: f32) {
             // Get player state for UI and camera
             let player_alive = is_player_alive(&self.world);
@@ -443,14 +554,15 @@ mod wasm_entry {
             // Handle restart
             if !player_alive && input::is_key_down("r") {
                 self.world.clear();
-                initialize_game(&mut self.world);
+                initialize_game(&mut self.world, self.selected_level);
                 self.death_time = 0.0;
                 self.level_complete_time = 0.0;
             }
 
-            // Handle escape to return to menu
+            // Handle escape to open pause menu
             if input::is_key_pressed("Escape") {
-                self.screen = GameScreen::LevelSelect;
+                self.selected_pause_option = PauseOption::Continue;
+                self.screen = GameScreen::Paused;
             }
         }
     }

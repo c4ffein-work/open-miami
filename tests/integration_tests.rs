@@ -27,7 +27,7 @@ fn test_enemy_spawning() {
 #[test]
 fn test_full_game_initialization() {
     let mut world = World::new();
-    initialize_game(&mut world);
+    initialize_game(&mut world, 0);
 
     assert_eq!(world.query::<Player>().len(), 1);
     assert_eq!(world.query::<Enemy>().len(), 4);
@@ -175,7 +175,7 @@ fn test_enemy_attacks_player() {
 #[test]
 fn test_complete_game_scenario_player_clears_room() {
     let mut world = World::new();
-    initialize_game(&mut world);
+    initialize_game(&mut world, 0);
 
     assert_eq!(count_alive_enemies(&world), 4);
 
@@ -233,7 +233,7 @@ fn test_melee_attack_hits_in_range() {
 #[test]
 fn test_multiple_systems_integration() {
     let mut world = World::new();
-    initialize_game(&mut world);
+    initialize_game(&mut world, 0);
 
     let mut movement_system = MovementSystem;
     let mut ai_system = AISystem;
@@ -256,7 +256,7 @@ fn test_multiple_systems_integration() {
 #[test]
 fn test_world_clear_and_reinitialize() {
     let mut world = World::new();
-    initialize_game(&mut world);
+    initialize_game(&mut world, 0);
 
     assert_eq!(world.query::<Player>().len(), 1);
     assert_eq!(world.query::<Enemy>().len(), 4);
@@ -266,7 +266,7 @@ fn test_world_clear_and_reinitialize() {
     assert_eq!(world.query::<Player>().len(), 0);
     assert_eq!(world.query::<Enemy>().len(), 0);
 
-    initialize_game(&mut world);
+    initialize_game(&mut world, 0);
 
     assert_eq!(world.query::<Player>().len(), 1);
     assert_eq!(world.query::<Enemy>().len(), 4);
