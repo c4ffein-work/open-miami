@@ -1,4 +1,4 @@
-use crate::components::{AIState, Enemy, Player, Position, Speed, Velocity, AI};
+use crate::components::{AIState, Enemy, Health, Player, Position, Speed, Velocity, AI};
 use crate::ecs::{Entity, System, World};
 use crate::pathfinding::NavigationGrid;
 
@@ -52,14 +52,25 @@ impl System for AISystem {
         let enemies: Vec<Entity> = world.query::<Enemy>();
 
         for entity in enemies {
-            let (enemy_pos, _ai, speed) = match (
+            let (enemy_pos, _ai, speed, health) = match (
                 world.get_component::<Position>(entity),
                 world.get_component::<AI>(entity),
                 world.get_component::<Speed>(entity),
+                world.get_component::<Health>(entity),
             ) {
-                (Some(pos), Some(ai), Some(spd)) => (*pos, *ai, *spd),
+                (Some(pos), Some(ai), Some(spd), Some(hp)) => (*pos, *ai, *spd, *hp),
                 _ => continue,
             };
+
+            // Skip dead enemies
+            if health.is_dead() {
+                // Set velocity to zero for dead enemies
+                if let Some(velocity) = world.get_component_mut::<Velocity>(entity) {
+                    velocity.x = 0.0;
+                    velocity.y = 0.0;
+                }
+                continue;
+            }
 
             // Calculate distance to player
             let distance = enemy_pos.distance_to(&player_pos);
@@ -143,6 +154,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -170,6 +182,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -198,6 +211,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -226,6 +240,7 @@ mod tests {
         world.add_component(enemy, ai);
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.5);
@@ -250,6 +265,7 @@ mod tests {
             world.add_component(enemy, AI::new());
             world.add_component(enemy, Velocity::zero());
             world.add_component(enemy, Speed::new(100.0));
+            world.add_component(enemy, Health::new(100));
         }
 
         let mut system = AISystem;
@@ -278,6 +294,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -316,6 +333,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -351,6 +369,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -386,6 +405,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -417,6 +437,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         // Get initial distance
         let initial_pos = *world.get_component::<Position>(enemy).unwrap();
@@ -466,6 +487,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -498,6 +520,7 @@ mod tests {
         world.add_component(slow_enemy, AI::new());
         world.add_component(slow_enemy, Velocity::zero());
         world.add_component(slow_enemy, Speed::new(50.0));
+        world.add_component(slow_enemy, Health::new(100));
 
         // Create fast enemy
         let fast_enemy = world.spawn();
@@ -506,6 +529,7 @@ mod tests {
         world.add_component(fast_enemy, AI::new());
         world.add_component(fast_enemy, Velocity::zero());
         world.add_component(fast_enemy, Speed::new(200.0));
+        world.add_component(fast_enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);
@@ -549,6 +573,7 @@ mod tests {
         world.add_component(enemy, AI::new());
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
 
         let mut system = AISystem;
         system.run(&mut world, 0.016);

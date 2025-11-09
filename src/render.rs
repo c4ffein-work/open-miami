@@ -6,11 +6,37 @@ use crate::math::{Color, Vec2};
 
 /// Render all entities in the world
 pub fn render_entities(world: &World, graphics: &Graphics) {
-    // Render enemies first (so player appears on top)
+    // Render projectile trails first (behind everything)
+    render_projectile_trails(world, graphics);
+
+    // Render enemies
     render_enemies(world, graphics);
 
-    // Render player
+    // Render player (on top)
     render_player(world, graphics);
+}
+
+/// Render projectile trails
+fn render_projectile_trails(world: &World, graphics: &Graphics) {
+    let trails: Vec<Entity> = world.query::<ProjectileTrail>();
+
+    for entity in trails {
+        let trail = match world.get_component::<ProjectileTrail>(entity) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Calculate alpha based on remaining lifetime (fade out effect)
+        let alpha = trail.alpha();
+        let color = Color::new(1.0, 0.9, 0.3, alpha); // Yellow-ish color with fade
+
+        graphics.draw_line(
+            Vec2::new(trail.start.x, trail.start.y),
+            Vec2::new(trail.end.x, trail.end.y),
+            2.0, // Line width
+            color,
+        );
+    }
 }
 
 /// Render all enemies

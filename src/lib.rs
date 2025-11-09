@@ -61,6 +61,7 @@ mod wasm_entry {
         weapon_system: WeaponUpdateSystem,
         ai_system: AISystem,
         combat_system: CombatSystem,
+        projectile_system: ProjectileTrailSystem,
         level: Level,
         camera: Camera,
         last_time: f64,
@@ -77,6 +78,7 @@ mod wasm_entry {
                 weapon_system: WeaponUpdateSystem,
                 ai_system: AISystem,
                 combat_system: CombatSystem,
+                projectile_system: ProjectileTrailSystem,
                 level: Level::new(),
                 camera: Camera::new(),
                 last_time: 0.0,
@@ -120,6 +122,7 @@ mod wasm_entry {
             self.ai_system.run(&mut self.world, dt);
             self.movement_system.run(&mut self.world, dt);
             self.combat_system.run(&mut self.world, dt);
+            self.projectile_system.run(&mut self.world, dt);
 
             // Apply camera transform for world rendering
             self.camera.apply();

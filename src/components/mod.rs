@@ -179,6 +179,34 @@ pub struct Weapon {
     pub fire_timer: f32,
 }
 
+/// Projectile trail for visual feedback
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileTrail {
+    pub start: Position,
+    pub end: Position,
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+}
+
+impl ProjectileTrail {
+    pub fn new(start: Position, end: Position) -> Self {
+        ProjectileTrail {
+            start,
+            end,
+            lifetime: 0.15, // 150ms trail
+            max_lifetime: 0.15,
+        }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.lifetime > 0.0
+    }
+
+    pub fn alpha(&self) -> f32 {
+        self.lifetime / self.max_lifetime
+    }
+}
+
 impl Weapon {
     pub fn new(weapon_type: WeaponType) -> Self {
         let (damage, max_ammo, fire_rate) = match weapon_type {

@@ -1,4 +1,6 @@
-use crate::components::{Player, Position, Rotation, Speed, Velocity, Weapon, WeaponType};
+use crate::components::{
+    Player, Position, ProjectileTrail, Rotation, Speed, Velocity, Weapon, WeaponType,
+};
 use crate::ecs::{Entity, World};
 use crate::input;
 use crate::math::Vec2;
@@ -109,11 +111,17 @@ impl InputSystem {
         let target_pos = Position::from_vec2(mouse_world_pos);
 
         // Process attack
-        if is_melee {
+        let hit = if is_melee {
             CombatSystem::process_melee(world, player_pos, target_pos, damage, 50.0)
         } else {
+            // Spawn projectile trail for visual feedback
+            let trail_entity = world.spawn();
+            world.add_component(trail_entity, ProjectileTrail::new(player_pos, target_pos));
+
             CombatSystem::process_shoot(world, player_pos, target_pos, damage)
-        }
+        };
+
+        hit
     }
 
     /// Handle weapon switching (1-4 keys)
