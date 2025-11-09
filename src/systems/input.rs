@@ -1,6 +1,5 @@
 use crate::components::{
-    Bullet, Player, Position, ProjectileTrail, Radius, Rotation, Speed, Velocity, Weapon,
-    WeaponType,
+    Bullet, Player, Position, Radius, Rotation, Speed, Velocity, Weapon, WeaponType,
 };
 use crate::ecs::{Entity, World};
 use crate::input;

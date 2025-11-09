@@ -143,6 +143,11 @@ mod wasm_entry {
             // Reset camera for UI rendering
             self.camera.reset(graphics);
 
+            // Get game state for UI
+            let health = get_player_health(&self.world);
+            let ammo = get_player_ammo(&self.world);
+            let enemies_alive = count_alive_enemies(&self.world);
+
             // Track death time and level complete time
             if !player_alive {
                 self.death_time += dt;
@@ -158,8 +163,6 @@ mod wasm_entry {
             }
 
             // Render UI
-            let health = get_player_health(&self.world);
-            let ammo = get_player_ammo(&self.world);
             render_ui(
                 graphics,
                 health,
