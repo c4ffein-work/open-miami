@@ -50,31 +50,51 @@
     <script type="module">
         // Cache busting - add version timestamp
         const version = Date.now();
-        import(`./open_miami.js?v=${version}`).then(async ({ default: init, start }) => {
-            async function run() {
-                try {
-                    // Initialize the WASM module
-                    await init();
-                    // Ensure DOM is loaded before starting game
-                    console.log('Canvas element:', document.getElementById('glcanvas'));
-                    // Start the game
-                    start();
-                    document.getElementById('loading').style.display = 'none';
-                    console.log('Game loaded successfully!');
-                } catch (error) {
-                    console.error('Failed to load game:', error);
-                    document.getElementById('loading').textContent = 'Failed to load game. Check console for details.';
-                    document.getElementById('loading').style.color = '#ff0000';
-                }
-            }
+        console.log('Starting to load game module...');
 
-            // Wait for DOM to be fully loaded
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', run);
-            } else {
-                run();
-            }
-        });
+        import(`./open_miami.js?v=${version}`)
+            .then(async ({ default: init, start }) => {
+                console.log('Module loaded successfully, init:', typeof init, 'start:', typeof start);
+
+                async function run() {
+                    try {
+                        console.log('Starting WASM initialization...');
+                        // Initialize the WASM module
+                        await init();
+                        console.log('WASM initialized successfully!');
+
+                        // Ensure DOM is loaded before starting game
+                        console.log('Canvas element:', document.getElementById('glcanvas'));
+
+                        // Start the game
+                        console.log('Starting game loop...');
+                        start();
+
+                        document.getElementById('loading').style.display = 'none';
+                        console.log('Game loaded successfully!');
+                    } catch (error) {
+                        console.error('Failed to load game:', error);
+                        console.error('Error stack:', error.stack);
+                        document.getElementById('loading').textContent = 'Failed to load game. Check console for details.';
+                        document.getElementById('loading').style.color = '#ff0000';
+                    }
+                }
+
+                // Wait for DOM to be fully loaded
+                if (document.readyState === 'loading') {
+                    console.log('Waiting for DOMContentLoaded...');
+                    document.addEventListener('DOMContentLoaded', run);
+                } else {
+                    console.log('DOM already loaded, running now...');
+                    run();
+                }
+            })
+            .catch(error => {
+                console.error('Failed to load module:', error);
+                console.error('Error stack:', error.stack);
+                document.getElementById('loading').textContent = 'Failed to load module. Check console for details.';
+                document.getElementById('loading').style.color = '#ff0000';
+            });
     </script>
 </body>
 </html>

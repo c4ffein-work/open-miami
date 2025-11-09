@@ -163,14 +163,28 @@ test.describe('Open Miami - Level Completion', () => {
 
   test('game loads without errors', async ({ page }) => {
     const errors = [];
-    page.on('pageerror', error => errors.push(error.message));
+    const logs = [];
+
+    page.on('pageerror', error => {
+      console.log('[PAGE ERROR]:', error.message);
+      errors.push(error.message);
+    });
+
     page.on('console', msg => {
+      const text = msg.text();
+      console.log(`[CONSOLE ${msg.type()}]:`, text);
+      logs.push(text);
       if (msg.type() === 'error') {
-        errors.push(msg.text());
+        errors.push(text);
       }
     });
 
     await page.goto('/');
+    await page.waitForTimeout(1000); // Give it a moment to start loading
+
+    console.log('Console logs so far:', logs);
+    console.log('Errors so far:', errors);
+
     await page.waitForSelector('canvas#glcanvas', { timeout: 10000 });
     await page.waitForTimeout(3000);
 

@@ -42,7 +42,7 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
     keyup_closure.forget();
 
     // Mouse handlers
-    let canvas = document.get_element_by_id("canvas").ok_or("No canvas")?;
+    let canvas = document.get_element_by_id("glcanvas").ok_or("No canvas")?;
 
     let mousemove_closure = Closure::wrap(Box::new(|event: MouseEvent| {
         let x = event.offset_x() as f32;
