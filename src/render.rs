@@ -108,22 +108,24 @@ fn render_enemies(world: &World, graphics: &Graphics) {
     let enemies: Vec<Entity> = world.query::<Enemy>();
 
     for entity in enemies {
-        let (pos, radius, health) = match (
+        let (pos, rotation, health) = match (
             world.get_component::<Position>(entity),
-            world.get_component::<Radius>(entity),
+            world.get_component::<Rotation>(entity),
             world.get_component::<Health>(entity),
         ) {
             (Some(p), Some(r), Some(h)) => (p, r, h),
             _ => continue,
         };
 
-        let color = if health.is_alive() {
-            Color::RED
-        } else {
-            Color::new(100.0 / 255.0, 0.0, 0.0, 1.0) // Dark red for dead
-        };
+        let base_color = Color::RED;
+        let is_dead = health.is_dead();
 
-        graphics.draw_circle(Vec2::new(pos.x, pos.y), radius.value, color);
+        graphics.draw_pixelated_sprite(
+            Vec2::new(pos.x, pos.y),
+            rotation.angle,
+            base_color,
+            is_dead,
+        );
     }
 }
 
@@ -151,18 +153,13 @@ fn render_player(world: &World, graphics: &Graphics) {
         .unwrap_or(0);
 
     if health > 0 {
-        // Draw player body
-        graphics.draw_circle(Vec2::new(pos.x, pos.y), 15.0, Color::BLUE);
-
-        // Draw direction indicator
-        let dir_len = 20.0;
-        let end_x = pos.x + rotation.cos() * dir_len;
-        let end_y = pos.y + rotation.sin() * dir_len;
-        graphics.draw_line(
+        // Draw player as pixelated sprite
+        let base_color = Color::BLUE;
+        graphics.draw_pixelated_sprite(
             Vec2::new(pos.x, pos.y),
-            Vec2::new(end_x, end_y),
-            3.0,
-            Color::WHITE,
+            rotation,
+            base_color,
+            false, // Player is alive
         );
     }
 }

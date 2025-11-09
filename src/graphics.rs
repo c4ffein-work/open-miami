@@ -138,4 +138,104 @@ impl Graphics {
     pub fn translate(&self, x: f32, y: f32) {
         let _ = self.context.translate(x as f64, y as f64);
     }
+
+    /// Rotate the canvas around the current origin
+    pub fn rotate(&self, angle: f32) {
+        let _ = self.context.rotate(angle as f64);
+    }
+
+    /// Draw a pixelated sprite (top-down humanoid)
+    /// Draws a simple pixel-art character facing upward (rotation should be applied externally)
+    pub fn draw_pixelated_sprite(
+        &self,
+        center: Vec2,
+        rotation: f32,
+        base_color: Color,
+        dead: bool,
+    ) {
+        self.save();
+
+        // Translate to center and rotate
+        self.translate(center.x, center.y);
+        self.rotate(rotation);
+
+        let pixel_size = 3.0; // Size of each "pixel"
+
+        // Create a simple top-down humanoid shape
+        // The sprite faces "up" (negative Y) in local coordinates
+
+        let body_color = if dead {
+            Color::new(
+                base_color.r * 0.4,
+                base_color.g * 0.4,
+                base_color.b * 0.4,
+                base_color.a,
+            )
+        } else {
+            base_color
+        };
+
+        let dark_color = Color::new(
+            body_color.r * 0.7,
+            body_color.g * 0.7,
+            body_color.b * 0.7,
+            body_color.a,
+        );
+
+        // Head (front of character)
+        self.draw_rectangle(
+            Vec2::new(-pixel_size, -pixel_size * 3.0),
+            pixel_size * 2.0,
+            pixel_size * 2.0,
+            body_color,
+        );
+
+        // Body/torso
+        self.draw_rectangle(
+            Vec2::new(-pixel_size * 1.5, -pixel_size),
+            pixel_size * 3.0,
+            pixel_size * 3.0,
+            body_color,
+        );
+
+        // Arms (shoulders)
+        self.draw_rectangle(
+            Vec2::new(-pixel_size * 2.5, -pixel_size * 0.5),
+            pixel_size,
+            pixel_size * 2.0,
+            dark_color,
+        ); // Left arm
+        self.draw_rectangle(
+            Vec2::new(pixel_size * 1.5, -pixel_size * 0.5),
+            pixel_size,
+            pixel_size * 2.0,
+            dark_color,
+        ); // Right arm
+
+        // Legs
+        self.draw_rectangle(
+            Vec2::new(-pixel_size * 1.0, pixel_size * 2.0),
+            pixel_size,
+            pixel_size * 2.0,
+            dark_color,
+        ); // Left leg
+        self.draw_rectangle(
+            Vec2::new(pixel_size * 0.0, pixel_size * 2.0),
+            pixel_size,
+            pixel_size * 2.0,
+            dark_color,
+        ); // Right leg
+
+        // Direction indicator (small dot at head)
+        if !dead {
+            self.draw_rectangle(
+                Vec2::new(-pixel_size * 0.5, -pixel_size * 4.5),
+                pixel_size,
+                pixel_size,
+                Color::WHITE,
+            );
+        }
+
+        self.restore();
+    }
 }

@@ -1,5 +1,8 @@
+use crate::collision::has_line_of_sight;
 use crate::components::{AIState, Enemy, Health, Player, Position, Rotation, Speed, Velocity, AI};
+use crate::ecs::world::Wall;
 use crate::ecs::{Entity, System, World};
+use crate::math::Vec2;
 use crate::pathfinding::NavigationGrid;
 
 /// System that handles enemy AI behavior
@@ -14,10 +17,19 @@ impl AISystem {
             .copied()
     }
 
-    fn update_ai_state(ai: &mut AI, distance: f32) {
-        ai.state = if distance < ai.attack_range {
+    fn update_ai_state(
+        ai: &mut AI,
+        distance: f32,
+        enemy_pos: Vec2,
+        player_pos: Vec2,
+        walls: &[Wall],
+    ) {
+        // Only detect player if there's line of sight (no walls blocking)
+        let has_los = has_line_of_sight(enemy_pos, player_pos, walls);
+
+        ai.state = if has_los && distance < ai.attack_range {
             AIState::Attack
-        } else if distance < ai.detection_range {
+        } else if has_los && distance < ai.detection_range {
             AIState::Chase
         } else {
             AIState::Idle
@@ -45,8 +57,11 @@ impl System for AISystem {
             None => return, // No player, nothing to do
         };
 
+        // Get walls before any mutable borrows (clone to avoid borrow conflicts)
+        let walls: Vec<Wall> = world.walls().to_vec();
+
         // Create navigation grid from world walls
-        let nav_grid = NavigationGrid::new(world.walls());
+        let nav_grid = NavigationGrid::new(&walls);
 
         // Query all enemies with AI, Position, Velocity, and Speed
         let enemies: Vec<Entity> = world.query::<Enemy>();
@@ -75,9 +90,15 @@ impl System for AISystem {
             // Calculate distance to player
             let distance = enemy_pos.distance_to(&player_pos);
 
-            // Update AI state
+            // Update AI state with line-of-sight check
             if let Some(ai) = world.get_component_mut::<AI>(entity) {
-                Self::update_ai_state(ai, distance);
+                Self::update_ai_state(
+                    ai,
+                    distance,
+                    enemy_pos.to_vec2(),
+                    player_pos.to_vec2(),
+                    &walls,
+                );
 
                 // Update attack timer
                 if ai.attack_timer > 0.0 {
@@ -332,7 +353,7 @@ mod tests {
         // Add a vertical wall between enemy and player
         world.add_wall(250.0, 0.0, 20.0, 300.0);
 
-        // Create player on right side of wall (within detection range)
+        // Create player on right side of wall (within detection range but no line of sight)
         let player = world.spawn();
         world.add_component(player, Player);
         world.add_component(player, Position::new(350.0, 150.0));
@@ -349,13 +370,14 @@ mod tests {
         let mut system = AISystem;
         system.run(&mut world, 0.016);
 
-        // Enemy should be in Chase state
+        // Enemy should NOT detect player (line of sight blocked by wall)
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Chase);
+        assert_eq!(ai.state, AIState::Idle);
 
-        // Enemy should be moving (pathfinding around wall)
+        // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
-        assert!(velocity.x.abs() > 0.0 || velocity.y.abs() > 0.0);
+        assert_eq!(velocity.x, 0.0);
+        assert_eq!(velocity.y, 0.0);
     }
 
     #[test]
@@ -368,12 +390,12 @@ mod tests {
         world.add_wall(200.0, 200.0, 400.0, 20.0); // Horizontal wall
         world.add_wall(200.0, 200.0, 20.0, 200.0); // Vertical wall
 
-        // Create player in the corner
+        // Create player in the corner (line of sight blocked by walls)
         let player = world.spawn();
         world.add_component(player, Player);
         world.add_component(player, Position::new(100.0, 300.0));
 
-        // Create enemy outside the corner (within detection range)
+        // Create enemy outside the corner (within detection range but no line of sight)
         let enemy = world.spawn();
         world.add_component(enemy, Enemy);
         world.add_component(enemy, Position::new(300.0, 100.0));
@@ -385,13 +407,14 @@ mod tests {
         let mut system = AISystem;
         system.run(&mut world, 0.016);
 
-        // Enemy should be chasing
+        // Enemy should NOT detect player (line of sight blocked by walls)
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Chase);
+        assert_eq!(ai.state, AIState::Idle);
 
-        // Enemy should be moving
+        // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
-        assert!(velocity.x.abs() > 0.0 || velocity.y.abs() > 0.0);
+        assert_eq!(velocity.x, 0.0);
+        assert_eq!(velocity.y, 0.0);
     }
 
     #[test]
@@ -404,7 +427,7 @@ mod tests {
         world.add_wall(200.0, 0.0, 20.0, 300.0);
         world.add_wall(400.0, 200.0, 20.0, 400.0);
 
-        // Create player (within detection range)
+        // Create player (within detection range but line of sight blocked by walls)
         let player = world.spawn();
         world.add_component(player, Player);
         world.add_component(player, Position::new(350.0, 250.0));
@@ -421,13 +444,14 @@ mod tests {
         let mut system = AISystem;
         system.run(&mut world, 0.016);
 
-        // Enemy should be chasing
+        // Enemy should NOT detect player (line of sight blocked by walls)
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Chase);
+        assert_eq!(ai.state, AIState::Idle);
 
-        // Enemy should be moving
+        // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
-        assert!(velocity.x.abs() > 0.0 || velocity.y.abs() > 0.0);
+        assert_eq!(velocity.x, 0.0);
+        assert_eq!(velocity.y, 0.0);
     }
 
     #[test]
@@ -564,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ai_pathfinding_sees_through_walls() {
+    fn test_ai_pathfinding_blocked_by_walls() {
         use crate::ecs::world::World;
 
         let mut world = World::new();
@@ -572,7 +596,7 @@ mod tests {
         // Add a wall between enemy and player
         world.add_wall(250.0, 0.0, 20.0, 500.0);
 
-        // Create player on other side of wall (within detection range)
+        // Create player on other side of wall (within detection range but no line of sight)
         let player = world.spawn();
         world.add_component(player, Player);
         world.add_component(player, Position::new(350.0, 250.0));
@@ -589,13 +613,14 @@ mod tests {
         let mut system = AISystem;
         system.run(&mut world, 0.016);
 
-        // Enemy should detect player through wall (no line of sight check)
-        // and enter Chase state
+        // Enemy should NOT detect player through wall (line of sight blocked)
+        // and remain Idle
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Chase);
+        assert_eq!(ai.state, AIState::Idle);
 
-        // Enemy should be moving to path around the wall
+        // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
-        assert!(velocity.x.abs() > 0.0 || velocity.y.abs() > 0.0);
+        assert_eq!(velocity.x, 0.0);
+        assert_eq!(velocity.y, 0.0);
     }
 }
