@@ -44,27 +44,6 @@ impl Level {
             }
         }
 
-        // Draw some walls/obstacles
-        self.draw_wall(graphics, 200.0, 200.0, 400.0, 20.0);
-        self.draw_wall(graphics, 200.0, 200.0, 20.0, 200.0);
-        self.draw_wall(graphics, 800.0, 300.0, 20.0, 300.0);
-        self.draw_wall(graphics, 400.0, 600.0, 300.0, 20.0);
-    }
-
-    fn draw_wall(&self, graphics: &Graphics, x: f32, y: f32, width: f32, height: f32) {
-        graphics.draw_rectangle(
-            Vec2::new(x, y),
-            width,
-            height,
-            Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
-        );
-        // Border for visual depth
-        graphics.draw_rectangle_lines(
-            Vec2::new(x, y),
-            width,
-            height,
-            2.0,
-            Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
-        );
+        // Walls are now rendered from the World via render_walls()
     }
 }

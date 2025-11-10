@@ -514,6 +514,9 @@ mod wasm_entry {
             // Render level
             self.level.render(graphics);
 
+            // Render walls from the world
+            render_walls(&self.world, graphics);
+
             // Render all entities
             render_entities(&self.world, graphics);
 

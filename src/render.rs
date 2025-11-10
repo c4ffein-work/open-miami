@@ -22,6 +22,27 @@ pub fn render_entities(world: &World, graphics: &Graphics) {
     render_player(world, graphics);
 }
 
+/// Render walls from the world
+pub fn render_walls(world: &World, graphics: &Graphics) {
+    for wall in world.walls() {
+        // Draw wall with dark purple color
+        graphics.draw_rectangle(
+            Vec2::new(wall.x, wall.y),
+            wall.width,
+            wall.height,
+            Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
+        );
+        // Border for visual depth
+        graphics.draw_rectangle_lines(
+            Vec2::new(wall.x, wall.y),
+            wall.width,
+            wall.height,
+            2.0,
+            Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
+        );
+    }
+}
+
 /// Render enemy vision cones
 fn render_enemy_vision_cones(world: &World, graphics: &Graphics) {
     let enemies: Vec<Entity> = world.query::<Enemy>();
