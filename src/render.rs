@@ -5,9 +5,9 @@ use crate::graphics::Graphics;
 use crate::math::{Color, Vec2};
 
 /// Render all entities in the world
-pub fn render_entities(world: &World, graphics: &Graphics, show_debug_infos: bool) {
-    // Render vision cones first (behind everything) - only if debug info is enabled
-    if show_debug_infos {
+pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
+    // Render vision cones first (behind everything) - only if info display is enabled
+    if show_infos {
         render_enemy_vision_cones(world, graphics);
     }
 
@@ -198,7 +198,7 @@ pub fn render_ui(
     level_complete: bool,
     level_complete_time: f32,
     debug_enabled: bool,
-    show_debug_infos: bool,
+    show_infos: bool,
 ) {
     let screen_width = graphics.width();
     let screen_height = graphics.height();
@@ -302,23 +302,23 @@ pub fn render_ui(
         }
     }
 
-    // Debug info display
+    // Info display indicator
     if debug_enabled {
-        let debug_text = if show_debug_infos {
-            "Debug: ON (Press D to toggle)"
+        let info_text = if show_infos {
+            "Infos: ON (Press I to toggle)"
         } else {
-            "Debug: OFF (Press D to toggle)"
+            "Infos: OFF (Press I to toggle)"
         };
-        let debug_color = if show_debug_infos {
+        let info_color = if show_infos {
             Color::new(0.0, 1.0, 0.0, 1.0) // Green when active
         } else {
             Color::GRAY // Gray when inactive
         };
         graphics.draw_text(
-            debug_text,
+            info_text,
             Vec2::new(screen_width - 280.0, 30.0),
             16.0,
-            debug_color,
+            info_color,
         );
     }
 

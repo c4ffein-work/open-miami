@@ -95,7 +95,7 @@ mod wasm_entry {
         death_time: f32,
         level_complete_time: f32,
         debug_enabled: bool,
-        show_debug_infos: bool,
+        show_infos: bool,
     }
 
     impl GameState {
@@ -118,7 +118,7 @@ mod wasm_entry {
                 death_time: 0.0,
                 level_complete_time: 0.0,
                 debug_enabled: true,
-                show_debug_infos: false,
+                show_infos: false,
             }
         }
 
@@ -504,9 +504,9 @@ mod wasm_entry {
                 InputSystem::handle_weapon_switch(&mut self.world);
             }
 
-            // Handle debug info toggle
-            if self.debug_enabled && input::is_key_pressed("d") {
-                self.show_debug_infos = !self.show_debug_infos;
+            // Handle info display toggle
+            if self.debug_enabled && input::is_key_pressed("i") {
+                self.show_infos = !self.show_infos;
             }
 
             // Run game systems
@@ -527,7 +527,7 @@ mod wasm_entry {
             render_walls(&self.world, graphics);
 
             // Render all entities
-            render_entities(&self.world, graphics, self.show_debug_infos);
+            render_entities(&self.world, graphics, self.show_infos);
 
             // Reset camera for UI rendering
             self.camera.reset(graphics);
@@ -562,7 +562,7 @@ mod wasm_entry {
                 level_complete,
                 self.level_complete_time,
                 self.debug_enabled,
-                self.show_debug_infos,
+                self.show_infos,
             );
 
             // Handle restart
