@@ -5,9 +5,11 @@ use crate::graphics::Graphics;
 use crate::math::{Color, Vec2};
 
 /// Render all entities in the world
-pub fn render_entities(world: &World, graphics: &Graphics) {
-    // Render vision cones first (behind everything)
-    render_enemy_vision_cones(world, graphics);
+pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
+    // Render vision cones first (behind everything) - only if info display is enabled
+    if show_infos {
+        render_enemy_vision_cones(world, graphics);
+    }
 
     // Render projectile trails
     render_projectile_trails(world, graphics);
@@ -20,6 +22,27 @@ pub fn render_entities(world: &World, graphics: &Graphics) {
 
     // Render player (on top)
     render_player(world, graphics);
+}
+
+/// Render walls from the world
+pub fn render_walls(world: &World, graphics: &Graphics) {
+    for wall in world.walls() {
+        // Draw wall with dark purple color
+        graphics.draw_rectangle(
+            Vec2::new(wall.x, wall.y),
+            wall.width,
+            wall.height,
+            Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
+        );
+        // Border for visual depth
+        graphics.draw_rectangle_lines(
+            Vec2::new(wall.x, wall.y),
+            wall.width,
+            wall.height,
+            2.0,
+            Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
+        );
+    }
 }
 
 /// Render enemy vision cones
@@ -174,6 +197,8 @@ pub fn render_ui(
     death_time: f32,
     level_complete: bool,
     level_complete_time: f32,
+    debug_enabled: bool,
+    show_infos: bool,
 ) {
     let screen_width = graphics.width();
     let screen_height = graphics.height();
@@ -275,6 +300,26 @@ pub fn render_ui(
                 Color::WHITE,
             );
         }
+    }
+
+    // Info display indicator
+    if debug_enabled {
+        let info_text = if show_infos {
+            "Infos: ON (Press I to toggle)"
+        } else {
+            "Infos: OFF (Press I to toggle)"
+        };
+        let info_color = if show_infos {
+            Color::new(0.0, 1.0, 0.0, 1.0) // Green when active
+        } else {
+            Color::GRAY // Gray when inactive
+        };
+        graphics.draw_text(
+            info_text,
+            Vec2::new(screen_width - 280.0, 30.0),
+            16.0,
+            info_color,
+        );
     }
 
     // Controls info

@@ -94,6 +94,8 @@ mod wasm_entry {
         last_time: f64,
         death_time: f32,
         level_complete_time: f32,
+        debug_enabled: bool,
+        show_infos: bool,
     }
 
     impl GameState {
@@ -115,6 +117,8 @@ mod wasm_entry {
                 last_time: 0.0,
                 death_time: 0.0,
                 level_complete_time: 0.0,
+                debug_enabled: true,
+                show_infos: false,
             }
         }
 
@@ -170,7 +174,7 @@ mod wasm_entry {
             {
                 if self.selected_menu_option == MenuOption::Play {
                     self.selected_level = if self.selected_level == 0 {
-                        11
+                        12
                     } else {
                         self.selected_level - 1
                     };
@@ -179,7 +183,7 @@ mod wasm_entry {
             // Handle input - Right (Arrow, D)
             if input::is_key_pressed("ArrowRight") || input::is_key_pressed("d") {
                 if self.selected_menu_option == MenuOption::Play {
-                    self.selected_level = (self.selected_level + 1) % 12;
+                    self.selected_level = (self.selected_level + 1) % 13;
                 }
             }
             // Handle input - Down (Arrow, S)
@@ -500,6 +504,11 @@ mod wasm_entry {
                 InputSystem::handle_weapon_switch(&mut self.world);
             }
 
+            // Handle info display toggle
+            if self.debug_enabled && input::is_key_pressed("i") {
+                self.show_infos = !self.show_infos;
+            }
+
             // Run game systems
             self.weapon_system.run(&mut self.world, dt);
             self.ai_system.run(&mut self.world, dt);
@@ -514,8 +523,11 @@ mod wasm_entry {
             // Render level
             self.level.render(graphics);
 
+            // Render walls from the world
+            render_walls(&self.world, graphics);
+
             // Render all entities
-            render_entities(&self.world, graphics);
+            render_entities(&self.world, graphics, self.show_infos);
 
             // Reset camera for UI rendering
             self.camera.reset(graphics);
@@ -549,6 +561,8 @@ mod wasm_entry {
                 self.death_time,
                 level_complete,
                 self.level_complete_time,
+                self.debug_enabled,
+                self.show_infos,
             );
 
             // Handle restart
