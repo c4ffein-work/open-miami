@@ -170,7 +170,7 @@ mod wasm_entry {
             {
                 if self.selected_menu_option == MenuOption::Play {
                     self.selected_level = if self.selected_level == 0 {
-                        11
+                        12
                     } else {
                         self.selected_level - 1
                     };
@@ -179,7 +179,7 @@ mod wasm_entry {
             // Handle input - Right (Arrow, D)
             if input::is_key_pressed("ArrowRight") || input::is_key_pressed("d") {
                 if self.selected_menu_option == MenuOption::Play {
-                    self.selected_level = (self.selected_level + 1) % 12;
+                    self.selected_level = (self.selected_level + 1) % 13;
                 }
             }
             // Handle input - Down (Arrow, S)

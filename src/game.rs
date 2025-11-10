@@ -54,7 +54,7 @@ pub fn initialize_game(world: &mut World, level: usize) {
         spawn_enemy(world, Vec2::new(300.0, 500.0));
         spawn_enemy(world, Vec2::new(700.0, 200.0));
     } else {
-        // Levels 2-12: 12 enemies (3x more) with varied wall layouts
+        // Levels 2-13: 12 enemies (3x more) with varied wall layouts
         let enemy_count = 12;
 
         // Generate level-specific wall patterns using level as seed
@@ -129,12 +129,22 @@ pub fn initialize_game(world: &mut World, level: usize) {
                 world.add_wall(450.0, 400.0, 250.0, 20.0); // Bottom right
                 world.add_wall(700.0, 400.0, 20.0, 150.0); // Down right
             }
-            _ => {
+            11 => {
                 // Level 12: Arena (minimal walls)
                 world.add_wall(400.0, 250.0, 200.0, 20.0); // Top center
                 world.add_wall(400.0, 500.0, 200.0, 20.0); // Bottom center
                 world.add_wall(300.0, 350.0, 20.0, 100.0); // Left small
                 world.add_wall(680.0, 350.0, 20.0, 100.0); // Right small
+            }
+            _ => {
+                // Level 13: Fortress (thick perimeter and central fortification)
+                world.add_wall(150.0, 150.0, 700.0, 30.0); // Top wall (thick)
+                world.add_wall(150.0, 150.0, 30.0, 500.0); // Left wall (thick)
+                world.add_wall(820.0, 150.0, 30.0, 500.0); // Right wall (thick)
+                world.add_wall(150.0, 620.0, 700.0, 30.0); // Bottom wall (thick)
+                world.add_wall(400.0, 320.0, 100.0, 100.0); // Central fortress
+                world.add_wall(350.0, 280.0, 200.0, 20.0); // Top fortification
+                world.add_wall(350.0, 440.0, 200.0, 20.0); // Bottom fortification
             }
         }
 
