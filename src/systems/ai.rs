@@ -136,8 +136,8 @@ impl AISystem {
     /// Calculate wall repulsion force to prevent enemies from grinding against walls
     /// Returns a Vec2 pointing away from nearby walls
     fn calculate_wall_repulsion(pos: &Position, walls: &[Wall], enemy_radius: f32) -> (f32, f32) {
-        let repulsion_distance = 30.0; // Start repelling when within 30 pixels of wall
-        let repulsion_strength = 0.2; // Scale factor for repulsion force
+        let repulsion_distance = 80.0; // Start repelling when within 80 pixels of wall (testing high value)
+        let repulsion_strength = 0.8; // Scale factor for repulsion force (testing high value)
 
         let mut total_repulsion_x = 0.0;
         let mut total_repulsion_y = 0.0;
