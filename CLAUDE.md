@@ -24,3 +24,9 @@
 - The Makefile enforces a 60-second timeout to prevent tests from hanging indefinitely
 - Running tests without timeout can cause Claude Code instances to be terminated (they will be considered stuck)
 - Both the Playwright config and Makefile enforce this 60-second timeout for safety
+
+## Artifact Server
+- An artifact server is available at `$ARTIFACTER_API_URL`
+- Use PUT requests to upload files to any route - the files will become available via GET requests
+- Authentication requires `$ARTIFACTER_API_KEY` header
+- This enables fast iteration by uploading wasm and HTML files for immediate testing
