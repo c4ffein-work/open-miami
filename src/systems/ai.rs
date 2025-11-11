@@ -313,34 +313,33 @@ impl System for AISystem {
                 }
                 AIState::SpottedUnsure => {
                     let target = ai.last_known_player_position.unwrap_or(player_pos);
-                    if let Some(next_waypoint) =
+
+                    // Check if there's a clear line of sight to the target
+                    let has_clear_path =
+                        has_line_of_sight(enemy_pos.to_vec2(), target.to_vec2(), &walls);
+
+                    // If clear line of sight, move directly toward target; otherwise use pathfinding
+                    let movement_target = if has_clear_path {
+                        target.to_vec2()
+                    } else if let Some(next_waypoint) =
                         nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
                     {
-                        let dx = next_waypoint.x - enemy_pos.x;
-                        let dy = next_waypoint.y - enemy_pos.y;
-                        let dist = (dx * dx + dy * dy).sqrt();
-                        if dist > 0.0 {
-                            (
-                                (dx / dist) * speed.value,
-                                (dy / dist) * speed.value,
-                                dy.atan2(dx),
-                            )
-                        } else {
-                            (0.0, 0.0, 0.0)
-                        }
+                        next_waypoint
                     } else {
-                        let dx = target.x - enemy_pos.x;
-                        let dy = target.y - enemy_pos.y;
-                        let dist = (dx * dx + dy * dy).sqrt();
-                        if dist > 0.0 {
-                            (
-                                (dx / dist) * speed.value,
-                                (dy / dist) * speed.value,
-                                dy.atan2(dx),
-                            )
-                        } else {
-                            (0.0, 0.0, 0.0)
-                        }
+                        target.to_vec2()
+                    };
+
+                    let dx = movement_target.x - enemy_pos.x;
+                    let dy = movement_target.y - enemy_pos.y;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    if dist > 0.0 {
+                        (
+                            (dx / dist) * speed.value,
+                            (dy / dist) * speed.value,
+                            dy.atan2(dx),
+                        )
+                    } else {
+                        (0.0, 0.0, 0.0)
                     }
                 }
                 AIState::SurePlayerSeen => {
@@ -355,24 +354,24 @@ impl System for AISystem {
                         let dx = player_pos.x - enemy_pos.x;
                         let dy = player_pos.y - enemy_pos.y;
                         (0.0, 0.0, dy.atan2(dx))
-                    } else if let Some(next_waypoint) =
-                        nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
-                    {
-                        let dx = next_waypoint.x - enemy_pos.x;
-                        let dy = next_waypoint.y - enemy_pos.y;
-                        let dist = (dx * dx + dy * dy).sqrt();
-                        if dist > 0.0 {
-                            (
-                                (dx / dist) * speed.value,
-                                (dy / dist) * speed.value,
-                                dy.atan2(dx),
-                            )
-                        } else {
-                            (0.0, 0.0, 0.0)
-                        }
                     } else {
-                        let dx = target.x - enemy_pos.x;
-                        let dy = target.y - enemy_pos.y;
+                        // Check if there's a clear line of sight to the target
+                        let has_clear_path =
+                            has_line_of_sight(enemy_pos.to_vec2(), target.to_vec2(), &walls);
+
+                        // If clear line of sight, move directly toward target; otherwise use pathfinding
+                        let movement_target = if has_clear_path {
+                            target.to_vec2()
+                        } else if let Some(next_waypoint) =
+                            nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                        {
+                            next_waypoint
+                        } else {
+                            target.to_vec2()
+                        };
+
+                        let dx = movement_target.x - enemy_pos.x;
+                        let dy = movement_target.y - enemy_pos.y;
                         let dist = (dx * dx + dy * dy).sqrt();
                         if dist > 0.0 {
                             (
@@ -671,9 +670,10 @@ mod tests {
         // Should have non-zero velocity
         assert!(velocity.x.abs() > 0.0 || velocity.y.abs() > 0.0);
 
-        // Velocity should point generally toward player
-        assert!(velocity.x > 0.0); // Moving right
-        assert!(velocity.y > 0.0); // Moving down
+        // Velocity should point directly toward player (with direct line-of-sight targeting)
+        assert!(velocity.x > 0.0); // Moving right toward player
+                                   // Both at y=100, so no vertical movement expected with direct targeting
+        assert!(velocity.y.abs() < 1.0); // Should be nearly zero
     }
 
     #[test]
