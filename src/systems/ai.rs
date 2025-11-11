@@ -36,6 +36,34 @@ impl AISystem {
         dx <= square_size && dy <= square_size
     }
 
+    /// Check if target position is within the vision cone
+    /// Vision cone is 90 degrees (PI/2), so 45 degrees on each side of facing direction
+    fn is_within_vision_cone(
+        enemy_pos: &Position,
+        target_pos: &Position,
+        enemy_rotation: f32,
+    ) -> bool {
+        // Calculate angle from enemy to target
+        let dx = target_pos.x - enemy_pos.x;
+        let dy = target_pos.y - enemy_pos.y;
+        let angle_to_target = dy.atan2(dx);
+
+        // Calculate angle difference
+        let mut angle_diff = angle_to_target - enemy_rotation;
+
+        // Normalize angle difference to [-PI, PI]
+        while angle_diff > PI {
+            angle_diff -= 2.0 * PI;
+        }
+        while angle_diff < -PI {
+            angle_diff += 2.0 * PI;
+        }
+
+        // Check if within 90-degree cone (45 degrees on each side)
+        let cone_half_angle = PI / 4.0; // 45 degrees
+        angle_diff.abs() <= cone_half_angle
+    }
+
     /// Find the direction with the most open space using 36 direction rays
     fn find_most_open_direction(
         pos: &Position,
@@ -145,8 +173,20 @@ impl System for AISystem {
             // Calculate distance to player and line of sight
             let distance = enemy_pos.distance_to(&player_pos);
             let has_los = has_line_of_sight(enemy_pos.to_vec2(), player_pos.to_vec2(), &walls);
-            let can_see_player =
-                has_los && distance < world.get_component::<AI>(entity).unwrap().detection_range;
+
+            // Get enemy rotation to check vision cone
+            let enemy_rotation = world
+                .get_component::<Rotation>(entity)
+                .map(|r| r.angle)
+                .unwrap_or(0.0);
+
+            // Check if player is within vision cone
+            let in_vision_cone =
+                Self::is_within_vision_cone(&enemy_pos, &player_pos, enemy_rotation);
+
+            let can_see_player = has_los
+                && distance < world.get_component::<AI>(entity).unwrap().detection_range
+                && in_vision_cone;
 
             // Update AI state machine
             if let Some(ai) = world.get_component_mut::<AI>(entity) {
@@ -926,5 +966,106 @@ mod tests {
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
         assert_eq!(velocity.x, 0.0);
         assert_eq!(velocity.y, 0.0);
+    }
+
+    #[test]
+    fn test_ai_cannot_see_player_outside_vision_cone() {
+        use crate::ecs::world::World;
+
+        let mut world = World::new();
+
+        // Create player to the right of enemy
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, Position::new(100.0, 0.0));
+
+        // Create enemy facing DOWN (PI/2), player is to the right (outside 90-degree cone)
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        let enemy_pos = Position::new(0.0, 0.0);
+        world.add_component(enemy, enemy_pos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Idle, enemy_pos));
+        world.add_component(enemy, Velocity::zero());
+        world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
+        world.add_component(enemy, Rotation::new(std::f32::consts::PI / 2.0)); // Facing down
+
+        let mut system = AISystem;
+        // Run multiple frames
+        for _ in 0..30 {
+            system.run(&mut world, 0.016);
+        }
+
+        // Enemy should NOT see player (outside vision cone)
+        let ai = world.get_component::<AI>(enemy).unwrap();
+        assert_eq!(
+            ai.state,
+            AIState::Unaware,
+            "Enemy should not see player outside vision cone"
+        );
+
+        // Enemy should not be moving toward player
+        let velocity = world.get_component::<Velocity>(enemy).unwrap();
+        assert_eq!(velocity.x, 0.0);
+        assert_eq!(velocity.y, 0.0);
+
+        // Enemy rotation should not have changed to face player
+        let rotation = world.get_component::<Rotation>(enemy).unwrap();
+        assert_eq!(rotation.angle, std::f32::consts::PI / 2.0);
+    }
+
+    #[test]
+    fn test_ai_can_see_player_behind_when_turned_around() {
+        use crate::ecs::world::World;
+
+        let mut world = World::new();
+
+        // Create player behind the enemy
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, Position::new(-100.0, 0.0));
+
+        // Create enemy at origin facing RIGHT (0 degrees)
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        let enemy_pos = Position::new(0.0, 0.0);
+        world.add_component(enemy, enemy_pos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Idle, enemy_pos));
+        world.add_component(enemy, Velocity::zero());
+        world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
+        world.add_component(enemy, Rotation::new(0.0)); // Facing right
+
+        let mut system = AISystem;
+        // Run a few frames - enemy shouldn't see player yet
+        for _ in 0..5 {
+            system.run(&mut world, 0.016);
+        }
+
+        // Enemy should NOT see player (behind them, outside vision cone)
+        let ai = world.get_component::<AI>(enemy).unwrap();
+        assert_eq!(
+            ai.state,
+            AIState::Unaware,
+            "Enemy should not see player behind them"
+        );
+
+        // Now turn the enemy around to face left (PI)
+        if let Some(rotation) = world.get_component_mut::<Rotation>(enemy) {
+            rotation.angle = std::f32::consts::PI;
+        }
+
+        // Run more frames - now enemy should spot player
+        for _ in 0..30 {
+            system.run(&mut world, 0.016);
+        }
+
+        // Now enemy SHOULD see player (player is in front of vision cone)
+        let ai = world.get_component::<AI>(enemy).unwrap();
+        assert_eq!(
+            ai.state,
+            AIState::SurePlayerSeen,
+            "Enemy should see player when facing them"
+        );
     }
 }
