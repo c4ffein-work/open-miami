@@ -174,7 +174,8 @@ impl CombatSystem {
                 continue;
             }
 
-            if ai.state == AIState::Attack && ai.can_attack() {
+            // Attack if in SurePlayerSeen state and within range
+            if ai.state == AIState::SurePlayerSeen && ai.can_attack() {
                 let distance = enemy_pos.distance_to(&player_pos);
                 if distance < ai.attack_range {
                     // Deal damage to player
@@ -361,7 +362,7 @@ mod tests {
         world.add_component(enemy, Position::new(30.0, 0.0));
         world.add_component(enemy, Health::new(100));
         let mut ai = AI::new();
-        ai.state = AIState::Attack;
+        ai.state = AIState::SurePlayerSeen; // Changed from Attack to SurePlayerSeen
         world.add_component(enemy, ai);
 
         let mut system = CombatSystem;
@@ -387,7 +388,7 @@ mod tests {
         world.add_component(enemy, Position::new(30.0, 0.0));
         world.add_component(enemy, Health::new(100));
         let mut ai = AI::new();
-        ai.state = AIState::Attack;
+        ai.state = AIState::SurePlayerSeen;
         ai.reset_attack_timer(); // Cooldown active
         world.add_component(enemy, ai);
 

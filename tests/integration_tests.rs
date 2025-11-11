@@ -75,11 +75,14 @@ fn test_enemy_ai_chases_player() {
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
     let mut ai_system = AISystem;
-    ai_system.run(&mut world, 0.016);
+    // Run multiple frames for state transition (need > 0.3s)
+    for _ in 0..30 {
+        ai_system.run(&mut world, 0.016);
+    }
 
     // Enemy should be in chase state
     let ai = world.get_component::<AI>(enemy).unwrap();
-    assert_eq!(ai.state, AIState::Chase);
+    assert_eq!(ai.state, AIState::SurePlayerSeen);
 
     // Enemy should have velocity toward player
     let velocity = world.get_component::<Velocity>(enemy).unwrap();
@@ -94,11 +97,14 @@ fn test_enemy_ai_attacks_when_close() {
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
     let mut ai_system = AISystem;
-    ai_system.run(&mut world, 0.016);
+    // Run multiple frames for state transition
+    for _ in 0..30 {
+        ai_system.run(&mut world, 0.016);
+    }
 
     // Enemy should be in attack state
     let ai = world.get_component::<AI>(enemy).unwrap();
-    assert_eq!(ai.state, AIState::Attack);
+    assert_eq!(ai.state, AIState::SurePlayerSeen);
 
     // Enemy should stop moving
     let velocity = world.get_component::<Velocity>(enemy).unwrap();
@@ -118,7 +124,7 @@ fn test_enemy_ai_idle_when_far() {
 
     // Enemy should be idle
     let ai = world.get_component::<AI>(enemy).unwrap();
-    assert_eq!(ai.state, AIState::Idle);
+    assert_eq!(ai.state, AIState::Unaware);
 }
 
 #[test]
@@ -163,7 +169,7 @@ fn test_enemy_attacks_player() {
     let enemy = spawn_enemy(&mut world, Vec2::new(30.0, 0.0));
 
     // Set enemy to attack state
-    world.get_component_mut::<AI>(enemy).unwrap().state = AIState::Attack;
+    world.get_component_mut::<AI>(enemy).unwrap().state = AIState::SurePlayerSeen;
 
     let mut combat_system = CombatSystem;
     combat_system.run(&mut world, 0.016);

@@ -1,9 +1,21 @@
 use crate::collision::has_line_of_sight;
-use crate::components::{AIState, Enemy, Health, Player, Position, Rotation, Speed, Velocity, AI};
+use crate::components::{
+    AIState, Enemy, EnemyType, Health, Player, Position, Rotation, Speed, Velocity, WanderState, AI,
+};
 use crate::ecs::world::Wall;
 use crate::ecs::{Entity, System, World};
-use crate::math::Vec2;
 use crate::pathfinding::NavigationGrid;
+use std::f32::consts::PI;
+
+// Simple pseudo-random number generator using hash
+static mut RNG_STATE: u32 = 12345;
+
+fn next_random() -> u32 {
+    unsafe {
+        RNG_STATE = RNG_STATE.wrapping_mul(1664525).wrapping_add(1013904223);
+        RNG_STATE
+    }
+}
 
 /// System that handles enemy AI behavior
 pub struct AISystem;
@@ -17,35 +29,80 @@ impl AISystem {
             .copied()
     }
 
-    fn update_ai_state(
-        ai: &mut AI,
-        distance: f32,
-        enemy_pos: Vec2,
-        player_pos: Vec2,
-        walls: &[Wall],
-    ) {
-        // Only detect player if there's line of sight (no walls blocking)
-        let has_los = has_line_of_sight(enemy_pos, player_pos, walls);
-
-        ai.state = if has_los && distance < ai.attack_range {
-            AIState::Attack
-        } else if has_los && distance < ai.detection_range {
-            AIState::Chase
-        } else {
-            AIState::Idle
-        };
+    /// Check if position is within the allowed movement square
+    fn is_within_movement_square(pos: &Position, spawn: &Position, square_size: f32) -> bool {
+        let dx = (pos.x - spawn.x).abs();
+        let dy = (pos.y - spawn.y).abs();
+        dx <= square_size && dy <= square_size
     }
 
-    fn calculate_move_direction(enemy_pos: &Position, player_pos: &Position) -> (f32, f32) {
-        let dx = player_pos.x - enemy_pos.x;
-        let dy = player_pos.y - enemy_pos.y;
-        let distance = (dx * dx + dy * dy).sqrt();
+    /// Find the direction with the most open space using 36 direction rays
+    fn find_most_open_direction(
+        pos: &Position,
+        spawn: &Position,
+        square_size: f32,
+        walls: &[Wall],
+    ) -> f32 {
+        // Check 36 directions (every 10 degrees)
+        let mut best_direction = 0.0;
+        let mut best_distance = 0.0;
 
-        if distance > 0.0 {
-            (dx / distance, dy / distance)
-        } else {
-            (0.0, 0.0)
+        for i in 0..36 {
+            let angle = (i as f32) * (PI * 2.0 / 36.0);
+            let max_check_distance = 200.0; // Check up to 200 pixels
+
+            // Cast ray to find nearest obstacle
+            let mut distance = max_check_distance;
+
+            // Check against walls
+            for step in 1..=20 {
+                let check_distance = (step as f32) * 10.0;
+                let check_x = pos.x + angle.cos() * check_distance;
+                let check_y = pos.y + angle.sin() * check_distance;
+                let check_pos = Position::new(check_x, check_y);
+
+                // Check if hits wall
+                let hit_wall = walls.iter().any(|wall| {
+                    check_x >= wall.x
+                        && check_x <= wall.x + wall.width
+                        && check_y >= wall.y
+                        && check_y <= wall.y + wall.height
+                });
+
+                // Check if outside movement square
+                let outside_square =
+                    !Self::is_within_movement_square(&check_pos, spawn, square_size);
+
+                if hit_wall || outside_square {
+                    distance = check_distance;
+                    break;
+                }
+            }
+
+            if distance > best_distance {
+                best_distance = distance;
+                best_direction = angle;
+            }
         }
+
+        // 50% chance: use best direction, 50% chance: random direction
+        if next_random().is_multiple_of(2) {
+            best_direction
+        } else {
+            (next_random() as f32 / u32::MAX as f32) * PI * 2.0
+        }
+    }
+
+    /// Random float between min and max
+    fn random_range(min: f32, max: f32) -> f32 {
+        let r = next_random() as f32 / u32::MAX as f32;
+        r * (max - min) + min
+    }
+
+    /// Random integer between min and max (inclusive)
+    fn random_int_range(min: i32, max: i32) -> i32 {
+        let range = (max - min + 1) as u32;
+        min + (next_random() % range) as i32
     }
 }
 
@@ -63,23 +120,21 @@ impl System for AISystem {
         // Create navigation grid from world walls
         let nav_grid = NavigationGrid::new(&walls);
 
-        // Query all enemies with AI, Position, Velocity, and Speed
+        // Query all enemies
         let enemies: Vec<Entity> = world.query::<Enemy>();
 
         for entity in enemies {
-            let (enemy_pos, _ai, speed, health) = match (
+            let (enemy_pos, speed, health) = match (
                 world.get_component::<Position>(entity),
-                world.get_component::<AI>(entity),
                 world.get_component::<Speed>(entity),
                 world.get_component::<Health>(entity),
             ) {
-                (Some(pos), Some(ai), Some(spd), Some(hp)) => (*pos, *ai, *spd, *hp),
+                (Some(pos), Some(spd), Some(hp)) => (*pos, *spd, *hp),
                 _ => continue,
             };
 
             // Skip dead enemies
             if health.is_dead() {
-                // Set velocity to zero for dead enemies
                 if let Some(velocity) = world.get_component_mut::<Velocity>(entity) {
                     velocity.x = 0.0;
                     velocity.y = 0.0;
@@ -87,79 +142,301 @@ impl System for AISystem {
                 continue;
             }
 
-            // Calculate distance to player
+            // Calculate distance to player and line of sight
             let distance = enemy_pos.distance_to(&player_pos);
+            let has_los = has_line_of_sight(enemy_pos.to_vec2(), player_pos.to_vec2(), &walls);
+            let can_see_player =
+                has_los && distance < world.get_component::<AI>(entity).unwrap().detection_range;
 
-            // Update AI state with line-of-sight check
+            // Update AI state machine
             if let Some(ai) = world.get_component_mut::<AI>(entity) {
-                Self::update_ai_state(
-                    ai,
-                    distance,
-                    enemy_pos.to_vec2(),
-                    player_pos.to_vec2(),
-                    &walls,
-                );
-
-                // Update attack timer
+                // Update timers
                 if ai.attack_timer > 0.0 {
                     ai.attack_timer -= dt;
                 }
-            }
+                ai.state_timer -= dt;
 
-            // Get updated AI state
-            let ai = world.get_component::<AI>(entity).copied().unwrap();
-
-            // Update rotation to face player (for Chase and Attack states)
-            if matches!(ai.state, AIState::Chase | AIState::Attack) {
-                let dx = player_pos.x - enemy_pos.x;
-                let dy = player_pos.y - enemy_pos.y;
-                let angle = dy.atan2(dx);
-
-                if let Some(rotation) = world.get_component_mut::<Rotation>(entity) {
-                    rotation.angle = angle;
+                // State machine logic
+                match ai.state {
+                    AIState::Unaware => {
+                        if can_see_player {
+                            ai.state_timer = ai.spot_duration;
+                            ai.state = AIState::SpottedUnsure;
+                            ai.check_position = Some(enemy_pos);
+                            ai.last_known_player_position = Some(player_pos);
+                        } else {
+                            // Perform initial behavior based on type
+                            match ai.initial_type {
+                                EnemyType::Idle => {
+                                    // Stay still, do nothing
+                                }
+                                EnemyType::Wandering | EnemyType::Patrolling => {
+                                    Self::update_wander_behavior(ai, &enemy_pos, &walls, dt);
+                                }
+                            }
+                        }
+                    }
+                    AIState::SpottedUnsure => {
+                        if can_see_player {
+                            ai.last_known_player_position = Some(player_pos);
+                            if ai.state_timer <= 0.0 {
+                                // Seen player long enough, transition to sure
+                                ai.state = AIState::SurePlayerSeen;
+                            }
+                        } else {
+                            // Lost sight, check the last known position
+                            if let Some(check_pos) = ai.check_position {
+                                if enemy_pos.distance_to(&check_pos) < 5.0 {
+                                    // Returned to check position, go back to unaware
+                                    ai.state = AIState::Unaware;
+                                    ai.check_position = None;
+                                }
+                            } else {
+                                ai.state = AIState::Unaware;
+                            }
+                        }
+                    }
+                    AIState::SurePlayerSeen => {
+                        if can_see_player {
+                            // Keep chasing
+                            ai.last_known_player_position = Some(player_pos);
+                            ai.state_timer = ai.lost_player_duration;
+                        } else {
+                            // Lost sight of player
+                            if ai.state_timer <= 0.0 {
+                                // Been at last known position too long, get confused
+                                ai.state = AIState::Confused;
+                                ai.confusion_looks_remaining = Self::random_int_range(2, 3);
+                                ai.confusion_look_timer = ai.confusion_look_duration;
+                            }
+                        }
+                    }
+                    AIState::Confused => {
+                        if can_see_player {
+                            // Found player again!
+                            ai.state = AIState::SurePlayerSeen;
+                            ai.last_known_player_position = Some(player_pos);
+                            ai.state_timer = ai.lost_player_duration;
+                        } else {
+                            // Continue looking around
+                            ai.confusion_look_timer -= dt;
+                            if ai.confusion_look_timer <= 0.0 {
+                                ai.confusion_looks_remaining -= 1;
+                                if ai.confusion_looks_remaining <= 0 {
+                                    // Done looking, transition based on initial type
+                                    ai.state = AIState::Unaware;
+                                    ai.wander_state = WanderState::Waiting;
+                                    ai.wander_timer = Self::random_range(1.0, 2.0);
+                                } else {
+                                    // Look in another direction
+                                    ai.confusion_look_timer = ai.confusion_look_duration;
+                                }
+                            }
+                        }
+                    }
+                    _ => {} // Legacy states
                 }
             }
 
-            // Update velocity based on state
-            if let Some(velocity) = world.get_component_mut::<Velocity>(entity) {
-                match ai.state {
-                    AIState::Chase => {
-                        // Use pathfinding to get next waypoint
-                        let enemy_world_pos = enemy_pos.to_vec2();
-                        let player_world_pos = player_pos.to_vec2();
+            // Get updated AI state and compute movement
+            let ai = world.get_component::<AI>(entity).copied().unwrap();
 
-                        if let Some(next_waypoint) =
-                            nav_grid.get_next_waypoint(enemy_world_pos, player_world_pos)
-                        {
-                            // Calculate direction to waypoint
-                            let dx = next_waypoint.x - enemy_pos.x;
-                            let dy = next_waypoint.y - enemy_pos.y;
-                            let distance = (dx * dx + dy * dy).sqrt();
-
-                            if distance > 0.0 {
-                                velocity.x = (dx / distance) * speed.value;
-                                velocity.y = (dy / distance) * speed.value;
-                            } else {
-                                velocity.x = 0.0;
-                                velocity.y = 0.0;
+            // Compute velocity and rotation based on state
+            let (new_vx, new_vy, new_rot) = match ai.state {
+                AIState::Unaware => {
+                    match ai.initial_type {
+                        EnemyType::Idle => (0.0, 0.0, 0.0), // Keep current rotation
+                        EnemyType::Wandering | EnemyType::Patrolling => match ai.wander_state {
+                            WanderState::Moving => (
+                                ai.wander_direction.cos() * speed.value,
+                                ai.wander_direction.sin() * speed.value,
+                                ai.wander_direction,
+                            ),
+                            WanderState::LookingAround => {
+                                let look_progress = 1.5 - ai.wander_look_timer;
+                                let rot = if look_progress < 0.5 {
+                                    let angle_offset = -(70.0 * PI / 180.0) * (look_progress / 0.5);
+                                    ai.wander_direction + angle_offset
+                                } else if look_progress < 1.5 {
+                                    let left_angle = ai.wander_direction - (70.0 * PI / 180.0);
+                                    let angle_offset =
+                                        (140.0 * PI / 180.0) * ((look_progress - 0.5) / 1.0);
+                                    left_angle + angle_offset
+                                } else {
+                                    ai.wander_direction
+                                };
+                                (0.0, 0.0, rot)
                             }
+                            WanderState::Waiting => (0.0, 0.0, 0.0),
+                        },
+                    }
+                }
+                AIState::SpottedUnsure => {
+                    let target = ai.last_known_player_position.unwrap_or(player_pos);
+                    if let Some(next_waypoint) =
+                        nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                    {
+                        let dx = next_waypoint.x - enemy_pos.x;
+                        let dy = next_waypoint.y - enemy_pos.y;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        if dist > 0.0 {
+                            (
+                                (dx / dist) * speed.value,
+                                (dy / dist) * speed.value,
+                                dy.atan2(dx),
+                            )
                         } else {
-                            // No path found, fall back to direct movement
-                            let (dir_x, dir_y) =
-                                Self::calculate_move_direction(&enemy_pos, &player_pos);
-                            velocity.x = dir_x * speed.value;
-                            velocity.y = dir_y * speed.value;
+                            (0.0, 0.0, 0.0)
+                        }
+                    } else {
+                        let dx = target.x - enemy_pos.x;
+                        let dy = target.y - enemy_pos.y;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        if dist > 0.0 {
+                            (
+                                (dx / dist) * speed.value,
+                                (dy / dist) * speed.value,
+                                dy.atan2(dx),
+                            )
+                        } else {
+                            (0.0, 0.0, 0.0)
                         }
                     }
-                    AIState::Attack => {
-                        // Stop moving when attacking
-                        velocity.x = 0.0;
-                        velocity.y = 0.0;
+                }
+                AIState::SurePlayerSeen => {
+                    let target = if can_see_player {
+                        player_pos
+                    } else {
+                        ai.last_known_player_position.unwrap_or(player_pos)
+                    };
+
+                    let dist_to_target = enemy_pos.distance_to(&target);
+                    if can_see_player && dist_to_target < ai.attack_range {
+                        let dx = player_pos.x - enemy_pos.x;
+                        let dy = player_pos.y - enemy_pos.y;
+                        (0.0, 0.0, dy.atan2(dx))
+                    } else if let Some(next_waypoint) =
+                        nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                    {
+                        let dx = next_waypoint.x - enemy_pos.x;
+                        let dy = next_waypoint.y - enemy_pos.y;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        if dist > 0.0 {
+                            (
+                                (dx / dist) * speed.value,
+                                (dy / dist) * speed.value,
+                                dy.atan2(dx),
+                            )
+                        } else {
+                            (0.0, 0.0, 0.0)
+                        }
+                    } else {
+                        let dx = target.x - enemy_pos.x;
+                        let dy = target.y - enemy_pos.y;
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        if dist > 0.0 {
+                            (
+                                (dx / dist) * speed.value,
+                                (dy / dist) * speed.value,
+                                dy.atan2(dx),
+                            )
+                        } else {
+                            (0.0, 0.0, 0.0)
+                        }
                     }
-                    AIState::Idle | AIState::Patrol => {
-                        velocity.x = 0.0;
-                        velocity.y = 0.0;
+                }
+                AIState::Confused => {
+                    let rot = if ai.confusion_look_timer == ai.confusion_look_duration {
+                        Self::random_range(0.0, PI * 2.0)
+                    } else {
+                        world
+                            .get_component::<Rotation>(entity)
+                            .map(|r| r.angle)
+                            .unwrap_or(0.0)
+                    };
+                    (0.0, 0.0, rot)
+                }
+                _ => (0.0, 0.0, 0.0),
+            };
+
+            // Apply computed values
+            if let Some(velocity) = world.get_component_mut::<Velocity>(entity) {
+                velocity.x = new_vx;
+                velocity.y = new_vy;
+            }
+            if let Some(rotation) = world.get_component_mut::<Rotation>(entity) {
+                if new_rot != 0.0
+                    || !matches!(ai.state, AIState::Unaware if ai.initial_type == EnemyType::Idle)
+                {
+                    rotation.angle = new_rot;
+                }
+            }
+        }
+    }
+}
+
+impl AISystem {
+    /// Update wandering/patrolling behavior
+    fn update_wander_behavior(ai: &mut AI, pos: &Position, walls: &[Wall], dt: f32) {
+        match ai.wander_state {
+            WanderState::Moving => {
+                ai.wander_timer -= dt;
+
+                // Check if hit wall or outside square
+                let next_pos = Position::new(
+                    pos.x + ai.wander_direction.cos() * 5.0,
+                    pos.y + ai.wander_direction.sin() * 5.0,
+                );
+
+                let hit_wall = walls.iter().any(|wall| {
+                    next_pos.x >= wall.x
+                        && next_pos.x <= wall.x + wall.width
+                        && next_pos.y >= wall.y
+                        && next_pos.y <= wall.y + wall.height
+                });
+
+                let outside_square = !Self::is_within_movement_square(
+                    &next_pos,
+                    &ai.spawn_position,
+                    ai.movement_square_size,
+                );
+
+                if ai.wander_timer <= 0.0 || hit_wall || outside_square {
+                    // Stop and look around
+                    ai.wander_state = WanderState::LookingAround;
+                    ai.wander_look_timer = 1.5; // Look around for 1.5 seconds
+
+                    // If hit obstacle, find best direction
+                    if hit_wall || outside_square {
+                        ai.wander_direction = Self::find_most_open_direction(
+                            pos,
+                            &ai.spawn_position,
+                            ai.movement_square_size,
+                            walls,
+                        );
                     }
+                }
+            }
+            WanderState::LookingAround => {
+                ai.wander_look_timer -= dt;
+                if ai.wander_look_timer <= 0.0 {
+                    // Done looking, wait before moving
+                    ai.wander_state = WanderState::Waiting;
+                    ai.wander_timer = Self::random_range(1.0, 2.0);
+                }
+            }
+            WanderState::Waiting => {
+                ai.wander_timer -= dt;
+                if ai.wander_timer <= 0.0 {
+                    // Start moving in new direction
+                    ai.wander_state = WanderState::Moving;
+                    ai.wander_timer = Self::random_range(1.0, 2.0);
+                    ai.wander_direction = Self::find_most_open_direction(
+                        pos,
+                        &ai.spawn_position,
+                        ai.movement_square_size,
+                        walls,
+                    );
                 }
             }
         }
@@ -182,17 +459,22 @@ mod tests {
         // Create enemy
         let enemy = world.spawn();
         world.add_component(enemy, Enemy);
-        world.add_component(enemy, Position::new(0.0, 0.0));
-        world.add_component(enemy, AI::new());
+        let enemy_pos = Position::new(0.0, 0.0);
+        world.add_component(enemy, enemy_pos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Idle, enemy_pos));
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
+        world.add_component(enemy, Rotation::new(0.0));
 
         let mut system = AISystem;
-        system.run(&mut world, 0.016);
+        // Run multiple frames to trigger state transitions (need > 0.3s to go from Unaware -> SpottedUnsure -> SurePlayerSeen)
+        for _ in 0..30 {
+            system.run(&mut world, 0.016);
+        }
 
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Chase);
+        assert_eq!(ai.state, AIState::SurePlayerSeen);
 
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
         assert!(velocity.x > 0.0); // Moving toward player
@@ -210,17 +492,22 @@ mod tests {
         // Create enemy
         let enemy = world.spawn();
         world.add_component(enemy, Enemy);
-        world.add_component(enemy, Position::new(0.0, 0.0));
-        world.add_component(enemy, AI::new());
+        let enemy_pos = Position::new(0.0, 0.0);
+        world.add_component(enemy, enemy_pos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Idle, enemy_pos));
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
+        world.add_component(enemy, Rotation::new(0.0));
 
         let mut system = AISystem;
-        system.run(&mut world, 0.016);
+        // Run multiple frames to trigger state transitions
+        for _ in 0..30 {
+            system.run(&mut world, 0.016);
+        }
 
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Attack);
+        assert_eq!(ai.state, AIState::SurePlayerSeen);
 
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
         assert_eq!(velocity.x, 0.0); // Stopped to attack
@@ -249,7 +536,7 @@ mod tests {
         system.run(&mut world, 0.016);
 
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Idle);
+        assert_eq!(ai.state, AIState::Unaware); // Changed from Idle to Unaware
 
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
         assert_eq!(velocity.x, 0.0);
@@ -322,18 +609,23 @@ mod tests {
         // Create enemy
         let enemy = world.spawn();
         world.add_component(enemy, Enemy);
-        world.add_component(enemy, Position::new(100.0, 100.0));
-        world.add_component(enemy, AI::new());
+        let enemy_pos = Position::new(100.0, 100.0);
+        world.add_component(enemy, enemy_pos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Idle, enemy_pos));
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
+        world.add_component(enemy, Rotation::new(0.0));
 
         let mut system = AISystem;
-        system.run(&mut world, 0.016);
+        // Run multiple frames for state transition
+        for _ in 0..30 {
+            system.run(&mut world, 0.016);
+        }
 
-        // Enemy should be in Chase state and moving toward player
+        // Enemy should be chasing player (SurePlayerSeen state)
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Chase);
+        assert_eq!(ai.state, AIState::SurePlayerSeen);
 
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
         // Should have non-zero velocity
@@ -372,7 +664,7 @@ mod tests {
 
         // Enemy should NOT detect player (line of sight blocked by wall)
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Idle);
+        assert_eq!(ai.state, AIState::Unaware);
 
         // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
@@ -409,7 +701,7 @@ mod tests {
 
         // Enemy should NOT detect player (line of sight blocked by walls)
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Idle);
+        assert_eq!(ai.state, AIState::Unaware);
 
         // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
@@ -446,7 +738,7 @@ mod tests {
 
         // Enemy should NOT detect player (line of sight blocked by walls)
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Idle);
+        assert_eq!(ai.state, AIState::Unaware);
 
         // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
@@ -518,18 +810,23 @@ mod tests {
         // Create enemy
         let enemy = world.spawn();
         world.add_component(enemy, Enemy);
-        world.add_component(enemy, Position::new(0.0, 0.0));
-        world.add_component(enemy, AI::new());
+        let enemy_pos = Position::new(0.0, 0.0);
+        world.add_component(enemy, enemy_pos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Idle, enemy_pos));
         world.add_component(enemy, Velocity::zero());
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
+        world.add_component(enemy, Rotation::new(0.0));
 
         let mut system = AISystem;
-        system.run(&mut world, 0.016);
+        // Run multiple frames for state transition
+        for _ in 0..30 {
+            system.run(&mut world, 0.016);
+        }
 
         // Enemy should be attacking
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Attack);
+        assert_eq!(ai.state, AIState::SurePlayerSeen);
 
         // Enemy should stop moving when attacking
         let velocity = world.get_component::<Velocity>(enemy).unwrap();
@@ -551,29 +848,36 @@ mod tests {
         // Create slow enemy
         let slow_enemy = world.spawn();
         world.add_component(slow_enemy, Enemy);
-        world.add_component(slow_enemy, Position::new(100.0, 100.0));
-        world.add_component(slow_enemy, AI::new());
+        let slow_pos = Position::new(100.0, 100.0);
+        world.add_component(slow_enemy, slow_pos);
+        world.add_component(slow_enemy, AI::new_with_type(EnemyType::Idle, slow_pos));
         world.add_component(slow_enemy, Velocity::zero());
         world.add_component(slow_enemy, Speed::new(50.0));
         world.add_component(slow_enemy, Health::new(100));
+        world.add_component(slow_enemy, Rotation::new(0.0));
 
         // Create fast enemy
         let fast_enemy = world.spawn();
         world.add_component(fast_enemy, Enemy);
-        world.add_component(fast_enemy, Position::new(100.0, 120.0));
-        world.add_component(fast_enemy, AI::new());
+        let fast_pos = Position::new(100.0, 120.0);
+        world.add_component(fast_enemy, fast_pos);
+        world.add_component(fast_enemy, AI::new_with_type(EnemyType::Idle, fast_pos));
         world.add_component(fast_enemy, Velocity::zero());
         world.add_component(fast_enemy, Speed::new(200.0));
         world.add_component(fast_enemy, Health::new(100));
+        world.add_component(fast_enemy, Rotation::new(0.0));
 
         let mut system = AISystem;
-        system.run(&mut world, 0.016);
+        // Run multiple frames for state transition
+        for _ in 0..30 {
+            system.run(&mut world, 0.016);
+        }
 
         // Both should be chasing
         let slow_ai = world.get_component::<AI>(slow_enemy).unwrap();
         let fast_ai = world.get_component::<AI>(fast_enemy).unwrap();
-        assert_eq!(slow_ai.state, AIState::Chase);
-        assert_eq!(fast_ai.state, AIState::Chase);
+        assert_eq!(slow_ai.state, AIState::SurePlayerSeen);
+        assert_eq!(fast_ai.state, AIState::SurePlayerSeen);
 
         // Fast enemy should have higher velocity magnitude
         let slow_vel = world.get_component::<Velocity>(slow_enemy).unwrap();
@@ -616,7 +920,7 @@ mod tests {
         // Enemy should NOT detect player through wall (line of sight blocked)
         // and remain Idle
         let ai = world.get_component::<AI>(enemy).unwrap();
-        assert_eq!(ai.state, AIState::Idle);
+        assert_eq!(ai.state, AIState::Unaware);
 
         // Enemy should not be moving
         let velocity = world.get_component::<Velocity>(enemy).unwrap();

@@ -131,16 +131,22 @@ fn render_enemies(world: &World, graphics: &Graphics) {
     let enemies: Vec<Entity> = world.query::<Enemy>();
 
     for entity in enemies {
-        let (pos, rotation, health) = match (
+        let (pos, rotation, health, ai) = match (
             world.get_component::<Position>(entity),
             world.get_component::<Rotation>(entity),
             world.get_component::<Health>(entity),
+            world.get_component::<AI>(entity),
         ) {
-            (Some(p), Some(r), Some(h)) => (p, r, h),
+            (Some(p), Some(r), Some(h), Some(a)) => (p, r, h, a),
             _ => continue,
         };
 
-        let base_color = Color::RED;
+        // Color based on enemy type
+        let base_color = match ai.initial_type {
+            EnemyType::Idle => Color::RED,
+            EnemyType::Wandering => Color::new(1.0, 1.0, 0.0, 1.0), // Yellow
+            EnemyType::Patrolling => Color::new(0.0, 1.0, 0.0, 1.0), // Green
+        };
         let is_dead = health.is_dead();
 
         graphics.draw_pixelated_sprite(

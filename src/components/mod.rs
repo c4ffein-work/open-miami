@@ -114,34 +114,109 @@ pub struct Player;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Enemy;
 
+/// Enemy initial behavior type (determines color and patrol behavior)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EnemyType {
+    Idle,       // Red - stays in place when unaware
+    Wandering,  // Yellow - wanders around spawn area
+    Patrolling, // Green - patrols around spawn area (same as wandering for now)
+}
+
 /// Enemy AI state
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AIState {
+    /// Never saw the player
+    Unaware,
+    /// Has briefly seen the player, will go check then return to spot
+    SpottedUnsure,
+    /// Sure that the player has been seen - chase and attack
+    SurePlayerSeen,
+    /// Looking around for player, then transitions based on initial type
+    Confused,
+    // Legacy states for compatibility (will be removed)
+    #[allow(dead_code)]
     Idle,
+    #[allow(dead_code)]
     Patrol,
+    #[allow(dead_code)]
     Chase,
+    #[allow(dead_code)]
     Attack,
 }
 
 /// AI component for enemies
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AI {
     pub state: AIState,
+    pub initial_type: EnemyType,
+    pub spawn_position: Position,
+    pub last_known_player_position: Option<Position>,
+    pub check_position: Option<Position>, // Where enemy was when first spotted player
     pub detection_range: f32,
     pub attack_range: f32,
     pub attack_cooldown: f32,
     pub attack_timer: f32,
+
+    // State transition timers
+    pub state_timer: f32,
+    pub spot_duration: f32, // How long to see player before becoming unsure (0.3s)
+    pub unsure_check_duration: f32, // How long to check before returning (2.0s)
+    pub lost_player_duration: f32, // How long at last known position before confused (3.0s)
+    pub confusion_duration: f32, // How long to look around (3.0s)
+
+    // Confusion state
+    pub confusion_look_timer: f32,
+    pub confusion_looks_remaining: i32,
+    pub confusion_look_duration: f32, // 0.3s per look
+
+    // Wandering/Patrolling behavior
+    pub wander_timer: f32,
+    pub wander_look_timer: f32,
+    pub wander_state: WanderState,
+    pub wander_direction: f32,     // Current movement angle in radians
+    pub movement_square_size: f32, // 150 pixels from spawn
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WanderState {
+    Moving,
+    LookingAround,
+    Waiting,
 }
 
 impl AI {
     pub fn new() -> Self {
         AI {
-            state: AIState::Idle,
-            detection_range: 900.0, // Tripled from 300.0
+            state: AIState::Unaware,
+            initial_type: EnemyType::Idle,
+            spawn_position: Position::new(0.0, 0.0),
+            last_known_player_position: None,
+            check_position: None,
+            detection_range: 900.0,
             attack_range: 40.0,
             attack_cooldown: 1.0,
             attack_timer: 0.0,
+            state_timer: 0.0,
+            spot_duration: 0.3,
+            unsure_check_duration: 2.0,
+            lost_player_duration: 3.0,
+            confusion_duration: 3.0,
+            confusion_look_timer: 0.0,
+            confusion_looks_remaining: 0,
+            confusion_look_duration: 0.3,
+            wander_timer: 0.0,
+            wander_look_timer: 0.0,
+            wander_state: WanderState::Waiting,
+            wander_direction: 0.0,
+            movement_square_size: 150.0,
         }
+    }
+
+    pub fn new_with_type(enemy_type: EnemyType, spawn_pos: Position) -> Self {
+        let mut ai = Self::new();
+        ai.initial_type = enemy_type;
+        ai.spawn_position = spawn_pos;
+        ai
     }
 
     pub fn can_attack(&self) -> bool {
@@ -158,6 +233,8 @@ impl Default for AI {
         Self::new()
     }
 }
+
+impl Copy for AI {}
 
 /// Weapon type enum
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -311,10 +388,10 @@ mod tests {
     #[test]
     fn test_ai_state_transitions() {
         let mut ai = AI::new();
-        assert_eq!(ai.state, AIState::Idle);
+        assert_eq!(ai.state, AIState::Unaware);
 
-        ai.state = AIState::Chase;
-        assert_eq!(ai.state, AIState::Chase);
+        ai.state = AIState::SurePlayerSeen;
+        assert_eq!(ai.state, AIState::SurePlayerSeen);
     }
 
     #[test]
