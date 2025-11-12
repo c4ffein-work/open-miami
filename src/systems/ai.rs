@@ -136,8 +136,8 @@ impl AISystem {
     /// Calculate wall repulsion force to prevent enemies from grinding against walls
     /// Returns a Vec2 pointing away from nearby walls
     fn calculate_wall_repulsion(pos: &Position, walls: &[Wall], enemy_radius: f32) -> (f32, f32) {
-        let repulsion_distance = 320.0; // Start repelling when within 320 pixels of wall (EXTREME TEST)
-        let repulsion_strength = 3.2; // Scale factor for repulsion force (EXTREME TEST)
+        let repulsion_distance = 35.0; // Start repelling when within 35 pixels of wall
+        let repulsion_strength = 0.25; // Scale factor for repulsion force
 
         let mut total_repulsion_x = 0.0;
         let mut total_repulsion_y = 0.0;
@@ -385,9 +385,13 @@ impl System for AISystem {
                     };
 
                     let dist_to_target = enemy_pos.distance_to(&target);
-                    if can_see_player && dist_to_target < ai.attack_range {
-                        let dx = player_pos.x - enemy_pos.x;
-                        let dy = player_pos.y - enemy_pos.y;
+                    // Stop if within attack range and can see player, OR if close enough to last known position
+                    let should_stop = (can_see_player && dist_to_target < ai.attack_range)
+                        || (!can_see_player && dist_to_target < ai.attack_range * 1.5);
+
+                    if should_stop {
+                        let dx = target.x - enemy_pos.x;
+                        let dy = target.y - enemy_pos.y;
                         (0.0, 0.0, dy.atan2(dx))
                     } else {
                         // Check if there's a clear line of sight to the target
