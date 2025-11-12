@@ -64,24 +64,41 @@ pub fn render_walls(world: &World, graphics: &Graphics, show_infos: bool) {
 
 /// Render debug pathfinding visualization
 fn render_debug_pathfinding(world: &World, graphics: &Graphics) {
-    use crate::components::{AIState, DebugPath, Enemy, Position, AI};
+    use crate::components::{AIState, DebugPath, DebugTrail, Enemy, Position, AI};
     use crate::ecs::Entity;
 
     let enemies: Vec<Entity> = world.query::<Enemy>();
 
     for entity in enemies {
-        let (pos, ai, debug_path) = match (
+        let (pos, ai, debug_path, debug_trail) = match (
             world.get_component::<Position>(entity),
             world.get_component::<AI>(entity),
             world.get_component::<DebugPath>(entity),
+            world.get_component::<DebugTrail>(entity),
         ) {
-            (Some(p), Some(a), dp) => (p, a, dp),
+            (Some(p), Some(a), dp, dt) => (p, a, dp, dt),
             _ => continue,
         };
 
         // Only show pathfinding for enemies that are chasing (SpottedUnsure or SurePlayerSeen)
         match ai.state {
             AIState::SpottedUnsure | AIState::SurePlayerSeen => {
+                // Draw actual movement trail first (cyan/blue - behind planned path)
+                if let Some(trail) = debug_trail {
+                    if trail.positions.len() > 1 {
+                        let mut prev_pos = trail.positions[0];
+                        for current_pos in trail.positions.iter().skip(1) {
+                            graphics.draw_line(
+                                prev_pos,
+                                *current_pos,
+                                2.0,
+                                Color::new(0.0, 0.8, 1.0, 0.6), // Cyan, semi-transparent
+                            );
+                            prev_pos = *current_pos;
+                        }
+                    }
+                }
+
                 // Draw pathfinding waypoints if available
                 if let Some(debug_path) = debug_path {
                     if !debug_path.waypoints.is_empty() {

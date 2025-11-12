@@ -1,7 +1,7 @@
 use crate::collision::{has_line_of_sight, has_line_of_sight_with_padding};
 use crate::components::{
-    AIState, DebugPath, Enemy, EnemyType, Health, Player, Position, Rotation, Speed, Velocity,
-    WanderState, AI,
+    AIState, DebugPath, DebugTrail, Enemy, EnemyType, Health, Player, Position, Rotation, Speed,
+    Velocity, WanderState, AI,
 };
 use crate::ecs::world::Wall;
 use crate::ecs::{Entity, System, World};
@@ -470,6 +470,24 @@ impl System for AISystem {
                     || !matches!(ai.state, AIState::Unaware if ai.initial_type == EnemyType::Idle)
                 {
                     rotation.angle = new_rot;
+                }
+            }
+
+            // Record position in trail for debug visualization (only for chasing enemies)
+            if matches!(ai.state, AIState::SpottedUnsure | AIState::SurePlayerSeen) {
+                if world.has_component::<DebugTrail>(entity) {
+                    if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                        trail.add_position(enemy_pos.to_vec2());
+                    }
+                } else {
+                    let mut trail = DebugTrail::default();
+                    trail.add_position(enemy_pos.to_vec2());
+                    world.add_component(entity, trail);
+                }
+            } else {
+                // Clear trail when not chasing
+                if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                    trail.clear();
                 }
             }
         }

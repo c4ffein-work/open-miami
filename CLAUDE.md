@@ -36,8 +36,9 @@ When debug info is enabled (press I), the following visualizations are shown:
 1. **Enemy Vision Cones**: Shows the 90-degree vision cone for each enemy
 2. **Inflated Wall Boundaries**: Yellow semi-transparent rectangles showing the 25px padding around walls used for pathfinding
 3. **Pathfinding Waypoints**: For enemies in chasing mode (SpottedUnsure or SurePlayerSeen):
+   - **Cyan line**: Actual movement trail showing where the enemy has traveled (last 100 positions)
    - **Red semi-transparent line**: Direct line from enemy to final target
-   - **Green lines and dots**: Pathfinding waypoints showing the actual path the enemy will follow
+   - **Green lines and dots**: Pathfinding waypoints showing the planned path the enemy will follow
    - **Red dot**: Final target position
    - **Green dots**: Individual waypoints along the path
 
@@ -46,6 +47,7 @@ These visualizations help understand and debug:
 - Pathfinding algorithm results (A* + string pulling + wall-hugging)
 - How inflated wall boundaries prevent wall grinding
 - The difference between direct movement vs pathfinding
+- Compare actual path taken (cyan) vs planned path (green)
 
 ## Artifact Server
 - An artifact server is available at `$ARTIFACTER_API_URL`
