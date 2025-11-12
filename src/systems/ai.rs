@@ -1,4 +1,4 @@
-use crate::collision::has_line_of_sight;
+use crate::collision::{has_line_of_sight, has_line_of_sight_with_padding};
 use crate::components::{
     AIState, Enemy, EnemyType, Health, Player, Position, Rotation, Speed, Velocity, WanderState, AI,
 };
@@ -131,36 +131,6 @@ impl AISystem {
     fn random_int_range(min: i32, max: i32) -> i32 {
         let range = (max - min + 1) as u32;
         min + (next_random() % range) as i32
-    }
-
-    /// Calculate wall repulsion force to prevent enemies from grinding against walls
-    /// Returns a Vec2 pointing away from nearby walls
-    fn calculate_wall_repulsion(pos: &Position, walls: &[Wall], enemy_radius: f32) -> (f32, f32) {
-        let repulsion_distance = 35.0; // Start repelling when within 35 pixels of wall
-        let repulsion_strength = 0.25; // Scale factor for repulsion force
-
-        let mut total_repulsion_x = 0.0;
-        let mut total_repulsion_y = 0.0;
-
-        for wall in walls {
-            // Find closest point on wall to enemy
-            let closest_x = pos.x.max(wall.x).min(wall.x + wall.width);
-            let closest_y = pos.y.max(wall.y).min(wall.y + wall.height);
-
-            let dx = pos.x - closest_x;
-            let dy = pos.y - closest_y;
-            let distance = (dx * dx + dy * dy).sqrt();
-
-            // Apply repulsion if close to wall
-            if distance < repulsion_distance + enemy_radius && distance > 0.0 {
-                let repulsion_factor =
-                    (1.0 - distance / (repulsion_distance + enemy_radius)) * repulsion_strength;
-                total_repulsion_x += (dx / distance) * repulsion_factor;
-                total_repulsion_y += (dy / distance) * repulsion_factor;
-            }
-        }
-
-        (total_repulsion_x, total_repulsion_y)
     }
 }
 
@@ -344,11 +314,17 @@ impl System for AISystem {
                 AIState::SpottedUnsure => {
                     let target = ai.last_known_player_position.unwrap_or(player_pos);
 
-                    // Check if there's a clear line of sight to the target
-                    let has_clear_path =
-                        has_line_of_sight(enemy_pos.to_vec2(), target.to_vec2(), &walls);
+                    // Use inflated walls for pathfinding decision to prevent wall grinding
+                    // If target is close to a wall, we'll use pathfinding instead of direct movement
+                    let wall_padding = 25.0; // Inflate walls by 25 pixels for pathfinding check
+                    let has_clear_path = has_line_of_sight_with_padding(
+                        enemy_pos.to_vec2(),
+                        target.to_vec2(),
+                        &walls,
+                        wall_padding,
+                    );
 
-                    // If clear line of sight, move directly toward target; otherwise use pathfinding
+                    // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
                     let movement_target = if has_clear_path {
                         target.to_vec2()
                     } else if let Some(next_waypoint) =
@@ -363,16 +339,11 @@ impl System for AISystem {
                     let dy = movement_target.y - enemy_pos.y;
                     let dist = (dx * dx + dy * dy).sqrt();
                     if dist > 0.0 {
-                        // Calculate wall repulsion to prevent grinding
-                        let enemy_radius = 12.0; // Standard enemy radius
-                        let (repel_x, repel_y) =
-                            Self::calculate_wall_repulsion(&enemy_pos, &walls, enemy_radius);
-
-                        // Normalize direction and apply speed, then add repulsion
-                        let vx = (dx / dist) * speed.value + repel_x * speed.value;
-                        let vy = (dy / dist) * speed.value + repel_y * speed.value;
-
-                        (vx, vy, dy.atan2(dx))
+                        (
+                            (dx / dist) * speed.value,
+                            (dy / dist) * speed.value,
+                            dy.atan2(dx),
+                        )
                     } else {
                         (0.0, 0.0, 0.0)
                     }
@@ -394,11 +365,17 @@ impl System for AISystem {
                         let dy = target.y - enemy_pos.y;
                         (0.0, 0.0, dy.atan2(dx))
                     } else {
-                        // Check if there's a clear line of sight to the target
-                        let has_clear_path =
-                            has_line_of_sight(enemy_pos.to_vec2(), target.to_vec2(), &walls);
+                        // Use inflated walls for pathfinding decision to prevent wall grinding
+                        // If target is close to a wall, we'll use pathfinding instead of direct movement
+                        let wall_padding = 25.0; // Inflate walls by 25 pixels for pathfinding check
+                        let has_clear_path = has_line_of_sight_with_padding(
+                            enemy_pos.to_vec2(),
+                            target.to_vec2(),
+                            &walls,
+                            wall_padding,
+                        );
 
-                        // If clear line of sight, move directly toward target; otherwise use pathfinding
+                        // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
                         let movement_target = if has_clear_path {
                             target.to_vec2()
                         } else if let Some(next_waypoint) =
@@ -413,16 +390,11 @@ impl System for AISystem {
                         let dy = movement_target.y - enemy_pos.y;
                         let dist = (dx * dx + dy * dy).sqrt();
                         if dist > 0.0 {
-                            // Calculate wall repulsion to prevent grinding
-                            let enemy_radius = 12.0; // Standard enemy radius
-                            let (repel_x, repel_y) =
-                                Self::calculate_wall_repulsion(&enemy_pos, &walls, enemy_radius);
-
-                            // Normalize direction and apply speed, then add repulsion
-                            let vx = (dx / dist) * speed.value + repel_x * speed.value;
-                            let vy = (dy / dist) * speed.value + repel_y * speed.value;
-
-                            (vx, vy, dy.atan2(dx))
+                            (
+                                (dx / dist) * speed.value,
+                                (dy / dist) * speed.value,
+                                dy.atan2(dx),
+                            )
                         } else {
                             (0.0, 0.0, 0.0)
                         }

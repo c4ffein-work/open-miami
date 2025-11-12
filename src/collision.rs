@@ -75,3 +75,22 @@ pub fn has_line_of_sight(from: Vec2, to: Vec2, walls: &[Wall]) -> bool {
     }
     true // No walls blocking
 }
+
+/// Check if there's a clear line of sight with inflated wall boundaries
+/// This is used to decide between direct movement and pathfinding
+/// Walls are expanded by padding on all sides to prevent enemies from trying
+/// to move directly toward targets that are very close to walls
+pub fn has_line_of_sight_with_padding(from: Vec2, to: Vec2, walls: &[Wall], padding: f32) -> bool {
+    for wall in walls {
+        // Inflate wall boundaries by padding amount
+        let inflated_x = wall.x - padding;
+        let inflated_y = wall.y - padding;
+        let inflated_w = wall.width + padding * 2.0;
+        let inflated_h = wall.height + padding * 2.0;
+
+        if line_rect_intersection(from, to, inflated_x, inflated_y, inflated_w, inflated_h) {
+            return false; // Inflated wall blocks line of sight
+        }
+    }
+    true // No inflated walls blocking
+}
