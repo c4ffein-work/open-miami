@@ -6,6 +6,11 @@ use crate::math::{Color, Vec2};
 
 /// Render all entities in the world
 pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
+    // Render debug pathfinding info first (behind everything)
+    if show_infos {
+        render_debug_pathfinding(world, graphics);
+    }
+
     // Render vision cones first (behind everything) - only if info display is enabled
     if show_infos {
         render_enemy_vision_cones(world, graphics);
@@ -25,8 +30,20 @@ pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
 }
 
 /// Render walls from the world
-pub fn render_walls(world: &World, graphics: &Graphics) {
+pub fn render_walls(world: &World, graphics: &Graphics, show_infos: bool) {
     for wall in world.walls() {
+        // Draw inflated wall boundaries (debug visualization)
+        if show_infos {
+            let wall_padding = 25.0; // Same as pathfinding inflation
+            graphics.draw_rectangle_lines(
+                Vec2::new(wall.x - wall_padding, wall.y - wall_padding),
+                wall.width + wall_padding * 2.0,
+                wall.height + wall_padding * 2.0,
+                1.0,
+                Color::new(1.0, 1.0, 0.0, 0.3), // Semi-transparent yellow
+            );
+        }
+
         // Draw wall with dark purple color
         graphics.draw_rectangle(
             Vec2::new(wall.x, wall.y),
@@ -42,6 +59,74 @@ pub fn render_walls(world: &World, graphics: &Graphics) {
             2.0,
             Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
         );
+    }
+}
+
+/// Render debug pathfinding visualization
+fn render_debug_pathfinding(world: &World, graphics: &Graphics) {
+    use crate::components::{AIState, DebugPath, Enemy, Position, AI};
+    use crate::ecs::Entity;
+
+    let enemies: Vec<Entity> = world.query::<Enemy>();
+
+    for entity in enemies {
+        let (pos, ai, debug_path) = match (
+            world.get_component::<Position>(entity),
+            world.get_component::<AI>(entity),
+            world.get_component::<DebugPath>(entity),
+        ) {
+            (Some(p), Some(a), dp) => (p, a, dp),
+            _ => continue,
+        };
+
+        // Only show pathfinding for enemies that are chasing (SpottedUnsure or SurePlayerSeen)
+        match ai.state {
+            AIState::SpottedUnsure | AIState::SurePlayerSeen => {
+                // Draw pathfinding waypoints if available
+                if let Some(debug_path) = debug_path {
+                    if !debug_path.waypoints.is_empty() {
+                        // Draw line to final target (semi-transparent red)
+                        graphics.draw_line(
+                            pos.to_vec2(),
+                            debug_path.target,
+                            2.0,
+                            Color::new(1.0, 0.0, 0.0, 0.3),
+                        );
+
+                        // Draw waypoint path (bright green)
+                        let mut prev_point = pos.to_vec2();
+                        for waypoint in &debug_path.waypoints {
+                            // Draw line from previous point to this waypoint
+                            graphics.draw_line(
+                                prev_point,
+                                *waypoint,
+                                2.0,
+                                Color::new(0.0, 1.0, 0.0, 0.8),
+                            );
+
+                            // Draw waypoint as small circle
+                            graphics.draw_circle(*waypoint, 4.0, Color::new(0.0, 1.0, 0.0, 1.0));
+
+                            prev_point = *waypoint;
+                        }
+
+                        // Draw final segment to target
+                        if let Some(last_waypoint) = debug_path.waypoints.last() {
+                            graphics.draw_line(
+                                *last_waypoint,
+                                debug_path.target,
+                                2.0,
+                                Color::new(0.0, 1.0, 0.0, 0.8),
+                            );
+                        }
+
+                        // Draw target as larger circle
+                        graphics.draw_circle(debug_path.target, 6.0, Color::new(1.0, 0.0, 0.0, 1.0));
+                    }
+                }
+            }
+            _ => {} // Don't show pathfinding for other states
+        }
     }
 }
 

@@ -345,6 +345,26 @@ impl Weapon {
     }
 }
 
+/// Debug component to store pathfinding waypoints for visualization
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugPath {
+    pub waypoints: Vec<Vec2>,
+    pub target: Vec2,
+}
+
+impl DebugPath {
+    pub fn new(waypoints: Vec<Vec2>, target: Vec2) -> Self {
+        DebugPath { waypoints, target }
+    }
+
+    pub fn clear() -> Self {
+        DebugPath {
+            waypoints: Vec::new(),
+            target: Vec2::zero(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

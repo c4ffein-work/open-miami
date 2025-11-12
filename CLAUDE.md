@@ -25,6 +25,28 @@
 - Running tests without timeout can cause Claude Code instances to be terminated (they will be considered stuck)
 - Both the Playwright config and Makefile enforce this 60-second timeout for safety
 
+## Debug Mode
+- The game has a built-in debug mode that can be toggled by pressing **I** during gameplay
+- Debug mode is enabled by default (`debug_enabled: true` in GameState)
+- When debug mode is active, pressing **I** toggles the display of debug information
+
+### Debug Visualizations
+When debug info is enabled (press I), the following visualizations are shown:
+
+1. **Enemy Vision Cones**: Shows the 90-degree vision cone for each enemy
+2. **Inflated Wall Boundaries**: Yellow semi-transparent rectangles showing the 25px padding around walls used for pathfinding
+3. **Pathfinding Waypoints**: For enemies in chasing mode (SpottedUnsure or SurePlayerSeen):
+   - **Red semi-transparent line**: Direct line from enemy to final target
+   - **Green lines and dots**: Pathfinding waypoints showing the actual path the enemy will follow
+   - **Red dot**: Final target position
+   - **Green dots**: Individual waypoints along the path
+
+These visualizations help understand and debug:
+- Enemy AI behavior and detection
+- Pathfinding algorithm results (A* + string pulling + wall-hugging)
+- How inflated wall boundaries prevent wall grinding
+- The difference between direct movement vs pathfinding
+
 ## Artifact Server
 - An artifact server is available at `$ARTIFACTER_API_URL`
 - Use PUT requests to upload files to any route - the files will become available via GET requests
