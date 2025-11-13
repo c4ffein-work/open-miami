@@ -1,6 +1,7 @@
 use crate::collision::{has_line_of_sight, has_line_of_sight_with_padding};
 use crate::components::{
-    AIState, Enemy, EnemyType, Health, Player, Position, Rotation, Speed, Velocity, WanderState, AI,
+    AIState, DebugPath, DebugTrail, Enemy, EnemyType, Health, Player, Position, Rotation, Speed,
+    Velocity, WanderState, AI,
 };
 use crate::ecs::world::Wall;
 use crate::ecs::{Entity, System, World};
@@ -326,12 +327,35 @@ impl System for AISystem {
 
                     // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
                     let movement_target = if has_clear_path {
+                        // Clear debug path when moving directly
+                        if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                            *debug_path = DebugPath::clear();
+                        }
                         target.to_vec2()
-                    } else if let Some(next_waypoint) =
-                        nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                    } else if let Some(full_path) =
+                        nav_grid.find_path(enemy_pos.to_vec2(), target.to_vec2())
                     {
-                        next_waypoint
+                        // Store full path for debug visualization
+                        if world.has_component::<DebugPath>(entity) {
+                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                                *debug_path = DebugPath::new(full_path.clone(), target.to_vec2());
+                            }
+                        } else {
+                            world.add_component(
+                                entity,
+                                DebugPath::new(full_path.clone(), target.to_vec2()),
+                            );
+                        }
+
+                        // Get next waypoint from the path
+                        nav_grid
+                            .get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                            .unwrap_or(target.to_vec2())
                     } else {
+                        // Clear debug path if no path found
+                        if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                            *debug_path = DebugPath::clear();
+                        }
                         target.to_vec2()
                     };
 
@@ -375,12 +399,38 @@ impl System for AISystem {
 
                         // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
                         let movement_target = if has_clear_path {
+                            // Clear debug path when moving directly
+                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                                *debug_path = DebugPath::clear();
+                            }
                             target.to_vec2()
-                        } else if let Some(next_waypoint) =
-                            nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                        } else if let Some(full_path) =
+                            nav_grid.find_path(enemy_pos.to_vec2(), target.to_vec2())
                         {
-                            next_waypoint
+                            // Store full path for debug visualization
+                            if world.has_component::<DebugPath>(entity) {
+                                if let Some(debug_path) =
+                                    world.get_component_mut::<DebugPath>(entity)
+                                {
+                                    *debug_path =
+                                        DebugPath::new(full_path.clone(), target.to_vec2());
+                                }
+                            } else {
+                                world.add_component(
+                                    entity,
+                                    DebugPath::new(full_path.clone(), target.to_vec2()),
+                                );
+                            }
+
+                            // Get next waypoint from the path
+                            nav_grid
+                                .get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                                .unwrap_or(target.to_vec2())
                         } else {
+                            // Clear debug path if no path found
+                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                                *debug_path = DebugPath::clear();
+                            }
                             target.to_vec2()
                         };
 
@@ -422,6 +472,24 @@ impl System for AISystem {
                     || !matches!(ai.state, AIState::Unaware if ai.initial_type == EnemyType::Idle)
                 {
                     rotation.angle = new_rot;
+                }
+            }
+
+            // Record position in trail for debug visualization (only for chasing enemies)
+            if matches!(ai.state, AIState::SpottedUnsure | AIState::SurePlayerSeen) {
+                if world.has_component::<DebugTrail>(entity) {
+                    if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                        trail.add_position(enemy_pos.to_vec2());
+                    }
+                } else {
+                    let mut trail = DebugTrail::default();
+                    trail.add_position(enemy_pos.to_vec2());
+                    world.add_component(entity, trail);
+                }
+            } else {
+                // Clear trail when not chasing
+                if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                    trail.clear();
                 }
             }
         }

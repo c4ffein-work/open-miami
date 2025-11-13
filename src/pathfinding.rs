@@ -1,8 +1,47 @@
-use crate::collision::circle_rect_collision;
+use crate::collision::{circle_rect_collision, has_line_of_sight_with_padding};
 use crate::ecs::world::Wall;
 use crate::math::Vec2;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+
+/// Find the closest point on a rectangle to a given point
+fn closest_point_on_rect(point: Vec2, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32) -> Vec2 {
+    let closest_x = point.x.max(rect_x).min(rect_x + rect_w);
+    let closest_y = point.y.max(rect_y).min(rect_y + rect_h);
+    Vec2::new(closest_x, closest_y)
+}
+
+/// Check if a line segment intersects with a rectangle (for finding blocking walls)
+fn line_intersects_rect(
+    line_start: Vec2,
+    line_end: Vec2,
+    rect_x: f32,
+    rect_y: f32,
+    rect_w: f32,
+    rect_h: f32,
+) -> bool {
+    // Simple line-segment intersection check
+    // Check if line intersects any of the 4 edges of the rectangle
+    let top_left = Vec2::new(rect_x, rect_y);
+    let top_right = Vec2::new(rect_x + rect_w, rect_y);
+    let bottom_left = Vec2::new(rect_x, rect_y + rect_h);
+    let bottom_right = Vec2::new(rect_x + rect_w, rect_y + rect_h);
+
+    line_segment_intersection(line_start, line_end, top_left, top_right)
+        || line_segment_intersection(line_start, line_end, top_right, bottom_right)
+        || line_segment_intersection(line_start, line_end, bottom_right, bottom_left)
+        || line_segment_intersection(line_start, line_end, bottom_left, top_left)
+}
+
+/// Check if two line segments intersect
+fn line_segment_intersection(p1: Vec2, p2: Vec2, p3: Vec2, p4: Vec2) -> bool {
+    let d1 = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
+    let d2 = (p2.x - p1.x) * (p4.y - p1.y) - (p2.y - p1.y) * (p4.x - p1.x);
+    let d3 = (p4.x - p3.x) * (p1.y - p3.y) - (p4.y - p3.y) * (p1.x - p3.x);
+    let d4 = (p4.x - p3.x) * (p2.y - p3.y) - (p4.y - p3.y) * (p2.x - p3.x);
+
+    d1 * d2 <= 0.0 && d3 * d4 <= 0.0
+}
 
 /// Size of each grid cell in world units
 pub const GRID_CELL_SIZE: f32 = 50.0;
@@ -91,6 +130,7 @@ impl PartialOrd for AStarNode {
 /// Navigation grid representing walkable/blocked cells
 pub struct NavigationGrid {
     blocked_cells: HashSet<GridCoord>,
+    walls: Vec<Wall>,
 }
 
 impl NavigationGrid {
@@ -126,12 +166,130 @@ impl NavigationGrid {
             }
         }
 
-        NavigationGrid { blocked_cells }
+        NavigationGrid {
+            blocked_cells,
+            walls: walls.to_vec(),
+        }
     }
 
     /// Check if a grid cell is walkable
     pub fn is_walkable(&self, coord: &GridCoord) -> bool {
         coord.is_valid() && !self.blocked_cells.contains(coord)
+    }
+
+    /// Perform string pulling optimization on a path
+    /// Removes redundant waypoints by checking line of sight with inflated walls (25px padding)
+    fn string_pull_path(&self, path: Vec<Vec2>) -> Vec<Vec2> {
+        if path.len() <= 2 {
+            return path; // Can't optimize paths with 2 or fewer waypoints
+        }
+
+        let wall_padding = 25.0; // Same as used in AI system for consistency
+        let mut optimized_path = Vec::new();
+
+        let mut current_idx = 0;
+        optimized_path.push(path[current_idx]);
+
+        while current_idx < path.len() - 1 {
+            // Try to skip ahead as far as possible while maintaining line of sight
+            let mut furthest_visible = current_idx + 1;
+
+            for test_idx in (current_idx + 2)..path.len() {
+                if has_line_of_sight_with_padding(
+                    path[current_idx],
+                    path[test_idx],
+                    &self.walls,
+                    wall_padding,
+                ) {
+                    furthest_visible = test_idx;
+                } else {
+                    break; // Stop searching once we lose line of sight
+                }
+            }
+
+            // Add the furthest visible waypoint
+            current_idx = furthest_visible;
+            optimized_path.push(path[current_idx]);
+        }
+
+        optimized_path
+    }
+
+    /// Push waypoints toward inflated walls to create tactical, wall-hugging movement
+    /// This makes enemies take the shortest path around obstacles by moving close to walls
+    fn optimize_waypoints_toward_walls(&self, mut path: Vec<Vec2>) -> Vec<Vec2> {
+        if path.len() < 3 {
+            return path; // Need at least 3 points (start, waypoint, end)
+        }
+
+        let wall_padding = 25.0; // Inflated wall boundary (same as AI system)
+        let safety_margin = 3.0; // Stay 3px away from inflated boundary for extra safety
+
+        // Optimize each intermediate waypoint (skip first and last)
+        for i in 1..path.len() - 1 {
+            let prev = path[i - 1];
+            let current = path[i];
+            let next = path[i + 1];
+
+            // Find which inflated wall blocks the direct path from prev to next
+            let mut blocking_wall: Option<&Wall> = None;
+            for wall in &self.walls {
+                let inflated_x = wall.x - wall_padding;
+                let inflated_y = wall.y - wall_padding;
+                let inflated_w = wall.width + wall_padding * 2.0;
+                let inflated_h = wall.height + wall_padding * 2.0;
+
+                if line_intersects_rect(prev, next, inflated_x, inflated_y, inflated_w, inflated_h)
+                {
+                    blocking_wall = Some(wall);
+                    break; // Use first blocking wall found
+                }
+            }
+
+            // If we found a blocking wall, push waypoint toward it
+            if let Some(wall) = blocking_wall {
+                let inflated_x = wall.x - wall_padding;
+                let inflated_y = wall.y - wall_padding;
+                let inflated_w = wall.width + wall_padding * 2.0;
+                let inflated_h = wall.height + wall_padding * 2.0;
+
+                // Find closest point on inflated wall boundary
+                let closest_wall_point =
+                    closest_point_on_rect(current, inflated_x, inflated_y, inflated_w, inflated_h);
+
+                // Calculate direction from current waypoint toward wall
+                let to_wall = Vec2::new(
+                    closest_wall_point.x - current.x,
+                    closest_wall_point.y - current.y,
+                );
+                let distance_to_wall = to_wall.length();
+
+                if distance_to_wall > safety_margin {
+                    // Push waypoint toward wall, stopping at safety margin
+                    let push_distance = distance_to_wall - safety_margin;
+                    let direction =
+                        Vec2::new(to_wall.x / distance_to_wall, to_wall.y / distance_to_wall);
+                    let new_waypoint = Vec2::new(
+                        current.x + direction.x * push_distance,
+                        current.y + direction.y * push_distance,
+                    );
+
+                    // Verify we still have LOS to neighbors with new position
+                    if has_line_of_sight_with_padding(prev, new_waypoint, &self.walls, wall_padding)
+                        && has_line_of_sight_with_padding(
+                            new_waypoint,
+                            next,
+                            &self.walls,
+                            wall_padding,
+                        )
+                    {
+                        path[i] = new_waypoint;
+                    }
+                }
+            }
+        }
+
+        path
     }
 
     /// Find path from start to goal using A* algorithm
@@ -168,7 +326,10 @@ impl NavigationGrid {
 
             // Goal reached!
             if current == goal_coord {
-                return Some(self.reconstruct_path(came_from, current));
+                let path = self.reconstruct_path(came_from, current);
+                let path = self.string_pull_path(path);
+                let path = self.optimize_waypoints_toward_walls(path);
+                return Some(path);
             }
 
             // Skip if already processed (can happen with duplicate nodes in heap)

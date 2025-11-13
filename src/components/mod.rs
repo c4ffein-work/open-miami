@@ -345,6 +345,62 @@ impl Weapon {
     }
 }
 
+/// Debug component to store pathfinding waypoints for visualization
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugPath {
+    pub waypoints: Vec<Vec2>,
+    pub target: Vec2,
+}
+
+impl DebugPath {
+    pub fn new(waypoints: Vec<Vec2>, target: Vec2) -> Self {
+        DebugPath { waypoints, target }
+    }
+
+    pub fn clear() -> Self {
+        DebugPath {
+            waypoints: Vec::new(),
+            target: Vec2::zero(),
+        }
+    }
+}
+
+/// Debug component to store actual movement trail for visualization
+#[derive(Debug, Clone, PartialEq)]
+pub struct DebugTrail {
+    pub positions: Vec<Vec2>,
+    pub max_length: usize,
+}
+
+impl DebugTrail {
+    pub fn new(max_length: usize) -> Self {
+        DebugTrail {
+            positions: Vec::new(),
+            max_length,
+        }
+    }
+
+    /// Add a new position to the trail
+    pub fn add_position(&mut self, pos: Vec2) {
+        self.positions.push(pos);
+        // Keep only the last N positions
+        if self.positions.len() > self.max_length {
+            self.positions.remove(0);
+        }
+    }
+
+    /// Clear the trail
+    pub fn clear(&mut self) {
+        self.positions.clear();
+    }
+}
+
+impl Default for DebugTrail {
+    fn default() -> Self {
+        Self::new(100) // Store last 100 positions
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
