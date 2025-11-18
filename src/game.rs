@@ -41,6 +41,17 @@ pub fn spawn_enemy(world: &mut World, position: Vec2) -> Entity {
     spawn_enemy_with_type(world, position, EnemyType::Idle)
 }
 
+/// Spawn a weapon pickup entity
+pub fn spawn_weapon_pickup(world: &mut World, position: Vec2, weapon_type: WeaponType) -> Entity {
+    let entity = world.spawn();
+
+    world.add_component(entity, WeaponPickup::new(weapon_type));
+    world.add_component(entity, Position::from_vec2(position));
+    world.add_component(entity, Radius::new(20.0));
+
+    entity
+}
+
 /// Initialize a new game world with player and enemies
 pub fn initialize_game(world: &mut World, level: usize) {
     // Spawn player (same position for all levels)
@@ -180,6 +191,40 @@ pub fn initialize_game(world: &mut World, level: usize) {
                 Vec2::new(x + variation_x, y + variation_y),
                 enemy_type,
             );
+        }
+    }
+
+    // Spawn weapon pickups on the map
+    // Level 1 (level 0): Fewer weapons
+    if level == 0 {
+        spawn_weapon_pickup(world, Vec2::new(500.0, 200.0), WeaponType::Shotgun);
+        spawn_weapon_pickup(world, Vec2::new(650.0, 450.0), WeaponType::MachineGun);
+        spawn_weapon_pickup(world, Vec2::new(350.0, 350.0), WeaponType::Melee);
+    } else {
+        // Later levels: More weapons scattered around
+        // Use level-based pseudo-random positions to ensure variety
+        let positions = [
+            Vec2::new(300.0, 250.0),
+            Vec2::new(700.0, 250.0),
+            Vec2::new(300.0, 550.0),
+            Vec2::new(700.0, 550.0),
+            Vec2::new(500.0, 200.0),
+        ];
+
+        let weapons = [
+            WeaponType::Shotgun,
+            WeaponType::MachineGun,
+            WeaponType::Melee,
+            WeaponType::Pistol,
+            WeaponType::Shotgun,
+        ];
+
+        // Spawn 3-5 weapons per level based on level number
+        let weapon_count = 3 + (level % 3);
+        for i in 0..weapon_count {
+            let pos_idx = (i + level * 7) % positions.len();
+            let weapon_idx = (i + level * 3) % weapons.len();
+            spawn_weapon_pickup(world, positions[pos_idx], weapons[weapon_idx]);
         }
     }
 }
@@ -345,5 +390,31 @@ mod tests {
         let pos = get_player_position(&world).unwrap();
         assert_eq!(pos.x, 123.0);
         assert_eq!(pos.y, 456.0);
+    }
+
+    #[test]
+    fn test_spawn_weapon_pickup() {
+        let mut world = World::new();
+        let pickup = spawn_weapon_pickup(&mut world, Vec2::new(100.0, 200.0), WeaponType::Shotgun);
+
+        assert!(world.has_component::<WeaponPickup>(pickup));
+        assert!(world.has_component::<Position>(pickup));
+        assert!(world.has_component::<Radius>(pickup));
+
+        let weapon = world.get_component::<WeaponPickup>(pickup).unwrap();
+        assert_eq!(weapon.weapon_type, WeaponType::Shotgun);
+
+        let pos = world.get_component::<Position>(pickup).unwrap();
+        assert_eq!(pos.x, 100.0);
+        assert_eq!(pos.y, 200.0);
+    }
+
+    #[test]
+    fn test_initialize_game_spawns_weapons() {
+        let mut world = World::new();
+        initialize_game(&mut world, 0);
+
+        let pickups: Vec<Entity> = world.query::<WeaponPickup>();
+        assert_eq!(pickups.len(), 3); // Level 0 spawns 3 weapons
     }
 }

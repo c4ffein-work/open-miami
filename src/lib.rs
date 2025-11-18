@@ -89,6 +89,7 @@ mod wasm_entry {
         combat_system: CombatSystem,
         bullet_system: BulletSystem,
         projectile_system: ProjectileTrailSystem,
+        pickup_system: PickupSystem,
         level: Level,
         camera: Camera,
         last_time: f64,
@@ -112,6 +113,7 @@ mod wasm_entry {
                 combat_system: CombatSystem,
                 bullet_system: BulletSystem,
                 projectile_system: ProjectileTrailSystem,
+                pickup_system: PickupSystem,
                 level: Level::new(),
                 camera: Camera::new(),
                 last_time: 0.0,
@@ -502,6 +504,7 @@ mod wasm_entry {
                 InputSystem::update_player_movement(&mut self.world);
                 InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
                 InputSystem::handle_weapon_switch(&mut self.world);
+                InputSystem::handle_throw_weapon(&mut self.world);
             }
 
             // Handle info display toggle
@@ -516,6 +519,7 @@ mod wasm_entry {
             self.combat_system.run(&mut self.world, dt);
             self.bullet_system.run(&mut self.world, dt);
             self.projectile_system.run(&mut self.world, dt);
+            self.pickup_system.run(&mut self.world, dt);
 
             // Apply camera transform for world rendering
             self.camera.apply(graphics);

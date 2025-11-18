@@ -22,6 +22,9 @@ pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
     // Render bullets
     render_bullets(world, graphics);
 
+    // Render weapon pickups
+    render_weapon_pickups(world, graphics);
+
     // Render enemies
     render_enemies(world, graphics);
 
@@ -229,6 +232,52 @@ fn render_bullets(world: &World, graphics: &Graphics) {
         // Yellow bullets
         let color = Color::new(1.0, 0.9, 0.3, 1.0);
         graphics.draw_circle(Vec2::new(pos.x, pos.y), radius, color);
+    }
+}
+
+/// Render weapon pickups on the ground
+fn render_weapon_pickups(world: &World, graphics: &Graphics) {
+    let pickups: Vec<Entity> = world.query::<WeaponPickup>();
+
+    for entity in pickups {
+        let (pos, pickup) = match (
+            world.get_component::<Position>(entity),
+            world.get_component::<WeaponPickup>(entity),
+        ) {
+            (Some(p), Some(w)) => (p, w),
+            _ => continue,
+        };
+
+        // Different colors for different weapon types
+        let color = match pickup.weapon_type {
+            WeaponType::Pistol => Color::new(0.7, 0.7, 0.7, 1.0), // Gray
+            WeaponType::Shotgun => Color::new(0.8, 0.4, 0.2, 1.0), // Brown/Orange
+            WeaponType::MachineGun => Color::new(0.2, 0.8, 0.2, 1.0), // Green
+            WeaponType::Melee => Color::new(0.9, 0.9, 0.9, 1.0),  // White
+        };
+
+        let radius = world
+            .get_component::<Radius>(entity)
+            .map(|r| r.value)
+            .unwrap_or(20.0);
+
+        // Draw weapon as a rectangle to distinguish from circular entities
+        let size = radius * 1.5;
+        graphics.draw_rectangle(
+            Vec2::new(pos.x - size / 2.0, pos.y - size / 2.0),
+            size,
+            size,
+            color,
+        );
+
+        // Draw border
+        graphics.draw_rectangle_lines(
+            Vec2::new(pos.x - size / 2.0, pos.y - size / 2.0),
+            size,
+            size,
+            2.0,
+            Color::new(1.0, 1.0, 1.0, 0.8),
+        );
     }
 }
 

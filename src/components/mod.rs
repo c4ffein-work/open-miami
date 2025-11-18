@@ -256,6 +256,18 @@ pub struct Weapon {
     pub fire_timer: f32,
 }
 
+/// Weapon pickup component - marks a weapon lying on the ground
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WeaponPickup {
+    pub weapon_type: WeaponType,
+}
+
+impl WeaponPickup {
+    pub fn new(weapon_type: WeaponType) -> Self {
+        WeaponPickup { weapon_type }
+    }
+}
+
 /// Projectile trail for visual feedback
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProjectileTrail {
@@ -518,5 +530,24 @@ mod tests {
         let vel = Velocity::zero();
         assert_eq!(vel.x, 0.0);
         assert_eq!(vel.y, 0.0);
+    }
+
+    #[test]
+    fn test_weapon_pickup_creation() {
+        let pickup = WeaponPickup::new(WeaponType::Pistol);
+        assert_eq!(pickup.weapon_type, WeaponType::Pistol);
+
+        let pickup2 = WeaponPickup::new(WeaponType::Shotgun);
+        assert_eq!(pickup2.weapon_type, WeaponType::Shotgun);
+    }
+
+    #[test]
+    fn test_weapon_pickup_equality() {
+        let pickup1 = WeaponPickup::new(WeaponType::MachineGun);
+        let pickup2 = WeaponPickup::new(WeaponType::MachineGun);
+        let pickup3 = WeaponPickup::new(WeaponType::Melee);
+
+        assert_eq!(pickup1, pickup2);
+        assert_ne!(pickup1, pickup3);
     }
 }

@@ -5,6 +5,7 @@ use crate::ecs::{Entity, World};
 use crate::input;
 use crate::math::Vec2;
 use crate::systems::combat::CombatSystem;
+use crate::systems::pickup::PickupSystem;
 
 /// System that handles player input
 pub struct InputSystem;
@@ -171,6 +172,16 @@ impl InputSystem {
                 *weapon = Weapon::new(weapon_type);
             }
         }
+    }
+
+    /// Handle weapon throwing (right-click)
+    pub fn handle_throw_weapon(world: &mut World) -> bool {
+        if !input::is_mouse_button_down(input::mouse_buttons::RIGHT) {
+            return false;
+        }
+
+        // Use PickupSystem to drop the weapon
+        PickupSystem::drop_weapon(world)
     }
 }
 
