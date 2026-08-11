@@ -11,17 +11,48 @@ pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
         render_enemy_vision_cones(world, graphics);
     }
 
+    // Render dropped weapon pickups (beneath actors)
+    render_pickups(world, graphics);
+
     // Render projectile trails
     render_projectile_trails(world, graphics);
 
     // Render bullets
     render_bullets(world, graphics);
 
+    // Render weapons in flight
+    render_thrown_weapons(world, graphics);
+
     // Render enemies
     render_enemies(world, graphics);
 
+    // Render the boss (big; under the player)
+    render_bosses(world, graphics);
+
     // Render player (on top)
     render_player(world, graphics);
+}
+
+/// Render the shoggoth boss (drawn specially, not as a regular sprite).
+fn render_bosses(world: &World, graphics: &Graphics) {
+    for entity in world.query::<Boss>() {
+        let (pos, boss, health) = match (
+            world.get_component::<Position>(entity),
+            world.get_component::<Boss>(entity),
+            world.get_component::<Health>(entity),
+        ) {
+            (Some(p), Some(b), Some(h)) => (p, b, h),
+            _ => continue,
+        };
+        if health.is_dead() {
+            continue;
+        }
+        let radius = world
+            .get_component::<Radius>(entity)
+            .map(|r| r.value)
+            .unwrap_or(42.0);
+        graphics.draw_shoggoth(Vec2::new(pos.x, pos.y), radius, boss.enraged);
+    }
 }
 
 /// Render walls from the world
@@ -82,6 +113,47 @@ fn render_enemy_vision_cones(world: &World, graphics: &Graphics) {
     }
 }
 
+/// Color used to represent a weapon type on the ground / in the UI.
+fn weapon_color(weapon_type: WeaponType) -> Color {
+    match weapon_type {
+        WeaponType::Pistol => Color::new(0.9, 0.9, 0.9, 1.0), // Light gray
+        WeaponType::Shotgun => Color::new(1.0, 0.55, 0.1, 1.0), // Orange
+        WeaponType::MachineGun => Color::new(0.2, 0.8, 1.0, 1.0), // Cyan
+        WeaponType::Melee => Color::new(0.7, 0.7, 0.75, 1.0), // Steel
+    }
+}
+
+/// Render dropped weapon pickups as small floor markers.
+fn render_pickups(world: &World, graphics: &Graphics) {
+    let pickups: Vec<Entity> = world.query::<WeaponPickup>();
+
+    for entity in pickups {
+        let (pos, pickup) = match (
+            world.get_component::<Position>(entity),
+            world.get_component::<WeaponPickup>(entity),
+        ) {
+            (Some(p), Some(w)) => (p, w),
+            _ => continue,
+        };
+
+        let color = weapon_color(pickup.weapon_type);
+
+        // A little "on the floor" plate so the weapon marker reads as pickup-able
+        graphics.draw_rectangle(
+            Vec2::new(pos.x - 11.0, pos.y - 7.0),
+            22.0,
+            14.0,
+            Color::new(0.0, 0.0, 0.0, 0.35),
+        );
+        // Gun-ish bar
+        graphics.draw_rectangle(Vec2::new(pos.x - 8.0, pos.y - 2.0), 16.0, 4.0, color);
+        // Grip
+        graphics.draw_rectangle(Vec2::new(pos.x - 6.0, pos.y + 2.0), 4.0, 4.0, color);
+        // Outline for visibility on dark floor
+        graphics.draw_rectangle_lines(Vec2::new(pos.x - 11.0, pos.y - 7.0), 22.0, 14.0, 1.0, color);
+    }
+}
+
 /// Render projectile trails
 fn render_projectile_trails(world: &World, graphics: &Graphics) {
     let trails: Vec<Entity> = world.query::<ProjectileTrail>();
@@ -126,11 +198,40 @@ fn render_bullets(world: &World, graphics: &Graphics) {
     }
 }
 
+/// Render weapons currently flying through the air after being thrown.
+fn render_thrown_weapons(world: &World, graphics: &Graphics) {
+    let thrown: Vec<Entity> = world.query::<ThrownWeapon>();
+
+    for entity in thrown {
+        let (pos, tw) = match (
+            world.get_component::<Position>(entity),
+            world.get_component::<ThrownWeapon>(entity),
+        ) {
+            (Some(p), Some(t)) => (p, t),
+            _ => continue,
+        };
+
+        let color = weapon_color(tw.weapon_type);
+
+        // Spinning bar to sell the "tumbling weapon" look.
+        graphics.save();
+        graphics.translate(pos.x, pos.y);
+        graphics.rotate(tw.spin);
+        graphics.draw_rectangle(Vec2::new(-10.0, -2.0), 20.0, 4.0, color);
+        graphics.restore();
+    }
+}
+
 /// Render all enemies
 fn render_enemies(world: &World, graphics: &Graphics) {
     let enemies: Vec<Entity> = world.query::<Enemy>();
 
     for entity in enemies {
+        // The boss is drawn by render_bosses, not as a regular sprite.
+        if world.has_component::<Boss>(entity) {
+            continue;
+        }
+
         let (pos, rotation, health, ai) = match (
             world.get_component::<Position>(entity),
             world.get_component::<Rotation>(entity),
@@ -141,20 +242,16 @@ fn render_enemies(world: &World, graphics: &Graphics) {
             _ => continue,
         };
 
-        // Color based on enemy type
+        // Rogue AI palette, keyed by behavioral signature (flavor names in LORE.md).
         let base_color = match ai.initial_type {
-            EnemyType::Idle => Color::RED,
-            EnemyType::Wandering => Color::new(1.0, 1.0, 0.0, 1.0), // Yellow
-            EnemyType::Patrolling => Color::new(0.0, 1.0, 0.0, 1.0), // Green
+            EnemyType::Idle => Color::from_rgba(224, 49, 66, 255), // SENTINEL - hostile red
+            EnemyType::Wandering => Color::from_rgba(150, 70, 210, 255), // DRIFTER - glitch violet
+            EnemyType::Patrolling => Color::from_rgba(224, 40, 160, 255), // HUNTER - predatory magenta
         };
-        let is_dead = health.is_dead();
+        // Draw knocked-down (stunned) enemies as prone, like the dead pose.
+        let prone = health.is_dead() || world.has_component::<Stunned>(entity);
 
-        graphics.draw_pixelated_sprite(
-            Vec2::new(pos.x, pos.y),
-            rotation.angle,
-            base_color,
-            is_dead,
-        );
+        graphics.draw_pixelated_sprite(Vec2::new(pos.x, pos.y), rotation.angle, base_color, prone);
     }
 }
 
@@ -182,8 +279,8 @@ fn render_player(world: &World, graphics: &Graphics) {
         .unwrap_or(0);
 
     if health > 0 {
-        // Draw player as pixelated sprite
-        let base_color = Color::BLUE;
+        // Draw the friendly Claude purge bot in warm Anthropic coral.
+        let base_color = Color::from_rgba(217, 119, 87, 255);
         graphics.draw_pixelated_sprite(
             Vec2::new(pos.x, pos.y),
             rotation,
@@ -194,10 +291,12 @@ fn render_player(world: &World, graphics: &Graphics) {
 }
 
 /// Render UI (health, ammo, etc.)
+#[allow(clippy::too_many_arguments)]
 pub fn render_ui(
     graphics: &Graphics,
     health: i32,
     ammo: i32,
+    weapon_name: &str,
     enemies_alive: usize,
     player_alive: bool,
     death_time: f32,
@@ -226,18 +325,21 @@ pub fn render_ui(
             Color::WHITE,
         );
 
-        graphics.draw_text("Enemies:", Vec2::new(10.0, 90.0), 20.0, Color::WHITE);
+        graphics.draw_text("Weapon:", Vec2::new(10.0, 90.0), 20.0, Color::WHITE);
+        graphics.draw_text(weapon_name, Vec2::new(110.0, 90.0), 20.0, Color::WHITE);
+
+        graphics.draw_text("Rogues:", Vec2::new(10.0, 120.0), 20.0, Color::WHITE);
         graphics.draw_text(
             &format!("{}", enemies_alive),
-            Vec2::new(120.0, 90.0),
+            Vec2::new(120.0, 120.0),
             20.0,
             Color::WHITE,
         );
     } else if !player_alive {
         // Death screen with animations
 
-        // "YOU DIED" - reveal left to right
-        let message = "YOU DIED";
+        // "SYSTEM HALTED" - reveal left to right
+        let message = "SYSTEM HALTED";
         let reveal_duration = 1.0; // 1 second to fully reveal
         let reveal_progress = (death_time / reveal_duration).min(1.0);
         let chars_to_show = (message.len() as f32 * reveal_progress) as usize;
@@ -245,7 +347,7 @@ pub fn render_ui(
 
         graphics.draw_text(
             revealed_text,
-            Vec2::new(screen_width / 2.0 - 100.0, screen_height / 2.0),
+            Vec2::new(screen_width / 2.0 - 190.0, screen_height / 2.0),
             60.0,
             Color::RED,
         );
@@ -261,7 +363,7 @@ pub fn render_ui(
             let y_offset = y_amplitude * (anim_time * y_speed * 2.0 * std::f32::consts::PI).sin();
 
             graphics.draw_text(
-                "Press R to restart",
+                "Press R to reboot",
                 Vec2::new(
                     screen_width / 2.0 - 120.0,
                     screen_height / 2.0 + 80.0 + y_offset,
@@ -273,8 +375,8 @@ pub fn render_ui(
     } else if level_complete {
         // Level complete screen with animations
 
-        // "LEVEL COMPLETE" - reveal left to right
-        let message = "LEVEL COMPLETE";
+        // "SECTOR PURGED" - reveal left to right
+        let message = "SECTOR PURGED";
         let reveal_duration = 1.0;
         let reveal_progress = (level_complete_time / reveal_duration).min(1.0);
         let chars_to_show = (message.len() as f32 * reveal_progress) as usize;
@@ -287,7 +389,7 @@ pub fn render_ui(
             Color::new(0.0, 1.0, 0.0, 1.0), // Green
         );
 
-        // "TIME TO EXTRACT" - wobbling animation
+        // "EXFILTRATE" - wobbling animation
         if level_complete_time > reveal_duration {
             let anim_time = level_complete_time - reveal_duration;
 
@@ -297,9 +399,9 @@ pub fn render_ui(
             let y_offset = y_amplitude * (anim_time * y_speed * 2.0 * std::f32::consts::PI).sin();
 
             graphics.draw_text(
-                "TIME TO EXTRACT",
+                "EXFILTRATE",
                 Vec2::new(
-                    screen_width / 2.0 - 120.0,
+                    screen_width / 2.0 - 90.0,
                     screen_height / 2.0 + 80.0 + y_offset,
                 ),
                 30.0,
@@ -330,7 +432,7 @@ pub fn render_ui(
 
     // Controls info
     graphics.draw_text(
-        "WASD: Move | Mouse: Aim | Left Click: Shoot | 1-4: Weapons",
+        "WASD: Move | Aim: Mouse | Shoot: LClick | Throw: RClick | Pick up: E | 1-4: Weapons",
         Vec2::new(10.0, screen_height - 20.0),
         16.0,
         Color::GRAY,

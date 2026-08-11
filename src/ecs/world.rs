@@ -34,6 +34,10 @@ pub struct World {
     entities: Vec<Entity>,
     // Static walls in the world
     walls: Vec<Wall>,
+    // Per-world RNG state (LCG). Seeded deterministically so each World is
+    // independently reproducible; formerly this lived in a process-global
+    // `static mut` in the AI system.
+    rng_state: u32,
 }
 
 impl World {
@@ -43,7 +47,45 @@ impl World {
             components: HashMap::new(),
             entities: Vec::new(),
             walls: Vec::new(),
+            rng_state: 12345,
         }
+    }
+
+    /// Advance the world's LCG and return the next pseudo-random `u32`.
+    ///
+    /// Uses the classic Numerical Recipes constants; the seed (`12345`) and the
+    /// constants match the previous process-global generator, so a freshly
+    /// created world produces the exact same random sequence as before.
+    pub fn next_random(&mut self) -> u32 {
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(1664525)
+            .wrapping_add(1013904223);
+        self.rng_state
+    }
+
+    /// Random float in `[min, max)` (or `[min, max]` at the endpoint).
+    pub fn random_range(&mut self, min: f32, max: f32) -> f32 {
+        let r = self.next_random() as f32 / u32::MAX as f32;
+        r * (max - min) + min
+    }
+
+    /// Random integer in `[min, max]` (inclusive).
+    pub fn random_int_range(&mut self, min: i32, max: i32) -> i32 {
+        let range = (max - min + 1) as u32;
+        min + (self.next_random() % range) as i32
+    }
+
+    /// Read the current raw RNG state. Systems that need to draw several random
+    /// numbers while holding other borrows of the world can copy this out, use
+    /// it locally, then write it back via [`World::set_rng_state`].
+    pub fn rng_state(&self) -> u32 {
+        self.rng_state
+    }
+
+    /// Overwrite the raw RNG state (see [`World::rng_state`]).
+    pub fn set_rng_state(&mut self, state: u32) {
+        self.rng_state = state;
     }
 
     /// Create a new entity
@@ -107,13 +149,22 @@ impl World {
         }
     }
 
-    /// Get all entities that have a specific component
+    /// Get all entities that have a specific component.
+    ///
+    /// Results are sorted by entity id (i.e. spawn order). Component storage is a
+    /// `HashMap`, whose iteration order is randomized per-instance, so returning
+    /// the raw key order would make system behavior (RNG-consumption order,
+    /// nearest-target tie-breaks, ...) differ between otherwise identical worlds.
+    /// Sorting makes the whole simulation deterministic.
     pub fn query<T: Component>(&self) -> Vec<Entity> {
         let type_id = TypeId::of::<T>();
-        self.components
+        let mut entities: Vec<Entity> = self
+            .components
             .get(&type_id)
             .map(|storage| storage.keys().copied().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        entities.sort_unstable_by_key(|e| e.id());
+        entities
     }
 
     /// Get all entities that have all specified component types

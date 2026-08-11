@@ -1,10 +1,8 @@
-use crate::components::{
-    Bullet, Player, Position, Radius, Rotation, Speed, Velocity, Weapon, WeaponType,
-};
+use crate::components::{Player, Position, Rotation, Speed, Velocity, Weapon, WeaponType};
 use crate::ecs::{Entity, World};
+use crate::game::fire_player_weapon;
 use crate::input;
 use crate::math::Vec2;
-use crate::systems::combat::CombatSystem;
 
 /// System that handles player input
 pub struct InputSystem;
@@ -76,75 +74,13 @@ impl InputSystem {
         }
     }
 
-    /// Handle shooting input
+    /// Handle shooting input: fire on left mouse button, delegating to the
+    /// input-independent [`fire_player_weapon`].
     pub fn handle_shoot_input(world: &mut World, mouse_world_pos: Vec2) -> bool {
         if !input::is_mouse_button_down(input::mouse_buttons::LEFT) {
             return false;
         }
-
-        let player = match Self::find_player(world) {
-            Some(e) => e,
-            None => return false,
-        };
-
-        let player_pos = match world.get_component::<Position>(player) {
-            Some(pos) => *pos,
-            None => return false,
-        };
-
-        let weapon = match world.get_component_mut::<Weapon>(player) {
-            Some(w) => w,
-            None => return false,
-        };
-
-        // Check if weapon can fire
-        if !weapon.can_fire() {
-            return false;
-        }
-
-        let damage = weapon.damage;
-        let is_melee = weapon.weapon_type == WeaponType::Melee;
-
-        // Fire weapon
-        weapon.fire();
-
-        let target_pos = Position::from_vec2(mouse_world_pos);
-
-        // Process attack
-        let hit = if is_melee {
-            CombatSystem::process_melee(world, player_pos, target_pos, damage, 50.0)
-        } else {
-            // Spawn physical bullet
-            let bullet_entity = world.spawn();
-
-            // Calculate direction from player to target
-            let dx = target_pos.x - player_pos.x;
-            let dy = target_pos.y - player_pos.y;
-            let length = (dx * dx + dy * dy).sqrt();
-
-            // Normalize direction and multiply by bullet speed
-            let bullet = Bullet::new(damage);
-            let bullet_speed = bullet.speed;
-            let vel_x = if length > 0.0 {
-                (dx / length) * bullet_speed
-            } else {
-                0.0
-            };
-            let vel_y = if length > 0.0 {
-                (dy / length) * bullet_speed
-            } else {
-                0.0
-            };
-
-            world.add_component(bullet_entity, bullet);
-            world.add_component(bullet_entity, player_pos);
-            world.add_component(bullet_entity, Velocity::new(vel_x, vel_y));
-            world.add_component(bullet_entity, Radius::new(2.0)); // Small bullet radius
-
-            false // Bullets hit async, not instant
-        };
-
-        hit
+        fire_player_weapon(world, mouse_world_pos)
     }
 
     /// Handle weapon switching (1-4 keys)

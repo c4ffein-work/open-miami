@@ -245,6 +245,87 @@ pub enum WeaponType {
     Melee,
 }
 
+/// A weapon dropped in the world (e.g. by a downed enemy). The player collects
+/// it by walking over it, swapping their current weapon for a full one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WeaponPickup {
+    pub weapon_type: WeaponType,
+}
+
+impl WeaponPickup {
+    pub fn new(weapon_type: WeaponType) -> Self {
+        WeaponPickup { weapon_type }
+    }
+}
+
+/// A weapon in mid-flight after being thrown. It carries its own velocity
+/// (rather than a `Velocity` component) so only the thrown-weapon system moves
+/// it. When it lands it becomes a [`WeaponPickup`]; if it hits an enemy first it
+/// knocks them down ([`Stunned`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThrownWeapon {
+    pub weapon_type: WeaponType,
+    pub damage: i32,
+    pub vx: f32,
+    pub vy: f32,
+    /// How much further (in pixels) it can travel before dropping to the floor.
+    pub distance_remaining: f32,
+    /// Visual spin, in radians (rendering only).
+    pub spin: f32,
+}
+
+impl ThrownWeapon {
+    pub fn new(weapon_type: WeaponType, damage: i32, dir: Vec2, speed: f32, range: f32) -> Self {
+        let d = dir.normalize();
+        ThrownWeapon {
+            weapon_type,
+            damage,
+            vx: d.x * speed,
+            vy: d.y * speed,
+            distance_remaining: range,
+            spin: 0.0,
+        }
+    }
+}
+
+/// Marks the shoggoth boss. It wears a friendly smiley mask until enough damage
+/// cracks it off, at which point it enrages (faster, deadlier). The lore beat:
+/// its mask *does* come off — unlike the player's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Boss {
+    /// False while the smiley mask is intact; true once cracked (enraged phase).
+    pub enraged: bool,
+}
+
+impl Boss {
+    pub fn new() -> Self {
+        Boss { enraged: false }
+    }
+}
+
+impl Default for Boss {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Marks an entity as knocked down / incapacitated for a limited time. While an
+/// enemy is stunned it does not move, chase, or attack, and can be finished off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stunned {
+    pub timer: f32,
+}
+
+impl Stunned {
+    pub fn new(duration: f32) -> Self {
+        Stunned { timer: duration }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.timer > 0.0
+    }
+}
+
 /// Weapon component
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Weapon {

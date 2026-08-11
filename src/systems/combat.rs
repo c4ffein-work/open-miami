@@ -1,5 +1,15 @@
-use crate::components::{AIState, Enemy, Health, Player, Position, Radius, AI};
+use crate::components::{AIState, Boss, Enemy, Health, Player, Position, Radius, Stunned, AI};
 use crate::ecs::{Entity, System, World};
+
+/// Damage an enemy deals to the player per contact attack. Kept high so a swarm
+/// is genuinely lethal (a few hits kills the player), matching the fast, fragile
+/// feel of the genre while still giving the player a chance to react.
+pub const ENEMY_ATTACK_DAMAGE: i32 = 25;
+
+/// Contact damage from the boss while its mask is still on (menacing but slow).
+pub const BOSS_MASK_DAMAGE: i32 = 15;
+/// Contact damage from the boss once the mask cracks off (frantic and deadly).
+pub const BOSS_ENRAGED_DAMAGE: i32 = 45;
 
 /// System that handles combat damage dealing
 pub struct CombatSystem;
@@ -174,13 +184,25 @@ impl CombatSystem {
                 continue;
             }
 
+            // Knocked-down enemies can't attack.
+            if world.has_component::<Stunned>(enemy) {
+                continue;
+            }
+
             // Attack if in SurePlayerSeen state and within range
             if ai.state == AIState::SurePlayerSeen && ai.can_attack() {
                 let distance = enemy_pos.distance_to(&player_pos);
                 if distance < ai.attack_range {
+                    // The boss hits harder than a regular rogue (harder still
+                    // once its mask is off).
+                    let damage = match world.get_component::<Boss>(enemy) {
+                        Some(boss) if boss.enraged => BOSS_ENRAGED_DAMAGE,
+                        Some(_) => BOSS_MASK_DAMAGE,
+                        None => ENEMY_ATTACK_DAMAGE,
+                    };
                     // Deal damage to player
                     if let Some(health) = world.get_component_mut::<Health>(player_entity) {
-                        health.take_damage(10); // Enemy damage
+                        health.take_damage(damage);
                     }
 
                     // Reset cooldown
@@ -369,7 +391,7 @@ mod tests {
         system.run(&mut world, 0.016);
 
         let player_health = world.get_component::<Health>(player).unwrap();
-        assert_eq!(player_health.current, 90); // Took 10 damage
+        assert_eq!(player_health.current, 100 - ENEMY_ATTACK_DAMAGE);
     }
 
     #[test]

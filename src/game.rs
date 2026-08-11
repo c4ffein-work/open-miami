@@ -1,7 +1,35 @@
 // Game setup and entity spawning helpers
 use crate::components::*;
 use crate::ecs::{Entity, World};
+use crate::levels::{level_def, BOSS_LEVEL, PLAYER_SPAWN};
 use crate::math::Vec2;
+use crate::systems::boss::{BOSS_ATTACK_RANGE, BOSS_MASK_SPEED, BOSS_MAX_HEALTH, BOSS_RADIUS};
+use crate::systems::combat::CombatSystem;
+
+/// Where the shoggoth boss stands at the start of its floor.
+pub const BOSS_SPAWN: Vec2 = Vec2::new(400.0, 560.0);
+
+/// Spawn the shoggoth boss (a big, tanky, masked enemy) at `position`.
+pub fn spawn_boss(world: &mut World, position: Vec2) -> Entity {
+    let entity = world.spawn();
+    let pos = Position::from_vec2(position);
+
+    world.add_component(entity, Enemy);
+    world.add_component(entity, Boss::new());
+    world.add_component(entity, pos);
+    world.add_component(entity, Velocity::zero());
+    world.add_component(entity, Speed::new(BOSS_MASK_SPEED));
+    world.add_component(entity, Health::new(BOSS_MAX_HEALTH));
+    world.add_component(entity, Radius::new(BOSS_RADIUS));
+    world.add_component(entity, Rotation::new(0.0));
+
+    let mut ai = AI::new();
+    ai.attack_range = BOSS_ATTACK_RANGE;
+    ai.detection_range = 5000.0;
+    world.add_component(entity, ai);
+
+    entity
+}
 
 /// Spawn a player entity
 pub fn spawn_player(world: &mut World, position: Vec2) -> Entity {
@@ -19,6 +47,17 @@ pub fn spawn_player(world: &mut World, position: Vec2) -> Entity {
     entity
 }
 
+/// The weapon an enemy of a given type carries (and drops when killed).
+/// All enemy weapons are firearms so a dropped pickup is always an upgrade in
+/// ammo rather than a downgrade to fists.
+pub fn weapon_for_enemy(enemy_type: EnemyType) -> WeaponType {
+    match enemy_type {
+        EnemyType::Idle => WeaponType::Pistol,
+        EnemyType::Wandering => WeaponType::MachineGun,
+        EnemyType::Patrolling => WeaponType::Shotgun,
+    }
+}
+
 /// Spawn an enemy entity with a specific type
 pub fn spawn_enemy_with_type(world: &mut World, position: Vec2, enemy_type: EnemyType) -> Entity {
     let entity = world.spawn();
@@ -32,6 +71,7 @@ pub fn spawn_enemy_with_type(world: &mut World, position: Vec2, enemy_type: Enem
     world.add_component(entity, Radius::new(12.0));
     world.add_component(entity, Rotation::new(0.0));
     world.add_component(entity, AI::new_with_type(enemy_type, pos));
+    world.add_component(entity, Weapon::new(weapon_for_enemy(enemy_type)));
 
     entity
 }
@@ -41,146 +81,25 @@ pub fn spawn_enemy(world: &mut World, position: Vec2) -> Entity {
     spawn_enemy_with_type(world, position, EnemyType::Idle)
 }
 
-/// Initialize a new game world with player and enemies
+/// Initialize a new game world with the player and a level's designed layout.
 pub fn initialize_game(world: &mut World, level: usize) {
     // Spawn player (same position for all levels)
-    spawn_player(world, Vec2::new(400.0, 300.0));
+    spawn_player(world, PLAYER_SPAWN);
 
-    // Level 1 (level 0): Original layout with 4 enemies
-    if level == 0 {
-        // Original walls
-        world.add_wall(200.0, 200.0, 400.0, 20.0); // Horizontal wall
-        world.add_wall(200.0, 200.0, 20.0, 200.0); // Vertical wall (L-shape)
-        world.add_wall(800.0, 300.0, 20.0, 300.0); // Vertical wall
-        world.add_wall(400.0, 600.0, 300.0, 20.0); // Horizontal wall
+    // Build the level from its data-driven definition
+    let def = level_def(level);
 
-        // Original 4 enemies with different types
-        spawn_enemy_with_type(world, Vec2::new(600.0, 300.0), EnemyType::Idle);
-        spawn_enemy_with_type(world, Vec2::new(800.0, 400.0), EnemyType::Wandering);
-        spawn_enemy_with_type(world, Vec2::new(300.0, 500.0), EnemyType::Patrolling);
-        spawn_enemy_with_type(world, Vec2::new(700.0, 200.0), EnemyType::Idle);
-    } else {
-        // Levels 2-13: 12 enemies (3x more) with varied wall layouts
-        let enemy_count = 12;
+    for (x, y, width, height) in def.walls {
+        world.add_wall(x, y, width, height);
+    }
 
-        // Generate level-specific wall patterns using level as seed
-        match level {
-            1 => {
-                // Level 2: Cross pattern
-                world.add_wall(400.0, 100.0, 20.0, 400.0); // Vertical center
-                world.add_wall(200.0, 300.0, 400.0, 20.0); // Horizontal center
-                world.add_wall(700.0, 400.0, 20.0, 300.0); // Right vertical
-                world.add_wall(150.0, 600.0, 300.0, 20.0); // Bottom horizontal
-            }
-            2 => {
-                // Level 3: Diagonal corridors
-                world.add_wall(300.0, 150.0, 300.0, 20.0); // Top diagonal
-                world.add_wall(600.0, 150.0, 20.0, 300.0); // Right diagonal
-                world.add_wall(300.0, 450.0, 300.0, 20.0); // Bottom diagonal
-                world.add_wall(300.0, 150.0, 20.0, 300.0); // Left diagonal
-            }
-            3 => {
-                // Level 4: Room clusters
-                world.add_wall(250.0, 250.0, 150.0, 20.0); // Top left room
-                world.add_wall(250.0, 250.0, 20.0, 150.0);
-                world.add_wall(700.0, 350.0, 150.0, 20.0); // Right room
-                world.add_wall(700.0, 350.0, 20.0, 200.0);
-            }
-            4 => {
-                // Level 5: Maze-like
-                world.add_wall(200.0, 150.0, 20.0, 250.0); // Left maze wall
-                world.add_wall(400.0, 200.0, 20.0, 300.0); // Center maze wall
-                world.add_wall(600.0, 150.0, 20.0, 250.0); // Right maze wall
-                world.add_wall(300.0, 500.0, 400.0, 20.0); // Bottom wall
-            }
-            5 => {
-                // Level 6: Pillars
-                world.add_wall(300.0, 250.0, 60.0, 60.0); // Top left pillar
-                world.add_wall(600.0, 250.0, 60.0, 60.0); // Top right pillar
-                world.add_wall(300.0, 500.0, 60.0, 60.0); // Bottom left pillar
-                world.add_wall(600.0, 500.0, 60.0, 60.0); // Bottom right pillar
-            }
-            6 => {
-                // Level 7: T-junctions
-                world.add_wall(250.0, 300.0, 300.0, 20.0); // Top horizontal
-                world.add_wall(450.0, 300.0, 20.0, 200.0); // Center vertical
-                world.add_wall(700.0, 200.0, 20.0, 300.0); // Right vertical
-                world.add_wall(250.0, 550.0, 200.0, 20.0); // Bottom horizontal
-            }
-            7 => {
-                // Level 8: Spiral
-                world.add_wall(300.0, 200.0, 400.0, 20.0); // Top
-                world.add_wall(680.0, 200.0, 20.0, 300.0); // Right
-                world.add_wall(300.0, 480.0, 400.0, 20.0); // Bottom
-                world.add_wall(300.0, 280.0, 20.0, 200.0); // Left inner
-            }
-            8 => {
-                // Level 9: Grid
-                world.add_wall(350.0, 200.0, 20.0, 400.0); // Left vertical
-                world.add_wall(550.0, 200.0, 20.0, 400.0); // Right vertical
-                world.add_wall(200.0, 350.0, 500.0, 20.0); // Top horizontal
-                world.add_wall(200.0, 500.0, 500.0, 20.0); // Bottom horizontal
-            }
-            9 => {
-                // Level 10: U-shapes
-                world.add_wall(250.0, 200.0, 20.0, 250.0); // Left U
-                world.add_wall(250.0, 430.0, 150.0, 20.0);
-                world.add_wall(650.0, 300.0, 20.0, 250.0); // Right U
-                world.add_wall(500.0, 300.0, 150.0, 20.0);
-            }
-            10 => {
-                // Level 11: Zigzag
-                world.add_wall(200.0, 250.0, 250.0, 20.0); // Top left
-                world.add_wall(450.0, 250.0, 20.0, 150.0); // Down
-                world.add_wall(450.0, 400.0, 250.0, 20.0); // Bottom right
-                world.add_wall(700.0, 400.0, 20.0, 150.0); // Down right
-            }
-            11 => {
-                // Level 12: Arena (minimal walls)
-                world.add_wall(400.0, 250.0, 200.0, 20.0); // Top center
-                world.add_wall(400.0, 500.0, 200.0, 20.0); // Bottom center
-                world.add_wall(300.0, 350.0, 20.0, 100.0); // Left small
-                world.add_wall(680.0, 350.0, 20.0, 100.0); // Right small
-            }
-            _ => {
-                // Level 13: Fortress (thick perimeter and central fortification)
-                world.add_wall(150.0, 150.0, 700.0, 30.0); // Top wall (thick)
-                world.add_wall(150.0, 150.0, 30.0, 500.0); // Left wall (thick)
-                world.add_wall(820.0, 150.0, 30.0, 500.0); // Right wall (thick)
-                world.add_wall(150.0, 620.0, 700.0, 30.0); // Bottom wall (thick)
-                world.add_wall(400.0, 320.0, 100.0, 100.0); // Central fortress
-                world.add_wall(350.0, 280.0, 200.0, 20.0); // Top fortification
-                world.add_wall(350.0, 440.0, 200.0, 20.0); // Bottom fortification
-            }
-        }
+    for (x, y, enemy_type) in def.enemies {
+        spawn_enemy_with_type(world, Vec2::new(x, y), enemy_type);
+    }
 
-        // Spawn 12 enemies in level-specific formations
-        // Base positions scaled and varied by level
-        let offset = (level as f32 * 13.7) % 100.0; // Pseudo-random offset per level
-
-        for i in 0..enemy_count {
-            let angle = (i as f32) * 2.0 * std::f32::consts::PI / (enemy_count as f32);
-            let radius = 250.0 + offset;
-            let x = 500.0 + radius * angle.cos();
-            let y = 400.0 + radius * angle.sin();
-
-            // Add some variation to prevent perfect circles
-            let variation_x = ((i * 17 + level * 23) % 100) as f32 - 50.0;
-            let variation_y = ((i * 31 + level * 19) % 100) as f32 - 50.0;
-
-            // Distribute enemy types evenly: Idle, Wandering, Patrolling
-            let enemy_type = match i % 3 {
-                0 => EnemyType::Idle,
-                1 => EnemyType::Wandering,
-                _ => EnemyType::Patrolling,
-            };
-
-            spawn_enemy_with_type(
-                world,
-                Vec2::new(x + variation_x, y + variation_y),
-                enemy_type,
-            );
-        }
+    // The hidden final floor: the shoggoth waits below.
+    if level == BOSS_LEVEL {
+        spawn_boss(world, BOSS_SPAWN);
     }
 }
 
@@ -214,6 +133,81 @@ pub fn get_player_ammo(world: &World) -> i32 {
         .unwrap_or(0)
 }
 
+/// Fire the player's currently held weapon toward a world position. Melee hits
+/// instantly (returns whether it connected); ranged weapons spawn a bullet
+/// entity (returns `false`, since bullets resolve asynchronously). Does nothing
+/// if the weapon is on cooldown or out of ammo.
+///
+/// This is the input-independent core of shooting so it can be driven both by
+/// the browser input layer and by the headless [`crate::sim::Simulation`].
+pub fn fire_player_weapon(world: &mut World, target_world_pos: Vec2) -> bool {
+    let player = match world.query::<Player>().first() {
+        Some(&e) => e,
+        None => return false,
+    };
+    let player_pos = match world.get_component::<Position>(player) {
+        Some(p) => *p,
+        None => return false,
+    };
+    let (damage, is_melee, can_fire) = match world.get_component::<Weapon>(player) {
+        Some(w) => (w.damage, w.weapon_type == WeaponType::Melee, w.can_fire()),
+        None => return false, // unarmed
+    };
+
+    if !can_fire {
+        return false;
+    }
+
+    if let Some(weapon) = world.get_component_mut::<Weapon>(player) {
+        weapon.fire();
+    }
+
+    let target_pos = Position::from_vec2(target_world_pos);
+
+    if is_melee {
+        CombatSystem::process_melee(world, player_pos, target_pos, damage, 50.0)
+    } else {
+        let dx = target_pos.x - player_pos.x;
+        let dy = target_pos.y - player_pos.y;
+        let length = (dx * dx + dy * dy).sqrt();
+
+        let bullet = Bullet::new(damage);
+        let bullet_speed = bullet.speed;
+        let (vel_x, vel_y) = if length > 0.0 {
+            (dx / length * bullet_speed, dy / length * bullet_speed)
+        } else {
+            (0.0, 0.0)
+        };
+
+        let bullet_entity = world.spawn();
+        world.add_component(bullet_entity, bullet);
+        world.add_component(bullet_entity, player_pos);
+        world.add_component(bullet_entity, Velocity::new(vel_x, vel_y));
+        world.add_component(bullet_entity, Radius::new(2.0));
+
+        false
+    }
+}
+
+/// Get the player's current weapon type (for the HUD)
+pub fn get_player_weapon(world: &World) -> Option<WeaponType> {
+    let players: Vec<Entity> = world.query::<Player>();
+    players
+        .first()
+        .and_then(|&e| world.get_component::<Weapon>(e))
+        .map(|w| w.weapon_type)
+}
+
+/// Human-readable name for a weapon type
+pub fn weapon_name(weapon_type: WeaponType) -> &'static str {
+    match weapon_type {
+        WeaponType::Pistol => "Pistol",
+        WeaponType::Shotgun => "Shotgun",
+        WeaponType::MachineGun => "Machine Gun",
+        WeaponType::Melee => "Melee",
+    }
+}
+
 /// Get player position
 pub fn get_player_position(world: &World) -> Option<Vec2> {
     let players: Vec<Entity> = world.query::<Player>();
@@ -221,6 +215,16 @@ pub fn get_player_position(world: &World) -> Option<Vec2> {
         .first()
         .and_then(|&e| world.get_component::<Position>(e))
         .map(|p| p.to_vec2())
+}
+
+/// Sum of current health across all enemies (used to detect a hit landing).
+pub fn total_enemy_health(world: &World) -> i32 {
+    world
+        .query::<Enemy>()
+        .iter()
+        .filter_map(|&e| world.get_component::<Health>(e))
+        .map(|h| h.current.max(0))
+        .sum()
 }
 
 /// Count alive enemies

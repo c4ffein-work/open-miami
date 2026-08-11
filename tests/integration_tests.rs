@@ -175,7 +175,10 @@ fn test_enemy_attacks_player() {
     combat_system.run(&mut world, 0.016);
 
     let health = world.get_component::<Health>(player).unwrap();
-    assert_eq!(health.current, 90); // 100 - 10 = 90
+    assert_eq!(
+        health.current,
+        100 - open_miami::systems::combat::ENEMY_ATTACK_DAMAGE
+    );
 }
 
 #[test]

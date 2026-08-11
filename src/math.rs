@@ -82,6 +82,37 @@ impl AddAssign for Vec2 {
     }
 }
 
+/// A half-open range of tile indices `[min, max)` on both axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileRange {
+    pub min_x: i32,
+    pub min_y: i32,
+    pub max_x: i32,
+    pub max_y: i32,
+}
+
+/// Compute the tile indices overlapping a world-space viewport, clamped to the
+/// grid `[0, tiles_x) x [0, tiles_y)`. Used to draw only visible floor tiles
+/// instead of the whole level every frame.
+pub fn visible_tile_range(
+    view_min: Vec2,
+    view_max: Vec2,
+    tile_size: f32,
+    tiles_x: i32,
+    tiles_y: i32,
+) -> TileRange {
+    let min_x = (view_min.x / tile_size).floor() as i32;
+    let min_y = (view_min.y / tile_size).floor() as i32;
+    let max_x = (view_max.x / tile_size).ceil() as i32;
+    let max_y = (view_max.y / tile_size).ceil() as i32;
+    TileRange {
+        min_x: min_x.clamp(0, tiles_x),
+        min_y: min_y.clamp(0, tiles_y),
+        max_x: max_x.clamp(0, tiles_x),
+        max_y: max_y.clamp(0, tiles_y),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
     pub r: f32,
@@ -159,5 +190,58 @@ impl Color {
             (self.b * 255.0) as u8,
             self.a
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_visible_tile_range_center() {
+        // Viewport covering world x/y in [100, 260) with 50px tiles => tiles 2..6
+        let range = visible_tile_range(
+            Vec2::new(100.0, 100.0),
+            Vec2::new(260.0, 260.0),
+            50.0,
+            40,
+            40,
+        );
+        assert_eq!(range.min_x, 2);
+        assert_eq!(range.min_y, 2);
+        assert_eq!(range.max_x, 6); // 260/50 = 5.2 -> ceil 6
+        assert_eq!(range.max_y, 6);
+    }
+
+    #[test]
+    fn test_visible_tile_range_clamps_to_grid() {
+        // Viewport partly off the negative edge and past the far edge
+        let range = visible_tile_range(
+            Vec2::new(-500.0, -500.0),
+            Vec2::new(9000.0, 9000.0),
+            50.0,
+            40,
+            40,
+        );
+        assert_eq!(range.min_x, 0);
+        assert_eq!(range.min_y, 0);
+        assert_eq!(range.max_x, 40);
+        assert_eq!(range.max_y, 40);
+    }
+
+    #[test]
+    fn test_visible_tile_range_culls_most_tiles() {
+        // A 960x720 viewport over a 2000x2000 / 50px grid (40x40 = 1600 tiles)
+        // should touch far fewer than the whole grid.
+        let range = visible_tile_range(
+            Vec2::new(500.0, 500.0),
+            Vec2::new(1460.0, 1220.0),
+            50.0,
+            40,
+            40,
+        );
+        let visible = (range.max_x - range.min_x) * (range.max_y - range.min_y);
+        assert!(visible < 1600, "expected culling, drew {visible} tiles");
+        assert!(visible > 0);
     }
 }

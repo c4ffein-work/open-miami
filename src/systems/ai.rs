@@ -1,20 +1,32 @@
 use crate::collision::has_line_of_sight;
 use crate::components::{
-    AIState, Enemy, EnemyType, Health, Player, Position, Rotation, Speed, Velocity, WanderState, AI,
+    AIState, Enemy, EnemyType, Health, Player, Position, Rotation, Speed, Stunned, Velocity,
+    WanderState, AI,
 };
 use crate::ecs::world::Wall;
 use crate::ecs::{Entity, System, World};
 use crate::pathfinding::NavigationGrid;
 use std::f32::consts::PI;
 
-// Simple pseudo-random number generator using hash
-static mut RNG_STATE: u32 = 12345;
+// Pseudo-random number generation. The RNG state lives in the `World` (so every
+// `Simulation` is independently reproducible); these free helpers operate on a
+// borrowed copy of that state threaded through the AI update. They use the same
+// LCG constants as the world so the produced sequence is unchanged.
+fn next_random(state: &mut u32) -> u32 {
+    *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+    *state
+}
 
-fn next_random() -> u32 {
-    unsafe {
-        RNG_STATE = RNG_STATE.wrapping_mul(1664525).wrapping_add(1013904223);
-        RNG_STATE
-    }
+/// Random float between min and max.
+fn random_range(state: &mut u32, min: f32, max: f32) -> f32 {
+    let r = next_random(state) as f32 / u32::MAX as f32;
+    r * (max - min) + min
+}
+
+/// Random integer between min and max (inclusive).
+fn random_int_range(state: &mut u32, min: i32, max: i32) -> i32 {
+    let range = (max - min + 1) as u32;
+    min + (next_random(state) % range) as i32
 }
 
 /// System that handles enemy AI behavior
@@ -66,6 +78,7 @@ impl AISystem {
 
     /// Find the direction with the most open space using 36 direction rays
     fn find_most_open_direction(
+        rng: &mut u32,
         pos: &Position,
         spawn: &Position,
         square_size: f32,
@@ -114,23 +127,11 @@ impl AISystem {
         }
 
         // 50% chance: use best direction, 50% chance: random direction
-        if next_random().is_multiple_of(2) {
+        if next_random(rng).is_multiple_of(2) {
             best_direction
         } else {
-            (next_random() as f32 / u32::MAX as f32) * PI * 2.0
+            (next_random(rng) as f32 / u32::MAX as f32) * PI * 2.0
         }
-    }
-
-    /// Random float between min and max
-    fn random_range(min: f32, max: f32) -> f32 {
-        let r = next_random() as f32 / u32::MAX as f32;
-        r * (max - min) + min
-    }
-
-    /// Random integer between min and max (inclusive)
-    fn random_int_range(min: i32, max: i32) -> i32 {
-        let range = (max - min + 1) as u32;
-        min + (next_random() % range) as i32
     }
 }
 
@@ -144,6 +145,11 @@ impl System for AISystem {
 
         // Get walls before any mutable borrows (clone to avoid borrow conflicts)
         let walls: Vec<Wall> = world.walls().to_vec();
+
+        // Pull the world's RNG state into a local so it can be threaded through
+        // the AI update without conflicting with component borrows of `world`.
+        // It is written back at the end so the sequence continues across ticks.
+        let mut rng = world.rng_state();
 
         // Create navigation grid from world walls
         let nav_grid = NavigationGrid::new(&walls);
@@ -163,6 +169,15 @@ impl System for AISystem {
 
             // Skip dead enemies
             if health.is_dead() {
+                if let Some(velocity) = world.get_component_mut::<Velocity>(entity) {
+                    velocity.x = 0.0;
+                    velocity.y = 0.0;
+                }
+                continue;
+            }
+
+            // Skip knocked-down enemies: they can't chase or think while stunned.
+            if world.has_component::<Stunned>(entity) {
                 if let Some(velocity) = world.get_component_mut::<Velocity>(entity) {
                     velocity.x = 0.0;
                     velocity.y = 0.0;
@@ -211,7 +226,9 @@ impl System for AISystem {
                                     // Stay still, do nothing
                                 }
                                 EnemyType::Wandering | EnemyType::Patrolling => {
-                                    Self::update_wander_behavior(ai, &enemy_pos, &walls, dt);
+                                    Self::update_wander_behavior(
+                                        &mut rng, ai, &enemy_pos, &walls, dt,
+                                    );
                                 }
                             }
                         }
@@ -246,7 +263,7 @@ impl System for AISystem {
                             if ai.state_timer <= 0.0 {
                                 // Been at last known position too long, get confused
                                 ai.state = AIState::Confused;
-                                ai.confusion_looks_remaining = Self::random_int_range(2, 3);
+                                ai.confusion_looks_remaining = random_int_range(&mut rng, 2, 3);
                                 ai.confusion_look_timer = ai.confusion_look_duration;
                             }
                         }
@@ -266,7 +283,7 @@ impl System for AISystem {
                                     // Done looking, transition based on initial type
                                     ai.state = AIState::Unaware;
                                     ai.wander_state = WanderState::Waiting;
-                                    ai.wander_timer = Self::random_range(1.0, 2.0);
+                                    ai.wander_timer = random_range(&mut rng, 1.0, 2.0);
                                 } else {
                                     // Look in another direction
                                     ai.confusion_look_timer = ai.confusion_look_duration;
@@ -386,7 +403,7 @@ impl System for AISystem {
                 }
                 AIState::Confused => {
                     let rot = if ai.confusion_look_timer == ai.confusion_look_duration {
-                        Self::random_range(0.0, PI * 2.0)
+                        random_range(&mut rng, 0.0, PI * 2.0)
                     } else {
                         world
                             .get_component::<Rotation>(entity)
@@ -411,12 +428,16 @@ impl System for AISystem {
                 }
             }
         }
+
+        // Persist the advanced RNG state back into the world so the next tick
+        // continues the same deterministic sequence.
+        world.set_rng_state(rng);
     }
 }
 
 impl AISystem {
     /// Update wandering/patrolling behavior
-    fn update_wander_behavior(ai: &mut AI, pos: &Position, walls: &[Wall], dt: f32) {
+    fn update_wander_behavior(rng: &mut u32, ai: &mut AI, pos: &Position, walls: &[Wall], dt: f32) {
         match ai.wander_state {
             WanderState::Moving => {
                 ai.wander_timer -= dt;
@@ -448,6 +469,7 @@ impl AISystem {
                     // If hit obstacle, find best direction
                     if hit_wall || outside_square {
                         ai.wander_direction = Self::find_most_open_direction(
+                            rng,
                             pos,
                             &ai.spawn_position,
                             ai.movement_square_size,
@@ -461,7 +483,7 @@ impl AISystem {
                 if ai.wander_look_timer <= 0.0 {
                     // Done looking, wait before moving
                     ai.wander_state = WanderState::Waiting;
-                    ai.wander_timer = Self::random_range(1.0, 2.0);
+                    ai.wander_timer = random_range(rng, 1.0, 2.0);
                 }
             }
             WanderState::Waiting => {
@@ -469,8 +491,9 @@ impl AISystem {
                 if ai.wander_timer <= 0.0 {
                     // Start moving in new direction
                     ai.wander_state = WanderState::Moving;
-                    ai.wander_timer = Self::random_range(1.0, 2.0);
+                    ai.wander_timer = random_range(rng, 1.0, 2.0);
                     ai.wander_direction = Self::find_most_open_direction(
+                        rng,
                         pos,
                         &ai.spawn_position,
                         ai.movement_square_size,

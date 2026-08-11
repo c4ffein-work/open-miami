@@ -1,5 +1,5 @@
 use crate::graphics::Graphics;
-use crate::math::{Color, Vec2};
+use crate::math::{visible_tile_range, Color, Vec2};
 
 pub struct Level {
     width: f32,
@@ -22,13 +22,18 @@ impl Level {
         Self::default()
     }
 
-    pub fn render(&self, graphics: &Graphics) {
+    /// Render the floor grid. Only tiles overlapping `view_min..view_max`
+    /// (world-space camera bounds) are drawn, so cost scales with the screen
+    /// size rather than the whole 2000x2000 level.
+    pub fn render(&self, graphics: &Graphics, view_min: Vec2, view_max: Vec2) {
         // Draw floor tiles with a grid pattern
         let tiles_x = (self.width / self.tile_size) as i32;
         let tiles_y = (self.height / self.tile_size) as i32;
 
-        for x in 0..tiles_x {
-            for y in 0..tiles_y {
+        let range = visible_tile_range(view_min, view_max, self.tile_size, tiles_x, tiles_y);
+
+        for x in range.min_x..range.max_x {
+            for y in range.min_y..range.max_y {
                 let color = if (x + y) % 2 == 0 {
                     Color::new(40.0 / 255.0, 35.0 / 255.0, 45.0 / 255.0, 1.0)
                 } else {

@@ -3,6 +3,11 @@ use crate::components::{Position, Radius, Velocity};
 use crate::ecs::{System, World};
 use crate::math::Vec2;
 
+/// Size of the playable world (matches the rendered floor). Entities are kept
+/// inside `[0, WORLD_SIZE]` on both axes so nothing (notably wandering enemies)
+/// can drift out of bounds where it becomes unreachable.
+const WORLD_SIZE: f32 = 2000.0;
+
 /// System that applies velocity to position
 pub struct MovementSystem;
 
@@ -73,9 +78,9 @@ impl System for MovementSystem {
                     }
                 }
 
-                // Apply the final position
-                pos.x = final_x;
-                pos.y = final_y;
+                // Keep entities within the world bounds.
+                pos.x = final_x.clamp(0.0, WORLD_SIZE);
+                pos.y = final_y.clamp(0.0, WORLD_SIZE);
             }
         }
     }

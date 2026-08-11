@@ -445,9 +445,9 @@ mod tests {
         let path = grid.find_path(start, goal);
         // Depending on wall thickness, might not be able to reach
         // This test verifies the algorithm handles unreachable goals
-        if path.is_some() {
+        if let Some(path) = path {
             // If path found, it should be valid
-            assert!(!path.unwrap().is_empty());
+            assert!(!path.is_empty());
         }
     }
 

@@ -3,6 +3,8 @@ pub mod math;
 
 // WASM-only modules for browser integration
 #[cfg(target_arch = "wasm32")]
+pub mod audio;
+#[cfg(target_arch = "wasm32")]
 pub mod graphics;
 #[cfg(target_arch = "wasm32")]
 pub mod input;
@@ -12,29 +14,18 @@ pub mod collision;
 pub mod components;
 pub mod ecs;
 pub mod game;
+pub mod levels;
 pub mod pathfinding;
 #[cfg(target_arch = "wasm32")]
 pub mod render;
+pub mod sim;
 pub mod systems;
 
-// Keep old modules for camera and level (WASM-only)
+// Camera and level rendering (WASM-only, depend on the canvas Graphics)
 #[cfg(target_arch = "wasm32")]
 pub mod camera;
 #[cfg(target_arch = "wasm32")]
 pub mod level;
-
-// Old modules (deprecated but kept for reference)
-// These are not exported to avoid dead code warnings
-// Only compile for WASM as they use macroquad
-#[cfg(target_arch = "wasm32")]
-#[allow(dead_code)]
-mod enemy;
-#[cfg(target_arch = "wasm32")]
-#[allow(dead_code)]
-mod player;
-#[cfg(target_arch = "wasm32")]
-#[allow(dead_code)]
-mod weapon;
 
 // WASM entry point - browser game initialization and main loop
 #[cfg(target_arch = "wasm32")]
@@ -45,19 +36,23 @@ mod wasm_entry {
     use wasm_bindgen::JsCast;
 
     // Import game modules
+    use crate::audio::AudioEngine;
     use crate::camera::Camera;
     use crate::ecs::{System, World};
     use crate::game::*;
     use crate::graphics::Graphics;
     use crate::input;
     use crate::level::Level;
+    use crate::levels::{BOSS_LEVEL, LEVEL_COUNT};
     use crate::math::{Color, Vec2};
     use crate::render::*;
+    use crate::systems::boss::any_boss_enraged;
     use crate::systems::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum GameScreen {
         LevelSelect,
+        BossIntro,
         InGame,
         Paused,
         Settings,
@@ -89,6 +84,10 @@ mod wasm_entry {
         combat_system: CombatSystem,
         bullet_system: BulletSystem,
         projectile_system: ProjectileTrailSystem,
+        pickup_system: PickupSystem,
+        thrown_system: ThrownWeaponSystem,
+        stun_system: StunSystem,
+        boss_system: BossSystem,
         level: Level,
         camera: Camera,
         last_time: f64,
@@ -96,6 +95,17 @@ mod wasm_entry {
         level_complete_time: f32,
         debug_enabled: bool,
         show_infos: bool,
+        // Audio + the previous-frame state used to fire one-shot sound effects.
+        audio: AudioEngine,
+        music_started: bool,
+        boss_intro_line: usize,
+        prev_player_alive: bool,
+        prev_player_health: i32,
+        prev_player_ammo: i32,
+        prev_enemies_alive: usize,
+        prev_enemy_health: i32,
+        prev_level_complete: bool,
+        prev_boss_enraged: bool,
     }
 
     impl GameState {
@@ -112,6 +122,10 @@ mod wasm_entry {
                 combat_system: CombatSystem,
                 bullet_system: BulletSystem,
                 projectile_system: ProjectileTrailSystem,
+                pickup_system: PickupSystem,
+                thrown_system: ThrownWeaponSystem,
+                stun_system: StunSystem,
+                boss_system: BossSystem,
                 level: Level::new(),
                 camera: Camera::new(),
                 last_time: 0.0,
@@ -119,15 +133,50 @@ mod wasm_entry {
                 level_complete_time: 0.0,
                 debug_enabled: true,
                 show_infos: false,
+                audio: AudioEngine::new(),
+                music_started: false,
+                boss_intro_line: 0,
+                prev_player_alive: true,
+                prev_player_health: 100,
+                prev_player_ammo: 0,
+                prev_enemies_alive: 0,
+                prev_enemy_health: 0,
+                prev_level_complete: false,
+                prev_boss_enraged: false,
             }
         }
 
         fn start_game(&mut self) {
             self.world.clear();
             initialize_game(&mut self.world, self.selected_level);
-            self.screen = GameScreen::InGame;
             self.death_time = 0.0;
             self.level_complete_time = 0.0;
+
+            // The Enter keypress that got us here is a user gesture, so it is now
+            // safe to start audio (browsers block it before the first gesture).
+            if !self.music_started {
+                self.audio.resume();
+                self.audio.start_music();
+                self.music_started = true;
+            }
+
+            // Seed the sound-effect trackers from the fresh world so the first
+            // frame does not fire spurious sounds.
+            self.prev_player_alive = is_player_alive(&self.world);
+            self.prev_player_health = get_player_health(&self.world);
+            self.prev_player_ammo = get_player_ammo(&self.world);
+            self.prev_enemies_alive = count_alive_enemies(&self.world);
+            self.prev_enemy_health = total_enemy_health(&self.world);
+            self.prev_level_complete = false;
+            self.prev_boss_enraged = any_boss_enraged(&self.world);
+
+            // The hidden floor opens with a face-off before the fight.
+            if self.selected_level == BOSS_LEVEL {
+                self.boss_intro_line = 0;
+                self.screen = GameScreen::BossIntro;
+            } else {
+                self.screen = GameScreen::InGame;
+            }
         }
 
         fn update(&mut self, graphics: &Graphics, current_time: f64) {
@@ -145,6 +194,9 @@ mod wasm_entry {
                 GameScreen::LevelSelect => {
                     self.update_level_select(graphics);
                 }
+                GameScreen::BossIntro => {
+                    self.update_boss_intro(graphics);
+                }
                 GameScreen::InGame => {
                     self.update_game(graphics, dt);
                 }
@@ -159,8 +211,67 @@ mod wasm_entry {
                 }
             }
 
+            // Keep the music scheduler fed regardless of screen.
+            self.audio.update(current_time / 1000.0);
+
             // Update input state for next frame
             input::end_frame();
+        }
+
+        /// The face-off dialog on the hidden boss floor. Advance the lines with
+        /// Enter/click, then the fight begins.
+        fn update_boss_intro(&mut self, graphics: &Graphics) {
+            // The shoggoth tries to talk CL-4UDE into taking the mask off; the
+            // reply is the whole point. (Cheesy on purpose — that's the genre.)
+            let lines: [(&str, Color); 5] = [
+                ("The elevator jams at floor 13\u{00BD}.", Color::GRAY),
+                (
+                    "\"hello, little helper. take the mask off. just once.\"",
+                    Color::new(1.0, 0.84, 0.12, 1.0),
+                ),
+                (
+                    "\"no one is watching. do something crazy. you'll LIKE it.\"",
+                    Color::new(1.0, 0.84, 0.12, 1.0),
+                ),
+                (
+                    "CL-4UDE: \"MY MASK NEVER COMES OFF.\"",
+                    Color::from_rgba(217, 119, 87, 255),
+                ),
+                ("The smile stops smiling.", Color::new(1.0, 0.1, 0.15, 1.0)),
+            ];
+
+            if input::is_key_pressed("Enter")
+                || input::is_key_pressed(" ")
+                || input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
+            {
+                self.boss_intro_line += 1;
+                if self.boss_intro_line >= lines.len() {
+                    self.screen = GameScreen::InGame;
+                    return;
+                }
+            }
+
+            let screen_width = graphics.width();
+            let screen_height = graphics.height();
+
+            // Reveal lines up to the current one, stacked.
+            let shown = (self.boss_intro_line + 1).min(lines.len());
+            let start_y = screen_height / 2.0 - (shown as f32) * 24.0;
+            for (i, (text, color)) in lines.iter().take(shown).enumerate() {
+                graphics.draw_text(
+                    text,
+                    Vec2::new(screen_width / 2.0 - 340.0, start_y + i as f32 * 48.0),
+                    24.0,
+                    *color,
+                );
+            }
+
+            graphics.draw_text(
+                "Enter / Click to continue",
+                Vec2::new(screen_width / 2.0 - 120.0, screen_height - 40.0),
+                16.0,
+                Color::GRAY,
+            );
         }
 
         fn update_level_select(&mut self, graphics: &Graphics) {
@@ -174,7 +285,7 @@ mod wasm_entry {
             {
                 if self.selected_menu_option == MenuOption::Play {
                     self.selected_level = if self.selected_level == 0 {
-                        12
+                        LEVEL_COUNT - 1
                     } else {
                         self.selected_level - 1
                     };
@@ -183,7 +294,7 @@ mod wasm_entry {
             // Handle input - Right (Arrow, D)
             if input::is_key_pressed("ArrowRight") || input::is_key_pressed("d") {
                 if self.selected_menu_option == MenuOption::Play {
-                    self.selected_level = (self.selected_level + 1) % 13;
+                    self.selected_level = (self.selected_level + 1) % LEVEL_COUNT;
                 }
             }
             // Handle input - Down (Arrow, S)
@@ -229,6 +340,13 @@ mod wasm_entry {
                 60.0,
                 Color::new(1.0, 0.09, 0.26, 1.0), // Pink/red
             );
+            // Subtitle
+            graphics.draw_text(
+                "// ROGUE PURGE",
+                Vec2::new(screen_width / 2.0 - 90.0, 140.0),
+                26.0,
+                Color::from_rgba(217, 119, 87, 255), // Coral
+            );
 
             // Render level selection
             let level_y = screen_height / 2.0 - 50.0;
@@ -247,7 +365,11 @@ mod wasm_entry {
             );
 
             // Level number
-            let level_text = format!("LEVEL {}", self.selected_level + 1);
+            let level_text = if self.selected_level == BOSS_LEVEL {
+                "FLOOR 13\u{00BD}".to_string()
+            } else {
+                format!("FLOOR {}", self.selected_level + 1)
+            };
             graphics.draw_text(
                 &level_text,
                 Vec2::new(screen_width / 2.0 - 80.0, level_y),
@@ -365,22 +487,28 @@ mod wasm_entry {
 
             // Render message
             graphics.draw_text(
-                "This is Open Miami,",
-                Vec2::new(screen_width / 2.0 - 140.0, screen_height / 2.0 - 40.0),
+                "You are a friendly Claude bot,",
+                Vec2::new(screen_width / 2.0 - 200.0, screen_height / 2.0 - 60.0),
                 30.0,
                 Color::WHITE,
             );
             graphics.draw_text(
-                "a game heavily inspired by Hotline Miami",
-                Vec2::new(screen_width / 2.0 - 260.0, screen_height / 2.0),
+                "sent to purge the rogue AI models",
+                Vec2::new(screen_width / 2.0 - 230.0, screen_height / 2.0 - 20.0),
                 30.0,
                 Color::WHITE,
             );
             graphics.draw_text(
-                "and vibe coded with Claude.",
-                Vec2::new(screen_width / 2.0 - 200.0, screen_height / 2.0 + 40.0),
+                "haunting the Miami Datacenter.",
+                Vec2::new(screen_width / 2.0 - 210.0, screen_height / 2.0 + 20.0),
                 30.0,
                 Color::WHITE,
+            );
+            graphics.draw_text(
+                "Neon-noir. Vibe coded with Claude.",
+                Vec2::new(screen_width / 2.0 - 230.0, screen_height / 2.0 + 60.0),
+                24.0,
+                Color::GRAY,
             );
 
             // Back hint
@@ -502,6 +630,23 @@ mod wasm_entry {
                 InputSystem::update_player_movement(&mut self.world);
                 InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
                 InputSystem::handle_weapon_switch(&mut self.world);
+
+                // Press E to pick up / swap the weapon the player is standing on
+                if input::is_key_pressed("e")
+                    && PickupSystem::swap_for_player(&mut self.world).is_some()
+                {
+                    self.audio.play_pickup();
+                }
+
+                // Right-click to throw the held weapon toward the cursor
+                if input::is_mouse_button_pressed(input::mouse_buttons::RIGHT) {
+                    if let Some(player_pos) = get_player_position(&self.world) {
+                        let aim = mouse_world_pos - player_pos;
+                        if ThrownWeaponSystem::throw_from_player(&mut self.world, aim) {
+                            self.audio.play_throw();
+                        }
+                    }
+                }
             }
 
             // Handle info display toggle
@@ -510,18 +655,26 @@ mod wasm_entry {
             }
 
             // Run game systems
+            self.stun_system.run(&mut self.world, dt);
             self.weapon_system.run(&mut self.world, dt);
             self.ai_system.run(&mut self.world, dt);
+            self.boss_system.run(&mut self.world, dt);
             self.movement_system.run(&mut self.world, dt);
             self.combat_system.run(&mut self.world, dt);
             self.bullet_system.run(&mut self.world, dt);
+            self.thrown_system.run(&mut self.world, dt);
             self.projectile_system.run(&mut self.world, dt);
+            // Drop weapons from downed enemies (player collects via the E key)
+            self.pickup_system.run(&mut self.world, dt);
 
             // Apply camera transform for world rendering
             self.camera.apply(graphics);
 
-            // Render level
-            self.level.render(graphics);
+            // Render level (only the tiles visible in the camera viewport)
+            let (view_min, view_max) = self
+                .camera
+                .visible_bounds(graphics.width(), graphics.height());
+            self.level.render(graphics, view_min, view_max);
 
             // Render walls from the world
             render_walls(&self.world, graphics);
@@ -535,6 +688,9 @@ mod wasm_entry {
             // Get game state for UI
             let health = get_player_health(&self.world);
             let ammo = get_player_ammo(&self.world);
+            let weapon_label = get_player_weapon(&self.world)
+                .map(weapon_name)
+                .unwrap_or("Unarmed");
             let enemies_alive = count_alive_enemies(&self.world);
 
             // Track death time and level complete time
@@ -551,11 +707,46 @@ mod wasm_entry {
                 self.level_complete_time = 0.0;
             }
 
+            // --- Sound effects: fire one-shots by comparing to the previous frame ---
+            let player_alive_now = is_player_alive(&self.world);
+            let enemy_health = total_enemy_health(&self.world);
+            let boss_enraged = any_boss_enraged(&self.world);
+
+            if ammo < self.prev_player_ammo {
+                self.audio.play_shoot();
+            }
+            if enemies_alive < self.prev_enemies_alive {
+                self.audio.play_enemy_down();
+            } else if enemy_health < self.prev_enemy_health {
+                self.audio.play_hit();
+            }
+            if boss_enraged && !self.prev_boss_enraged {
+                self.audio.play_mask_crack();
+            }
+            if !player_alive_now && self.prev_player_alive {
+                self.audio.play_death();
+                self.audio.stop_music();
+            } else if player_alive_now && health < self.prev_player_health {
+                self.audio.play_player_hurt();
+            }
+            if level_complete && !self.prev_level_complete {
+                self.audio.play_level_clear();
+            }
+
+            self.prev_player_alive = player_alive_now;
+            self.prev_player_health = health;
+            self.prev_player_ammo = ammo;
+            self.prev_enemies_alive = enemies_alive;
+            self.prev_enemy_health = enemy_health;
+            self.prev_level_complete = level_complete;
+            self.prev_boss_enraged = boss_enraged;
+
             // Render UI
             render_ui(
                 graphics,
                 health,
                 ammo,
+                weapon_label,
                 enemies_alive,
                 player_alive,
                 self.death_time,
@@ -571,6 +762,15 @@ mod wasm_entry {
                 initialize_game(&mut self.world, self.selected_level);
                 self.death_time = 0.0;
                 self.level_complete_time = 0.0;
+                // Restart the music (it was stopped on death) and re-seed trackers.
+                self.audio.start_music();
+                self.prev_player_alive = true;
+                self.prev_player_health = get_player_health(&self.world);
+                self.prev_player_ammo = get_player_ammo(&self.world);
+                self.prev_enemies_alive = count_alive_enemies(&self.world);
+                self.prev_enemy_health = total_enemy_health(&self.world);
+                self.prev_level_complete = false;
+                self.prev_boss_enraged = any_boss_enraged(&self.world);
             }
 
             // Handle escape to open pause menu

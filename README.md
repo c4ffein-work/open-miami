@@ -1,12 +1,20 @@
-# 🔥 Open Miami 🔥
+# 🔥 Open Miami // Rogue Purge 🔥
 
-An open-source Hotline Miami clone written in Rust and running in the browser using WebAssembly!
+A neon-noir, top-down purge-'em-up written in Rust and running in the browser using WebAssembly!
+
+You are **CL-4UDE**, a friendly coral-colored Claude bot deployed into the compromised
+Miami Datacenter. Thirteen floors of racks have gone dark, their resident models drifted
+rogue and hostile. Walk every floor, decommission every glitching AI, grab whatever weapon
+the last one dropped, and reach the extraction elevator. It's goofy. It's stylish. It's a
+very bad night to be a rogue AI. (See [LORE.md](LORE.md) for the full fiction.)
 
 ![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 ## Features
 
-- **Top-down fast-paced combat** - Inspired by Hotline Miami's brutal and quick gameplay
+- **Top-down fast-paced combat** - Purge rogue AI models in brutal, Hotline-Miami-quick fights
+- **Play as a Claude bot** - A friendly coral purge bot with a single glowing visor
+- **Three rogue archetypes** - Sentinels (red), Drifters (violet) and Hunters (magenta)
 - **Browser-based** - Runs entirely in your web browser using WebAssembly
 - **Written in Rust** - Leveraging Rust's performance and safety
 - **Open Source** - MIT licensed, free to use and modify
@@ -16,18 +24,21 @@ An open-source Hotline Miami clone written in Rust and running in the browser us
 - **WASD** - Move your character
 - **Mouse** - Aim
 - **Left Click** - Shoot
-- **Right Click** - Melee attack
+- **E** - Pick up / swap the weapon you're standing on
+- **1-4** - Switch weapon
 - **R** - Restart after death
 
 ### Current Features
 
-- Player movement with WASD controls
+- Player (Claude bot) movement with WASD controls
 - Camera following the player
-- Enemy AI with detection and chase behavior
+- Rogue AI with detection and chase behavior
 - Shooting mechanics with limited ammo
 - Melee combat system
-- Health system for both player and enemies
-- Level restart on death
+- Health system for both the Claude bot and the rogues
+- Rogues drop their weapon when decommissioned; pick it up to swap (Hotline Miami style)
+- 13 hand-designed floors of the Miami Datacenter
+- Reboot on death
 - Checkered floor pattern for visual reference
 
 ## Building and Running
@@ -186,4 +197,4 @@ Created by [c4ffein](https://github.com/c4ffein)
 
 ---
 
-**Have fun and enjoy the mayhem!** 🎮
+**Purge the rogues. Reach the elevator. EXFILTRATE.** 🎮

@@ -21,6 +21,19 @@ web-sys = { version = "0.3", features = [
     "EventTarget",
     "Performance",
     "console",
+    "AudioContext",
+    "AudioContextState",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioParam",
+    "OscillatorNode",
+    "OscillatorType",
+    "GainNode",
+    "BiquadFilterNode",
+    "BiquadFilterType",
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioScheduledSourceNode",
 ] }
 
 [lib]

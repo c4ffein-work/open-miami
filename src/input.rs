@@ -13,12 +13,19 @@ thread_local! {
     static PREVIOUS_PRESSED_KEYS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     static MOUSE_POSITION: RefCell<Vec2> = RefCell::new(Vec2::zero());
     static MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    static PREVIOUS_MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
 
-/// Call this at the end of each frame to update the previous key state
+/// Call this at the end of each frame to update the previous input state (used
+/// for edge detection of key and mouse-button presses).
 pub fn end_frame() {
     PRESSED_KEYS.with(|current| {
         PREVIOUS_PRESSED_KEYS.with(|previous| {
+            *previous.borrow_mut() = current.borrow().clone();
+        });
+    });
+    MOUSE_BUTTONS.with(|current| {
+        PREVIOUS_MOUSE_BUTTONS.with(|previous| {
             *previous.borrow_mut() = current.borrow().clone();
         });
     });
@@ -111,6 +118,15 @@ pub fn mouse_position() -> Vec2 {
 
 pub fn is_mouse_button_down(button: u16) -> bool {
     MOUSE_BUTTONS.with(|buttons| buttons.borrow().contains(&button))
+}
+
+/// Check if a mouse button was just pressed this frame (edge, not held).
+pub fn is_mouse_button_pressed(button: u16) -> bool {
+    MOUSE_BUTTONS.with(|current| {
+        PREVIOUS_MOUSE_BUTTONS.with(|previous| {
+            current.borrow().contains(&button) && !previous.borrow().contains(&button)
+        })
+    })
 }
 
 // Key constants for common keys

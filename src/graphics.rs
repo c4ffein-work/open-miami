@@ -158,8 +158,64 @@ impl Graphics {
         let _ = self.context.rotate(angle as f64);
     }
 
-    /// Draw a pixelated sprite (top-down humanoid)
-    /// Draws a simple pixel-art character facing upward (rotation should be applied externally)
+    /// Draw the shoggoth boss: a writhing dark mass. While `enraged` is false it
+    /// wears a friendly yellow smiley mask; once the mask cracks off it shows the
+    /// horror beneath (red eyes, mask shards flung outward).
+    pub fn draw_shoggoth(&self, center: Vec2, radius: f32, enraged: bool) {
+        let dark = Color::new(0.11, 0.04, 0.15, 1.0);
+        let dark2 = Color::new(0.22, 0.09, 0.28, 1.0);
+        // Phase derived from position so the mass subtly writhes as it moves.
+        let ph = center.x * 0.03 + center.y * 0.03;
+
+        // Blobby outer lobes, then the core on top.
+        for k in 0..6 {
+            let a = ph + k as f32 * (std::f32::consts::PI * 2.0 / 6.0);
+            let off = radius * (0.62 + 0.12 * (ph + k as f32).sin());
+            let lc = Vec2::new(center.x + a.cos() * off, center.y + a.sin() * off);
+            self.draw_circle(lc, radius * 0.5, dark2);
+        }
+        self.draw_circle(center, radius, dark);
+
+        if !enraged {
+            // Friendly smiley mask.
+            let mr = radius * 0.74;
+            self.draw_circle(center, mr, Color::new(1.0, 0.84, 0.12, 1.0));
+            let eye_dx = mr * 0.4;
+            let eye_y = center.y - mr * 0.12;
+            self.draw_circle(Vec2::new(center.x - eye_dx, eye_y), mr * 0.14, Color::BLACK);
+            self.draw_circle(Vec2::new(center.x + eye_dx, eye_y), mr * 0.14, Color::BLACK);
+            // Upturned smile from line segments.
+            let sy = center.y + mr * 0.12;
+            let pts = [(-0.5, 0.0), (-0.22, 0.3), (0.22, 0.3), (0.5, 0.0)];
+            for w in pts.windows(2) {
+                let a = Vec2::new(center.x + w[0].0 * mr, sy + w[0].1 * mr);
+                let b = Vec2::new(center.x + w[1].0 * mr, sy + w[1].1 * mr);
+                self.draw_line(a, b, 3.0, Color::BLACK);
+            }
+        } else {
+            // Mask cracked off: the shoggoth stares back.
+            let red = Color::new(1.0, 0.1, 0.15, 1.0);
+            for k in 0..7 {
+                let a = ph * 1.7 + k as f32 * 0.9;
+                let rr = radius * (0.15 + 0.5 * ((ph + k as f32) * 1.3).sin().abs());
+                let ec = Vec2::new(center.x + a.cos() * rr, center.y + a.sin() * rr);
+                self.draw_circle(ec, radius * 0.1, red);
+            }
+            // Yellow mask shards flung outward.
+            let shard = Color::new(1.0, 0.84, 0.12, 1.0);
+            for k in 0..5 {
+                let a = ph + k as f32 * 1.35;
+                let d = radius * 1.15;
+                let sc = Vec2::new(center.x + a.cos() * d, center.y + a.sin() * d);
+                self.draw_rectangle(Vec2::new(sc.x - 3.0, sc.y - 3.0), 6.0, 6.0, shard);
+            }
+        }
+    }
+
+    /// Draw a pixelated sprite (top-down robot)
+    /// Draws a small pixel-art bot facing upward (rotation should be applied externally):
+    /// squared body with treads, a squared head, a short antenna, and a single glowing
+    /// visor "eye" pointing forward. Goes dark and prone-looking when `dead` is true.
     pub fn draw_pixelated_sprite(
         &self,
         center: Vec2,
@@ -175,9 +231,9 @@ impl Graphics {
 
         let pixel_size = 3.0; // Size of each "pixel"
 
-        // Create a simple top-down humanoid shape
-        // The sprite faces "up" (negative Y) in local coordinates
+        // Top-down robot. The bot faces "up" (negative Y) in local coordinates.
 
+        // Downed/stunned bots go dark, like a powered-off chassis.
         let body_color = if dead {
             Color::new(
                 base_color.r * 0.4,
@@ -189,64 +245,83 @@ impl Graphics {
             base_color
         };
 
+        // Darker plating for treads / trim.
         let dark_color = Color::new(
-            body_color.r * 0.7,
-            body_color.g * 0.7,
-            body_color.b * 0.7,
+            body_color.r * 0.6,
+            body_color.g * 0.6,
+            body_color.b * 0.6,
             body_color.a,
         );
 
-        // Head (front of character)
+        // Cream-ish highlight (Anthropic accent), dimmed when dead.
+        let accent = if dead {
+            Color::new(0.55, 0.53, 0.48, base_color.a)
+        } else {
+            Color::new(0.96, 0.93, 0.86, base_color.a)
+        };
+
+        // Treads / drive units running down each side of the chassis.
         self.draw_rectangle(
-            Vec2::new(-pixel_size, -pixel_size * 3.0),
+            Vec2::new(-pixel_size * 2.5, -pixel_size * 1.0),
+            pixel_size,
+            pixel_size * 4.0,
+            dark_color,
+        ); // Left tread
+        self.draw_rectangle(
+            Vec2::new(pixel_size * 1.5, -pixel_size * 1.0),
+            pixel_size,
+            pixel_size * 4.0,
+            dark_color,
+        ); // Right tread
+
+        // Main chassis (body).
+        self.draw_rectangle(
+            Vec2::new(-pixel_size * 1.5, -pixel_size * 1.0),
+            pixel_size * 3.0,
+            pixel_size * 4.0,
+            body_color,
+        );
+
+        // Chest core light (small accent panel).
+        self.draw_rectangle(
+            Vec2::new(-pixel_size * 0.5, pixel_size * 0.5),
+            pixel_size,
+            pixel_size,
+            accent,
+        );
+
+        // Squared head, slightly narrower than the chassis, at the front.
+        self.draw_rectangle(
+            Vec2::new(-pixel_size * 1.0, -pixel_size * 3.0),
             pixel_size * 2.0,
             pixel_size * 2.0,
             body_color,
         );
 
-        // Body/torso
+        // Short antenna poking forward from the head.
         self.draw_rectangle(
-            Vec2::new(-pixel_size * 1.5, -pixel_size),
-            pixel_size * 3.0,
-            pixel_size * 3.0,
-            body_color,
+            Vec2::new(-pixel_size * 0.5, -pixel_size * 4.0),
+            pixel_size,
+            pixel_size,
+            dark_color,
         );
 
-        // Arms (shoulders)
+        // Glowing visor "eye" = forward direction indicator.
+        // Bright cream when alive; dead bots keep a dim, dark visor (no glow).
+        let visor_color = if dead { dark_color } else { accent };
         self.draw_rectangle(
-            Vec2::new(-pixel_size * 2.5, -pixel_size * 0.5),
-            pixel_size,
-            pixel_size * 2.0,
-            dark_color,
-        ); // Left arm
-        self.draw_rectangle(
-            Vec2::new(pixel_size * 1.5, -pixel_size * 0.5),
-            pixel_size,
-            pixel_size * 2.0,
-            dark_color,
-        ); // Right arm
-
-        // Legs
-        self.draw_rectangle(
-            Vec2::new(-pixel_size * 1.0, pixel_size * 2.0),
-            pixel_size,
-            pixel_size * 2.0,
-            dark_color,
-        ); // Left leg
-        self.draw_rectangle(
-            Vec2::new(pixel_size * 0.0, pixel_size * 2.0),
-            pixel_size,
-            pixel_size * 2.0,
-            dark_color,
-        ); // Right leg
-
-        // Direction indicator (small dot at head)
+            Vec2::new(-pixel_size * 0.75, -pixel_size * 2.75),
+            pixel_size * 1.5,
+            pixel_size * 0.75,
+            visor_color,
+        );
+        // Antenna tip glow, only when powered.
         if !dead {
             self.draw_rectangle(
                 Vec2::new(-pixel_size * 0.5, -pixel_size * 4.5),
                 pixel_size,
-                pixel_size,
-                Color::WHITE,
+                pixel_size * 0.5,
+                accent,
             );
         }
 

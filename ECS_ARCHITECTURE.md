@@ -145,7 +145,7 @@ struct Enemy;   // Marks entity as enemy
 
 ## Game Systems
 
-### System Execution Order (`src/main.rs`)
+### System Execution Order (`src/lib.rs`, `wasm_entry::GameState::update_game`)
 
 ```rust
 // 1. Input (if player alive)
@@ -205,8 +205,8 @@ let player = spawn_player(&mut world, Vec2::new(400.0, 300.0));
 // Spawn enemy
 let enemy = spawn_enemy(&mut world, Vec2::new(600.0, 300.0));
 
-// Initialize full game
-initialize_game(&mut world);  // 1 player + 4 enemies
+// Initialize a full level (0-based level index)
+initialize_game(&mut world, 0);  // level 1: 1 player + 4 enemies
 ```
 
 ## Example: Creating a New Feature
@@ -351,7 +351,7 @@ Components are stored in `HashMap<Entity, Box<Component>>` per component type. T
 - **hecs/legion**: Lighter weight but still dependencies
 
 **Our Approach:**
-- Zero dependencies (besides game engine)
+- Zero runtime game-logic dependencies
 - Simple implementation (~500 lines)
 - Easy to understand and modify
 - Perfectly suited for this game's scale
@@ -359,8 +359,8 @@ Components are stored in `HashMap<Entity, Box<Component>>` per component type. T
 ### Why Not Bevy?
 
 Bevy is excellent but:
-- We already use macroquad for rendering
-- Wanted minimal dependencies
+- Rendering is a small hand-rolled `<canvas>` 2D layer (`src/graphics.rs`), not a full engine — so we don't need Bevy's renderer
+- Wanted minimal dependencies (only `wasm-bindgen` + `web-sys` for the browser glue)
 - Educational value in building from scratch
 - Better control over implementation
 
