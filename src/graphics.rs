@@ -110,8 +110,10 @@ impl Graphics {
 
     pub fn draw_text(&self, text: &str, pos: Vec2, font_size: f32, color: Color) {
         self.context.set_fill_style_str(&color.to_css_string());
+        // 'GameFont' is the embedded VT323 (see index.html); falls back to
+        // monospace if it somehow failed to load.
         self.context
-            .set_font(&format!("{}px sans-serif", font_size));
+            .set_font(&format!("{}px 'GameFont', monospace", font_size));
         let _ = self.context.fill_text(text, pos.x as f64, pos.y as f64);
     }
 
@@ -193,7 +195,27 @@ impl Graphics {
                 self.draw_line(a, b, 3.0, Color::BLACK);
             }
         } else {
-            // Mask cracked off: the shoggoth stares back.
+            // Mask cracked off: writhing tentacles lash out from the mass...
+            let tentacle = Color::new(0.17, 0.06, 0.22, 1.0);
+            for k in 0..7 {
+                let base = ph * 1.3 + k as f32 * (std::f32::consts::PI * 2.0 / 7.0);
+                let (mut px, mut py, mut ang) = (center.x, center.y, base);
+                for seg in 0..4 {
+                    let len = radius * (0.55 - seg as f32 * 0.09);
+                    ang += ((ph + k as f32) * 1.7 + seg as f32).sin() * 0.7;
+                    let nx = px + ang.cos() * len;
+                    let ny = py + ang.sin() * len;
+                    self.draw_line(
+                        Vec2::new(px, py),
+                        Vec2::new(nx, ny),
+                        (8 - seg * 2).max(1) as f32,
+                        tentacle,
+                    );
+                    px = nx;
+                    py = ny;
+                }
+            }
+            // ...and the shoggoth stares back.
             let red = Color::new(1.0, 0.1, 0.15, 1.0);
             for k in 0..7 {
                 let a = ph * 1.7 + k as f32 * 0.9;

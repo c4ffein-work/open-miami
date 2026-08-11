@@ -38,12 +38,13 @@ mod wasm_entry {
     // Import game modules
     use crate::audio::AudioEngine;
     use crate::camera::Camera;
+    use crate::components::EnemyType;
     use crate::ecs::{System, World};
     use crate::game::*;
     use crate::graphics::Graphics;
     use crate::input;
     use crate::level::Level;
-    use crate::levels::{BOSS_LEVEL, LEVEL_COUNT};
+    use crate::levels::{level_def, BOSS_LEVEL, LEVEL_COUNT, PLAYER_SPAWN};
     use crate::math::{Color, Vec2};
     use crate::render::*;
     use crate::systems::boss::any_boss_enraged;
@@ -57,6 +58,118 @@ mod wasm_entry {
         Paused,
         Settings,
         About,
+        Visualizer,
+    }
+
+    /// The page URL's query string (e.g. "?viz"), empty if unavailable.
+    fn url_query() -> String {
+        web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .unwrap_or_default()
+    }
+
+    /// Whether the asset visualizer was requested via `?viz` in the URL.
+    fn wants_visualizer() -> bool {
+        url_query().contains("viz")
+    }
+
+    /// Tabs of the `?viz` tool.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum VizTab {
+        Sprites,
+        Musics,
+        Levels,
+        Effects,
+    }
+
+    /// Small deterministic hash -> pseudo-random, used for the glitch effect.
+    fn hash2(a: u32, b: u32) -> u32 {
+        let mut x = a
+            .wrapping_mul(374_761_393)
+            .wrapping_add(b.wrapping_mul(668_265_263));
+        x = (x ^ (x >> 13)).wrapping_mul(1_274_126_177);
+        x ^ (x >> 16)
+    }
+
+    fn rand01(a: u32, b: u32) -> f32 {
+        (hash2(a, b) & 0xff_ffff) as f32 / 0xff_ffff as f32
+    }
+
+    /// Full-screen "shoggoth" glitch: dark-grey cells with yellow eyes scattered
+    /// across the screen, the pattern jittering to nearby spots every 0.2s, over
+    /// a 1.2s fade-in/out. `elapsed_ms` is time since the effect started.
+    fn draw_shoggoth_glitch(g: &Graphics, elapsed_ms: f32) {
+        let (w, h) = (g.width(), g.height());
+        let t = (elapsed_ms / 1200.0).clamp(0.0, 1.0);
+        let env = if t < 0.1 {
+            t / 0.1
+        } else if t > 0.7 {
+            ((1.0 - t) / 0.3).max(0.0)
+        } else {
+            1.0
+        };
+
+        // Dark takeover of the screen.
+        g.draw_rectangle(
+            Vec2::new(0.0, 0.0),
+            w,
+            h,
+            Color::new(0.05, 0.05, 0.06, 0.82 * env),
+        );
+
+        // Regenerate the cell layout every 0.2s, jittering each cell near its anchor.
+        let tick = (elapsed_ms / 200.0) as u32;
+        for i in 0..64u32 {
+            let bx = rand01(i, 11) * w;
+            let by = rand01(i, 23) * h;
+            let jx = (rand01(i, tick * 3 + 1) - 0.5) * 34.0;
+            let jy = (rand01(i, tick * 3 + 2) - 0.5) * 34.0;
+            let (x, y) = (bx + jx, by + jy);
+            let sz = 26.0 + rand01(i, 7) * 34.0;
+            g.draw_rectangle(
+                Vec2::new(x - sz / 2.0, y - sz / 2.0),
+                sz,
+                sz,
+                Color::new(0.22, 0.22, 0.24, 0.9 * env),
+            );
+            if rand01(i, tick + 5) > 0.35 {
+                let eye = Color::new(1.0, 0.86, 0.12, env);
+                let eo = sz * 0.18;
+                g.draw_circle(Vec2::new(x - eo, y), sz * 0.09, eye);
+                g.draw_circle(Vec2::new(x + eo, y), sz * 0.09, eye);
+            }
+        }
+    }
+
+    /// Draw a clickable button; returns true if the mouse is currently over it
+    /// (the caller decides what a click does). `active` highlights it.
+    fn viz_button(
+        g: &Graphics,
+        mouse: Vec2,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        label: &str,
+        active: bool,
+    ) -> bool {
+        let over = mouse.x >= x && mouse.x <= x + w && mouse.y >= y && mouse.y <= y + h;
+        let bg = if active {
+            Color::new(1.0, 0.09, 0.26, 0.85)
+        } else if over {
+            Color::new(0.28, 0.22, 0.33, 1.0)
+        } else {
+            Color::new(0.14, 0.10, 0.18, 1.0)
+        };
+        g.draw_rectangle(Vec2::new(x, y), w, h, bg);
+        g.draw_rectangle_lines(Vec2::new(x, y), w, h, 1.5, Color::new(0.45, 0.35, 0.5, 1.0));
+        g.draw_text(
+            label,
+            Vec2::new(x + 14.0, y + h / 2.0 + 6.0),
+            18.0,
+            Color::WHITE,
+        );
+        over
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +212,9 @@ mod wasm_entry {
         audio: AudioEngine,
         music_started: bool,
         boss_intro_line: usize,
+        viz_tab: VizTab,
+        viz_level: usize,
+        effect_start: f64,
         prev_player_alive: bool,
         prev_player_health: i32,
         prev_player_ammo: i32,
@@ -110,8 +226,13 @@ mod wasm_entry {
 
     impl GameState {
         fn new() -> Self {
+            let screen = if wants_visualizer() {
+                GameScreen::Visualizer
+            } else {
+                GameScreen::LevelSelect
+            };
             GameState {
-                screen: GameScreen::LevelSelect,
+                screen,
                 selected_level: 0,
                 selected_menu_option: MenuOption::Play,
                 selected_pause_option: PauseOption::Continue,
@@ -136,6 +257,9 @@ mod wasm_entry {
                 audio: AudioEngine::new(),
                 music_started: false,
                 boss_intro_line: 0,
+                viz_tab: VizTab::Sprites,
+                viz_level: 0,
+                effect_start: 0.0,
                 prev_player_alive: true,
                 prev_player_health: 100,
                 prev_player_ammo: 0,
@@ -209,6 +333,9 @@ mod wasm_entry {
                 GameScreen::About => {
                     self.update_about(graphics);
                 }
+                GameScreen::Visualizer => {
+                    self.update_visualizer(graphics);
+                }
             }
 
             // Keep the music scheduler fed regardless of screen.
@@ -216,6 +343,317 @@ mod wasm_entry {
 
             // Update input state for next frame
             input::end_frame();
+        }
+
+        /// Asset visualizer (`?viz`): a small tabbed inspector — sprites, sounds,
+        /// and level maps — for looking at the game's pieces in isolation.
+        fn update_visualizer(&mut self, graphics: &Graphics) {
+            let mouse = input::mouse_position();
+            let click = input::is_mouse_button_pressed(input::mouse_buttons::LEFT);
+
+            // Top tab bar.
+            let tabs = [
+                (VizTab::Sprites, "SPRITES"),
+                (VizTab::Musics, "MUSICS"),
+                (VizTab::Levels, "LEVELS"),
+                (VizTab::Effects, "EFFECTS"),
+            ];
+            for (i, &(tab, name)) in tabs.iter().enumerate() {
+                let x = 20.0 + i as f32 * 168.0;
+                let over = viz_button(
+                    graphics,
+                    mouse,
+                    x,
+                    14.0,
+                    158.0,
+                    46.0,
+                    name,
+                    self.viz_tab == tab,
+                );
+                if over && click {
+                    self.viz_tab = tab;
+                    self.audio.resume(); // a click is a user gesture -> unlock audio
+                }
+            }
+
+            match self.viz_tab {
+                VizTab::Sprites => self.draw_viz_sprites(graphics),
+                VizTab::Musics => self.draw_viz_musics(graphics, mouse, click),
+                VizTab::Levels => self.draw_viz_levels(graphics, mouse, click),
+                VizTab::Effects => self.draw_viz_effects(graphics, mouse, click),
+            }
+
+            // A previewing effect draws full-screen, on top of everything.
+            let elapsed = self.last_time - self.effect_start;
+            if self.effect_start > 0.0 && (0.0..1200.0).contains(&elapsed) {
+                draw_shoggoth_glitch(graphics, elapsed as f32);
+            }
+        }
+
+        /// EFFECTS tab: trigger a full-screen effect to preview it (plays 1.2s).
+        fn draw_viz_effects(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            graphics.draw_text(
+                "Full-screen glitch effects. Click to preview (1.2s).",
+                Vec2::new(40.0, 100.0),
+                18.0,
+                Color::GRAY,
+            );
+            if viz_button(graphics, mouse, 40.0, 140.0, 240.0, 46.0, "Shoggoth", false) && click {
+                self.effect_start = self.last_time;
+            }
+            graphics.draw_text(
+                "(more effects to come)",
+                Vec2::new(40.0, 222.0),
+                15.0,
+                Color::GRAY,
+            );
+        }
+
+        /// SPRITES tab: every sprite/asset drawn once and labelled.
+        fn draw_viz_sprites(&self, graphics: &Graphics) {
+            let coral = Color::from_rgba(217, 119, 87, 255);
+            let red = Color::from_rgba(224, 49, 66, 255);
+            let violet = Color::from_rgba(150, 70, 210, 255);
+            let magenta = Color::from_rgba(224, 40, 160, 255);
+
+            let (x0, y0, dx, dy) = (130.0f32, 180.0f32, 175.0f32, 165.0f32);
+            let cell = |i: usize| Vec2::new(x0 + (i % 5) as f32 * dx, y0 + (i / 5) as f32 * dy);
+            let label = |c: Vec2, t: &str| {
+                graphics.draw_text(t, Vec2::new(c.x - 60.0, c.y + 60.0), 16.0, Color::WHITE);
+            };
+
+            // Actors (drawn facing "up" at rotation 0).
+            let sprites = [
+                (coral, false, "CL-4UDE"),
+                (coral, true, "CL-4UDE down"),
+                (red, false, "SENTINEL"),
+                (violet, false, "DRIFTER"),
+                (magenta, false, "HUNTER"),
+                (red, true, "rogue down"),
+            ];
+            let mut i = 0;
+            for (color, dead, name) in sprites {
+                let c = cell(i);
+                graphics.draw_pixelated_sprite(c, 0.0, color, dead);
+                label(c, name);
+                i += 1;
+            }
+
+            // Weapon pickups (same markers as on the floor).
+            let pickups = [
+                ("Pistol", Color::new(0.9, 0.9, 0.9, 1.0)),
+                ("Shotgun", Color::new(1.0, 0.55, 0.1, 1.0)),
+                ("MachineGun", Color::new(0.2, 0.8, 1.0, 1.0)),
+                ("Melee", Color::new(0.7, 0.7, 0.75, 1.0)),
+            ];
+            for (name, col) in pickups {
+                let c = cell(i);
+                graphics.draw_rectangle(
+                    Vec2::new(c.x - 11.0, c.y - 7.0),
+                    22.0,
+                    14.0,
+                    Color::new(0.0, 0.0, 0.0, 0.35),
+                );
+                graphics.draw_rectangle(Vec2::new(c.x - 8.0, c.y - 2.0), 16.0, 4.0, col);
+                graphics.draw_rectangle(Vec2::new(c.x - 6.0, c.y + 2.0), 4.0, 4.0, col);
+                graphics.draw_rectangle_lines(
+                    Vec2::new(c.x - 11.0, c.y - 7.0),
+                    22.0,
+                    14.0,
+                    1.0,
+                    col,
+                );
+                label(c, name);
+                i += 1;
+            }
+
+            // Bullet.
+            let c = cell(i);
+            graphics.draw_circle(c, 3.0, Color::new(1.0, 0.9, 0.3, 1.0));
+            label(c, "Bullet");
+            i += 1;
+
+            // Wall.
+            let c = cell(i);
+            graphics.draw_rectangle(
+                Vec2::new(c.x - 24.0, c.y - 16.0),
+                48.0,
+                32.0,
+                Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
+            );
+            graphics.draw_rectangle_lines(
+                Vec2::new(c.x - 24.0, c.y - 16.0),
+                48.0,
+                32.0,
+                2.0,
+                Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
+            );
+            label(c, "Wall");
+            i += 1;
+
+            // Floor tiles (the two checker shades).
+            let c = cell(i);
+            let a = Color::new(40.0 / 255.0, 35.0 / 255.0, 45.0 / 255.0, 1.0);
+            let b = Color::new(35.0 / 255.0, 30.0 / 255.0, 40.0 / 255.0, 1.0);
+            graphics.draw_rectangle(Vec2::new(c.x - 20.0, c.y - 20.0), 20.0, 20.0, a);
+            graphics.draw_rectangle(Vec2::new(c.x, c.y - 20.0), 20.0, 20.0, b);
+            graphics.draw_rectangle(Vec2::new(c.x - 20.0, c.y), 20.0, 20.0, b);
+            graphics.draw_rectangle(Vec2::new(c.x, c.y), 20.0, 20.0, a);
+            label(c, "Floor");
+            i += 1;
+
+            // The boss, both phases.
+            let c = cell(i);
+            graphics.draw_shoggoth(c, 32.0, false);
+            label(c, "SHOGGOTH mask");
+            i += 1;
+            let c = cell(i);
+            graphics.draw_shoggoth(c, 32.0, true);
+            label(c, "SHOGGOTH raw");
+        }
+
+        /// MUSICS tab: a button per sound + the music loop. Clicking plays it.
+        fn draw_viz_musics(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            graphics.draw_text(
+                "Click a button to play it. (audio unlocks on the first click)",
+                Vec2::new(40.0, 100.0),
+                18.0,
+                Color::GRAY,
+            );
+            let items = [
+                "Music: START",
+                "Music: STOP",
+                "Shoot",
+                "Hit",
+                "Rogue down",
+                "Pickup",
+                "Throw",
+                "Player hurt",
+                "Death",
+                "Level clear",
+                "Mask crack",
+            ];
+            for (i, &name) in items.iter().enumerate() {
+                let x = 40.0 + (i % 2) as f32 * 270.0;
+                let y = 140.0 + (i / 2) as f32 * 62.0;
+                if viz_button(graphics, mouse, x, y, 240.0, 46.0, name, false) && click {
+                    self.audio.resume();
+                    match i {
+                        0 => self.audio.start_music(),
+                        1 => self.audio.stop_music(),
+                        2 => self.audio.play_shoot(),
+                        3 => self.audio.play_hit(),
+                        4 => self.audio.play_enemy_down(),
+                        5 => self.audio.play_pickup(),
+                        6 => self.audio.play_throw(),
+                        7 => self.audio.play_player_hurt(),
+                        8 => self.audio.play_death(),
+                        9 => self.audio.play_level_clear(),
+                        _ => self.audio.play_mask_crack(),
+                    }
+                }
+            }
+        }
+
+        /// LEVELS tab: a scaled top-down map of the selected floor — walls, rogue
+        /// spawns (by colour), the player start, and the boss on FLOOR 13½.
+        fn draw_viz_levels(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let w = graphics.width();
+            if viz_button(
+                graphics,
+                mouse,
+                w / 2.0 - 190.0,
+                88.0,
+                48.0,
+                40.0,
+                "<",
+                false,
+            ) && click
+            {
+                self.viz_level = if self.viz_level == 0 {
+                    LEVEL_COUNT - 1
+                } else {
+                    self.viz_level - 1
+                };
+            }
+            if viz_button(
+                graphics,
+                mouse,
+                w / 2.0 + 142.0,
+                88.0,
+                48.0,
+                40.0,
+                ">",
+                false,
+            ) && click
+            {
+                self.viz_level = (self.viz_level + 1) % LEVEL_COUNT;
+            }
+            let title = if self.viz_level == BOSS_LEVEL {
+                "FLOOR 13\u{00BD}".to_string()
+            } else {
+                format!("FLOOR {}", self.viz_level + 1)
+            };
+            graphics.draw_text(&title, Vec2::new(w / 2.0 - 70.0, 116.0), 26.0, Color::WHITE);
+
+            // World space is roughly [0,1000] x [0,800]; scale it into a preview box.
+            let (px, py, pw, ph) = (150.0f32, 155.0f32, 660.0f32, 528.0f32);
+            let sx = pw / 1000.0;
+            let sy = ph / 800.0;
+            let map = |wx: f32, wy: f32| Vec2::new(px + wx * sx, py + wy * sy);
+
+            graphics.draw_rectangle(Vec2::new(px, py), pw, ph, Color::new(0.09, 0.06, 0.12, 1.0));
+            graphics.draw_rectangle_lines(
+                Vec2::new(px, py),
+                pw,
+                ph,
+                1.5,
+                Color::new(0.4, 0.3, 0.45, 1.0),
+            );
+
+            let def = level_def(self.viz_level);
+            for &(x, y, ww, wh) in &def.walls {
+                graphics.draw_rectangle(
+                    map(x, y),
+                    ww * sx,
+                    wh * sy,
+                    Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
+                );
+            }
+            for &(x, y, t) in &def.enemies {
+                let col = match t {
+                    EnemyType::Idle => Color::from_rgba(224, 49, 66, 255),
+                    EnemyType::Wandering => Color::from_rgba(150, 70, 210, 255),
+                    EnemyType::Patrolling => Color::from_rgba(224, 40, 160, 255),
+                };
+                graphics.draw_circle(map(x, y), 5.0, col);
+            }
+            if self.viz_level == BOSS_LEVEL {
+                graphics.draw_shoggoth(map(BOSS_SPAWN.x, BOSS_SPAWN.y), 14.0, false);
+            }
+
+            let ps = map(PLAYER_SPAWN.x, PLAYER_SPAWN.y);
+            graphics.draw_circle(ps, 6.0, Color::from_rgba(217, 119, 87, 255));
+            graphics.draw_text(
+                "start",
+                Vec2::new(ps.x - 16.0, ps.y - 12.0),
+                14.0,
+                Color::from_rgba(217, 119, 87, 255),
+            );
+
+            let ly = py + ph + 22.0;
+            graphics.draw_text(
+                "coral = you    red / violet / magenta = rogues    smiley = boss",
+                Vec2::new(px, ly),
+                15.0,
+                Color::GRAY,
+            );
+            graphics.draw_text(
+                &format!("{} rogues", def.enemies.len()),
+                Vec2::new(px + pw - 96.0, ly),
+                15.0,
+                Color::GRAY,
+            );
         }
 
         /// The face-off dialog on the hidden boss floor. Advance the lines with

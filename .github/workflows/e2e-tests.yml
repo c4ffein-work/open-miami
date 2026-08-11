@@ -47,22 +47,20 @@ jobs:
             --no-typescript
           ls -lh open_miami.js open_miami_bg.wasm index.html
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Install Playwright and dependencies
         working-directory: tests/e2e
         run: |
-          npm install
-          npx playwright install --with-deps chromium
+          bun install
+          bunx playwright install --with-deps chromium
 
       - name: Run E2E tests
         working-directory: tests/e2e
         run: |
           mkdir -p test-results
-          npm test
+          bunx playwright test
         continue-on-error: true
 
       - name: Upload test results

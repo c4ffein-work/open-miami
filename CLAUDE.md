@@ -18,12 +18,10 @@
 - The `make check-e2e` target will automatically install wasm-bindgen-cli if not present
 - E2E tests require the wasm32-unknown-unknown Rust target and Playwright dependencies
 
-#### **CRITICAL: E2E Test Timeout Enforcement**
-- **ALWAYS** run E2E tests via `make check-e2e` - this is the ONLY acceptable way to run these tests
-- **NEVER** run e2e tests directly with `npm test` or `playwright test` commands
-- The Makefile enforces a 60-second timeout to prevent tests from hanging indefinitely
-- Running tests without timeout can cause Claude Code instances to be terminated (they will be considered stuck)
-- Both the Playwright config and Makefile enforce this 60-second timeout for safety
+#### **E2E Test Timeout Enforcement**
+- Prefer running E2E tests via `make check-e2e` — it wires up the toolchain and the timeout for you
+- The e2e toolchain runs on **Bun** (`bun install` / `bunx playwright ...`), not npm/node
+- Both the Makefile and the Playwright config enforce a 60-second timeout so a run cannot hang indefinitely
 
 ## Artifact Server
 - An artifact server is available at `$ARTIFACTER_API_URL`

@@ -91,10 +91,16 @@ check-e2e:
 		cargo install wasm-bindgen-cli --version $$WASM_BINDGEN_VERSION; \
 	fi
 	wasm-bindgen target/wasm32-unknown-unknown/release/open_miami.wasm --out-dir . --target web --no-typescript
-	@echo "Installing E2E test dependencies..."
-	cd tests/e2e && npm install && npx playwright install --with-deps chromium
+	@echo "Installing E2E test dependencies (via Bun)..."
+	cd tests/e2e && bun install
+	@echo "Installing the Chromium browser (with system deps when possible)..."
+	cd tests/e2e && (bunx playwright install --with-deps chromium || bunx playwright install chromium)
+	@echo "Ensuring browser system libraries are present (rootless fallback)..."
+	cd tests/e2e && ./setup-browser-deps.sh
 	@echo "Running E2E tests with 60-second timeout..."
-	cd tests/e2e && mkdir -p test-results && timeout 60 npm test
+	cd tests/e2e && mkdir -p test-results && \
+		LD_LIBRARY_PATH="$$(find "$$PWD/playwright-deps/libs" -name '*.so*' -printf '%h\n' 2>/dev/null | sort -u | paste -sd:):$${LD_LIBRARY_PATH:-}" \
+		timeout 60 bunx playwright test
 	@echo "$(GREEN)✓ E2E tests passed$(NC)"
 
 # Code Coverage - requires cargo-tarpaulin (optional check)
