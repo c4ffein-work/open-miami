@@ -62,6 +62,8 @@ jobs:
             open_miami_bg.wasm
             open_miami.js
             index.html
+            assets/fonts/VT323-Regular.ttf
+            assets/fonts/VT323-OFL.txt
           retention-days: 30
 
   deploy-github-pages:

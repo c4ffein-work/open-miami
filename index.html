@@ -8,6 +8,14 @@
     <meta http-equiv="Expires" content="0">
     <title>Open Miami // Rogue Purge - a Claude bot vs rogue AI</title>
     <style>
+        /* Game font: VT323 (SIL OFL), served as a file from assets/fonts/ rather
+           than inlined, so this stays a small, editable HTML file. License:
+           assets/fonts/VT323-OFL.txt */
+        @font-face {
+            font-family: 'GameFont';
+            src: url('assets/fonts/VT323-Regular.ttf') format('truetype');
+            font-display: block;
+        }
         body {
             margin: 0;
             padding: 0;
@@ -61,6 +69,12 @@
 
                         // Ensure DOM is loaded before starting game
                         console.log('Canvas element:', document.getElementById('glcanvas'));
+
+                        // Make sure the game font is loaded before drawing text.
+                        try {
+                            await document.fonts.load("16px 'GameFont'");
+                            await document.fonts.ready;
+                        } catch (e) { /* fall back to monospace */ }
 
                         // Start the game
                         console.log('Starting game loop...');
