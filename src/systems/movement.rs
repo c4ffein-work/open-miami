@@ -1,5 +1,5 @@
 use crate::collision::circle_rect_collision;
-use crate::components::{Position, Radius, Velocity};
+use crate::components::{Knockback, Position, Radius, Velocity};
 use crate::ecs::{System, World};
 use crate::math::Vec2;
 
@@ -7,6 +7,15 @@ use crate::math::Vec2;
 /// inside `[0, WORLD_SIZE]` on both axes so nothing (notably wandering enemies)
 /// can drift out of bounds where it becomes unreachable.
 const WORLD_SIZE: f32 = 2000.0;
+
+/// Time constant for the exponential decay of a knockback impulse: it sheds
+/// ~1/e of its speed every `KNOCKBACK_DECAY_TAU` seconds. With this value a
+/// shove is essentially spent after ~0.2-0.3s — a snappy punch, not a slide.
+const KNOCKBACK_DECAY_TAU: f32 = 0.06;
+
+/// Once a knockback impulse drops below this speed (px/s) it is negligible, so
+/// the component is removed to stop it nudging the entity forever.
+const KNOCKBACK_MIN_SPEED: f32 = 8.0;
 
 /// System that applies velocity to position
 pub struct MovementSystem;
@@ -20,8 +29,10 @@ impl System for MovementSystem {
         let walls: Vec<_> = world.walls().to_vec();
 
         for entity in entities {
-            // Get velocity and radius (immutable borrows), copy the values
+            // Get velocity, any knockback impulse, and radius (immutable
+            // borrows), copy the values.
             let vel = world.get_component::<Velocity>(entity).copied();
+            let knockback = world.get_component::<Knockback>(entity).copied();
             let radius = world
                 .get_component::<Radius>(entity)
                 .map(|r| r.value)
@@ -29,9 +40,13 @@ impl System for MovementSystem {
 
             // Then get position (mutable borrow) and update it
             if let (Some(pos), Some(vel)) = (world.get_component_mut::<Position>(entity), vel) {
+                // Layer the knockback impulse on top of the normal velocity so
+                // the shove travels through the same wall/bounds clamping below.
+                let (kb_x, kb_y) = knockback.map(|k| (k.x, k.y)).unwrap_or((0.0, 0.0));
+
                 // Calculate desired new position
-                let new_x = pos.x + vel.x * dt;
-                let new_y = pos.y + vel.y * dt;
+                let new_x = pos.x + (vel.x + kb_x) * dt;
+                let new_y = pos.y + (vel.y + kb_y) * dt;
 
                 let mut final_x = new_x;
                 let mut final_y = new_y;
@@ -81,6 +96,21 @@ impl System for MovementSystem {
                 // Keep entities within the world bounds.
                 pos.x = final_x.clamp(0.0, WORLD_SIZE);
                 pos.y = final_y.clamp(0.0, WORLD_SIZE);
+            }
+
+            // Decay the knockback impulse (frame-rate independent) after it has
+            // been applied, and drop it once it is spent so it stops nudging.
+            if knockback.is_some() {
+                let decay = (-dt / KNOCKBACK_DECAY_TAU).exp();
+                let mut spent = false;
+                if let Some(kb) = world.get_component_mut::<Knockback>(entity) {
+                    kb.x *= decay;
+                    kb.y *= decay;
+                    spent = kb.magnitude() < KNOCKBACK_MIN_SPEED;
+                }
+                if spent {
+                    world.remove_component::<Knockback>(entity);
+                }
             }
         }
     }
@@ -144,6 +174,35 @@ mod tests {
         assert_eq!(pos1.y, 0.0);
         assert_eq!(pos2.x, 0.0);
         assert_eq!(pos2.y, 20.0);
+    }
+
+    #[test]
+    fn test_knockback_shoves_then_decays() {
+        let mut world = World::new();
+        let entity = world.spawn();
+
+        world.add_component(entity, Position::new(100.0, 100.0));
+        world.add_component(entity, Velocity::zero());
+        world.add_component(entity, Knockback::new(600.0, 0.0));
+
+        let mut system = MovementSystem;
+
+        // One frame of a punchy shove moves the entity along +x on top of its
+        // (zero) velocity.
+        system.run(&mut world, 0.016);
+        let pos = world.get_component::<Position>(entity).unwrap();
+        assert!(pos.x > 100.0, "knockback should move the entity");
+        assert_eq!(pos.y, 100.0);
+        // ...and the impulse is weaker afterwards (decaying).
+        let kb = world.get_component::<Knockback>(entity).unwrap();
+        assert!(kb.x < 600.0 && kb.x > 0.0);
+
+        // After enough time the impulse is spent and the component is dropped so
+        // it stops nudging the entity forever.
+        for _ in 0..40 {
+            system.run(&mut world, 0.016);
+        }
+        assert!(!world.has_component::<Knockback>(entity));
     }
 
     #[test]

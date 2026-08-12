@@ -50,6 +50,124 @@ mod wasm_entry {
     use crate::systems::boss::any_boss_enraged;
     use crate::systems::*;
 
+    // JS bridge: composite a pre-baked top-down 3D sprite onto the shared
+    // #glcanvas 2D context. Mirrors the wasm->JS extern pattern used elsewhere.
+    // `key` is "<color>:<pose>" (e.g. "coral:idle"); (x,y) is the draw position
+    // in the current canvas transform (world space under the camera transform);
+    // `angle` is the facing in radians; `scale` multiplies the atlas native px.
+    // Returns false when the atlas is not ready yet, so the caller can keep the
+    // primitive draw as a fallback.
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = window, js_name = drawBaked)]
+        fn draw_baked(key: &str, x: f32, y: f32, angle: f32, scale: f32) -> bool;
+        // ?viz inspector panel: open the right-hand iframe on a gallery item /
+        // hide it again (both defined in index.html).
+        #[wasm_bindgen(js_namespace = window, js_name = vizInspect)]
+        fn viz_inspect(kind: &str);
+        #[wasm_bindgen(js_namespace = window, js_name = vizInspectHide)]
+        fn viz_inspect_hide();
+    }
+
+    /// On-screen size (px) of a baked sprite tile before per-entity scaling.
+    /// The atlas tiles are square and the robot fills ~55% of the tile, so this
+    /// is tuned so the baked bot roughly matches the actor hitbox (player radius
+    /// 15 -> 30px dia, enemy radius 12 -> 24px dia): a 60px tile draws a ~34px
+    /// robot that sits over the hitbox like the primitive did.
+    const BAKED_TILE_PX: f32 = 60.0;
+
+    /// Baked sprite atlas tile size (must match `size` used in index.html).
+    const BAKED_ATLAS_PX: f32 = 256.0;
+
+    /// The baked sprite's gun/forward points DOWN (+Y in image) at facingDeg=0,
+    /// while the entity `angle` is atan2(aim) measured from +X. Rotating the
+    /// image by (angle - PI/2) makes the baked gun point along the aim/shoot
+    /// direction (where bullets actually fly), which reads correctly top-down.
+    const BAKED_ANGLE_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
+
+    /// Pick the atlas color name for the player.
+    const PLAYER_BAKED_COLOR: &str = "coral";
+
+    /// Draw the player and rogue enemies as baked 3D sprites on top of the
+    /// primitive draw. Must be called while the camera transform is applied so
+    /// that world coordinates land on screen (camera zoom is 1.0). Returns once
+    /// the atlas is ready; until then `draw_baked` no-ops and the primitives
+    /// (already drawn by `render_entities`) remain visible.
+    fn draw_baked_entities(world: &World) {
+        use crate::components::{AIState, EnemyType};
+        use crate::components::{
+            Boss, Enemy, Health, Player, Position, Rotation, Stunned, Velocity, AI,
+        };
+
+        let scale = BAKED_TILE_PX / BAKED_ATLAS_PX;
+
+        // Determines a pose name from motion / combat / knockdown state.
+        fn pose_for(speed: f32, prone: bool, attacking: bool) -> &'static str {
+            if prone {
+                "hit"
+            } else if attacking {
+                "shoot"
+            } else if speed > 6.0 {
+                "walk"
+            } else {
+                "idle"
+            }
+        }
+
+        // --- Enemies (rogue bots) ---
+        for entity in world.query::<Enemy>() {
+            if world.has_component::<Boss>(entity) {
+                continue; // boss keeps its own draw
+            }
+            let (pos, rot, health, ai) = match (
+                world.get_component::<Position>(entity),
+                world.get_component::<Rotation>(entity),
+                world.get_component::<Health>(entity),
+                world.get_component::<AI>(entity),
+            ) {
+                (Some(p), Some(r), Some(h), Some(a)) => (p, r, h, a),
+                _ => continue,
+            };
+            let color = match ai.initial_type {
+                EnemyType::Idle => "red",           // SENTINEL
+                EnemyType::Wandering => "violet",   // DRIFTER
+                EnemyType::Patrolling => "magenta", // HUNTER
+            };
+            let prone = health.is_dead() || world.has_component::<Stunned>(entity);
+            let speed = world
+                .get_component::<Velocity>(entity)
+                .map(|v| (v.x * v.x + v.y * v.y).sqrt())
+                .unwrap_or(0.0);
+            let attacking = ai.state == AIState::SurePlayerSeen && ai.attack_timer > 0.0;
+            let pose = pose_for(speed, prone, attacking);
+            let key = format!("{color}:{pose}");
+            draw_baked(&key, pos.x, pos.y, rot.angle + BAKED_ANGLE_OFFSET, scale);
+        }
+
+        // --- Player (CL4-UD3, coral) ---
+        if let Some(&player) = world.query::<Player>().first() {
+            let pos = world.get_component::<Position>(player);
+            let health = world.get_component::<Health>(player);
+            if let (Some(pos), Some(health)) = (pos, health) {
+                if !health.is_dead() {
+                    let angle = world
+                        .get_component::<Rotation>(player)
+                        .map(|r| r.angle)
+                        .unwrap_or(0.0);
+                    let speed = world
+                        .get_component::<Velocity>(player)
+                        .map(|v| (v.x * v.x + v.y * v.y).sqrt())
+                        .unwrap_or(0.0);
+                    let firing =
+                        crate::input::is_mouse_button_down(crate::input::mouse_buttons::LEFT);
+                    let pose = pose_for(speed, false, firing);
+                    let key = format!("{PLAYER_BAKED_COLOR}:{pose}");
+                    draw_baked(&key, pos.x, pos.y, angle + BAKED_ANGLE_OFFSET, scale);
+                }
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum GameScreen {
         LevelSelect,
@@ -95,9 +213,15 @@ mod wasm_entry {
         (hash2(a, b) & 0xff_ffff) as f32 / 0xff_ffff as f32
     }
 
-    /// Full-screen "shoggoth" glitch: dark-grey cells with yellow eyes scattered
-    /// across the screen, the pattern jittering to nearby spots every 0.2s, over
-    /// a 1.2s fade-in/out. `elapsed_ms` is time since the effect started.
+    /// Full-screen "shoggoth" glitch: live-cell tissue rendered as a pixelated
+    /// Voronoi field. The screen is scanned in chunky blocks; each block finds
+    /// its two nearest cell nuclei, and blocks nearly equidistant to both are
+    /// MEMBRANE — the wall *in between* neighbouring cells — drawn as a
+    /// green-or-black dithered pixel line. Cell interiors stay dark cytoplasm
+    /// with a small nucleus, and a subset of cells carry a blinking pale-yellow
+    /// eye. The nuclei re-seat to nearby spots every ~6 frames (~0.1s) so the
+    /// whole tissue squirms glitchily. 1.2s fade envelope; `elapsed_ms` is time
+    /// since the effect started.
     fn draw_shoggoth_glitch(g: &Graphics, elapsed_ms: f32) {
         let (w, h) = (g.width(), g.height());
         let t = (elapsed_ms / 1200.0).clamp(0.0, 1.0);
@@ -114,29 +238,78 @@ mod wasm_entry {
             Vec2::new(0.0, 0.0),
             w,
             h,
-            Color::new(0.05, 0.05, 0.06, 0.82 * env),
+            Color::new(0.03, 0.03, 0.045, 0.9 * env),
         );
 
-        // Regenerate the cell layout every 0.2s, jittering each cell near its anchor.
-        let tick = (elapsed_ms / 200.0) as u32;
-        for i in 0..64u32 {
-            let bx = rand01(i, 11) * w;
-            let by = rand01(i, 23) * h;
-            let jx = (rand01(i, tick * 3 + 1) - 0.5) * 34.0;
-            let jy = (rand01(i, tick * 3 + 2) - 0.5) * 34.0;
-            let (x, y) = (bx + jx, by + jy);
-            let sz = 26.0 + rand01(i, 7) * 34.0;
-            g.draw_rectangle(
-                Vec2::new(x - sz / 2.0, y - sz / 2.0),
-                sz,
-                sz,
-                Color::new(0.22, 0.22, 0.24, 0.9 * env),
-            );
-            if rand01(i, tick + 5) > 0.35 {
-                let eye = Color::new(1.0, 0.86, 0.12, env);
-                let eo = sz * 0.18;
-                g.draw_circle(Vec2::new(x - eo, y), sz * 0.09, eye);
-                g.draw_circle(Vec2::new(x + eo, y), sz * 0.09, eye);
+        // One nucleus (seed) per jittered grid cell; the layout re-seats every
+        // ~6 frames, wobbling only to nearby spots — the glitchy squirm.
+        let tick = (elapsed_ms / 100.0) as u32;
+        let cols: i32 = 12;
+        let rows: i32 = 9;
+        let cw = w / cols as f32;
+        let ch = h / rows as f32;
+        let seed = |i: i32, j: i32| -> (f32, f32) {
+            // wrap so blocks near the screen edge still see a full neighbourhood
+            let (iw, jw) = (i.rem_euclid(cols), j.rem_euclid(rows));
+            let id = (jw * cols + iw) as u32;
+            let ax = (i as f32 + 0.5) * cw + (rand01(id, 3) - 0.5) * cw * 0.6;
+            let ay = (j as f32 + 0.5) * ch + (rand01(id, 4) - 0.5) * ch * 0.6;
+            let jx = (rand01(id, tick * 2 + 1) - 0.5) * cw * 0.22;
+            let jy = (rand01(id, tick * 2 + 2) - 0.5) * ch * 0.22;
+            (ax + jx, ay + jy)
+        };
+
+        // Pixelated scan: chunky blocks classified as membrane / nucleus / bg.
+        let px = 10.0f32; // block size — the pixelization
+        let membrane_w = 0.16; // boundary half-width (in nearest-distance ratio)
+        let bx_n = (w / px).ceil() as i32;
+        let by_n = (h / px).ceil() as i32;
+        for byi in 0..by_n {
+            for bxi in 0..bx_n {
+                let cx = (bxi as f32 + 0.5) * px;
+                let cy = (byi as f32 + 0.5) * px;
+                let gi = (cx / cw).floor() as i32;
+                let gj = (cy / ch).floor() as i32;
+                // nearest + second-nearest nucleus over the 3x3 neighbourhood
+                let (mut d1, mut d2) = (f32::MAX, f32::MAX);
+                let mut best = (0i32, 0i32);
+                for dj in -1..=1 {
+                    for di in -1..=1 {
+                        let (sx, sy) = seed(gi + di, gj + dj);
+                        let d = (sx - cx) * (sx - cx) + (sy - cy) * (sy - cy);
+                        if d < d1 {
+                            d2 = d1;
+                            d1 = d;
+                            best = (gi + di, gj + dj);
+                        } else if d < d2 {
+                            d2 = d;
+                        }
+                    }
+                }
+                let (d1, d2) = (d1.sqrt(), d2.sqrt());
+                // Membrane: this block sits on the wall BETWEEN two cells.
+                if d2 - d1 < membrane_w * (d1 + d2) {
+                    // green-or-black dither, re-rolled with the glitch tick
+                    let roll = rand01((bxi * 977 + byi) as u32, tick + 41);
+                    let c = if roll > 0.45 {
+                        Color::new(0.12, 0.55, 0.30, 0.95 * env) // membrane green
+                    } else {
+                        Color::new(0.01, 0.05, 0.03, 0.95 * env) // membrane black
+                    };
+                    g.draw_rectangle(Vec2::new(bxi as f32 * px, byi as f32 * px), px, px, c);
+                } else if d1 < cw.min(ch) * 0.16 {
+                    // Nucleus kernel at the middle of each cell.
+                    let id = (best.1.rem_euclid(rows) * cols + best.0.rem_euclid(cols)) as u32;
+                    let eyed = rand01(id, tick / 3 + 9) > 0.7;
+                    let c = if eyed {
+                        let blink = 0.6 + 0.4 * rand01(id, tick + 1);
+                        Color::new(1.0, 0.93, 0.5, blink * env) // pale-yellow eye
+                    } else {
+                        Color::new(0.38, 0.15, 0.38, 0.9 * env) // plain nucleus
+                    };
+                    g.draw_rectangle(Vec2::new(bxi as f32 * px, byi as f32 * px), px, px, c);
+                }
+                // everything else stays dark cytoplasm (the takeover wash).
             }
         }
     }
@@ -213,6 +386,8 @@ mod wasm_entry {
         music_started: bool,
         boss_intro_line: usize,
         viz_tab: VizTab,
+        /// Index of the sprites-gallery item open in the inspector (-1 = none).
+        viz_selected: i32,
         viz_level: usize,
         effect_start: f64,
         prev_player_alive: bool,
@@ -258,6 +433,7 @@ mod wasm_entry {
                 music_started: false,
                 boss_intro_line: 0,
                 viz_tab: VizTab::Sprites,
+                viz_selected: -1,
                 viz_level: 0,
                 effect_start: 0.0,
                 prev_player_alive: true,
@@ -376,8 +552,14 @@ mod wasm_entry {
                 }
             }
 
+            // Leaving the sprites tab closes the inspector iframe panel.
+            if self.viz_tab != VizTab::Sprites && self.viz_selected >= 0 {
+                viz_inspect_hide();
+                self.viz_selected = -1;
+            }
+
             match self.viz_tab {
-                VizTab::Sprites => self.draw_viz_sprites(graphics),
+                VizTab::Sprites => self.draw_viz_sprites(graphics, mouse, click),
                 VizTab::Musics => self.draw_viz_musics(graphics, mouse, click),
                 VizTab::Levels => self.draw_viz_levels(graphics, mouse, click),
                 VizTab::Effects => self.draw_viz_effects(graphics, mouse, click),
@@ -409,158 +591,347 @@ mod wasm_entry {
             );
         }
 
-        /// SPRITES tab: every sprite/asset drawn once and labelled.
-        fn draw_viz_sprites(&self, graphics: &Graphics) {
+        /// SPRITES tab: a clickable character gallery. Clicking an item opens the
+        /// right-hand inspector iframe (3D orbit + baked 2D) via `viz_inspect`.
+        fn draw_viz_sprites(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            graphics.draw_text(
+                "Click a character to inspect it in 3D  \u{2192}",
+                Vec2::new(40.0, 92.0),
+                18.0,
+                Color::GRAY,
+            );
+
             let coral = Color::from_rgba(217, 119, 87, 255);
             let red = Color::from_rgba(224, 49, 66, 255);
             let violet = Color::from_rgba(150, 70, 210, 255);
             let magenta = Color::from_rgba(224, 40, 160, 255);
 
-            let (x0, y0, dx, dy) = (130.0f32, 180.0f32, 175.0f32, 165.0f32);
-            let cell = |i: usize| Vec2::new(x0 + (i % 5) as f32 * dx, y0 + (i / 5) as f32 * dy);
-            let label = |c: Vec2, t: &str| {
-                graphics.draw_text(t, Vec2::new(c.x - 60.0, c.y + 60.0), 16.0, Color::WHITE);
-            };
-
-            // Actors (drawn facing "up" at rotation 0).
-            let sprites = [
-                (coral, false, "CL-4UDE"),
-                (coral, true, "CL-4UDE down"),
-                (red, false, "SENTINEL"),
-                (violet, false, "DRIFTER"),
-                (magenta, false, "HUNTER"),
-                (red, true, "rogue down"),
+            // (inspector kind, label). Shoggoth ships as two rival bosses: v1 and
+            // v2 are separate inspectable enemies so we can A/B them in-panel.
+            let items: [(&str, &str); 8] = [
+                ("coral", "CL4-UD3"),
+                ("red", "SENTINEL"),
+                ("violet", "DRIFTER"),
+                ("magenta", "HUNTER"),
+                ("shoggoth_masked", "SHOG v1 mask"),
+                ("shoggoth_enraged", "SHOG v1 raw"),
+                ("shoggoth_v2_masked", "SHOG v2 mask"),
+                ("shoggoth_v2_enraged", "SHOG v2 raw"),
             ];
-            let mut i = 0;
-            for (color, dead, name) in sprites {
-                let c = cell(i);
-                graphics.draw_pixelated_sprite(c, 0.0, color, dead);
-                label(c, name);
-                i += 1;
+
+            // Two columns on the LEFT half; the right half is the inspector iframe.
+            let (x0, y0, dx, dy) = (120.0f32, 160.0f32, 190.0f32, 140.0f32);
+            for (i, &(kind, label)) in items.iter().enumerate() {
+                let c = Vec2::new(x0 + (i % 2) as f32 * dx, y0 + (i / 2) as f32 * dy);
+                let (bx, by, bw, bh) = (c.x - 85.0, c.y - 58.0, 170.0, 116.0);
+                let over =
+                    mouse.x >= bx && mouse.x <= bx + bw && mouse.y >= by && mouse.y <= by + bh;
+                let selected = self.viz_selected == i as i32;
+                let bg = if selected {
+                    Color::new(1.0, 0.09, 0.26, 0.30)
+                } else if over {
+                    Color::new(0.28, 0.22, 0.33, 1.0)
+                } else {
+                    Color::new(0.13, 0.09, 0.17, 1.0)
+                };
+                let border = if selected {
+                    Color::new(1.0, 0.09, 0.26, 1.0)
+                } else {
+                    Color::new(0.4, 0.3, 0.45, 1.0)
+                };
+                graphics.draw_rectangle(Vec2::new(bx, by), bw, bh, bg);
+                graphics.draw_rectangle_lines(Vec2::new(bx, by), bw, bh, 1.5, border);
+
+                match kind {
+                    "shoggoth_masked" | "shoggoth_v2_masked" => {
+                        graphics.draw_shoggoth(c, 30.0, false)
+                    }
+                    "shoggoth_enraged" | "shoggoth_v2_enraged" => {
+                        graphics.draw_shoggoth(c, 30.0, true)
+                    }
+                    _ => {
+                        let color = match kind {
+                            "coral" => coral,
+                            "red" => red,
+                            "violet" => violet,
+                            _ => magenta,
+                        };
+                        graphics.draw_pixelated_sprite(c, 0.0, color, false);
+                    }
+                }
+                graphics.draw_text(label, Vec2::new(c.x - 60.0, c.y + 50.0), 15.0, Color::WHITE);
+
+                if over && click {
+                    self.viz_selected = i as i32;
+                    viz_inspect(kind);
+                }
             }
 
-            // Weapon pickups (same markers as on the floor).
-            let pickups = [
-                ("Pistol", Color::new(0.9, 0.9, 0.9, 1.0)),
-                ("Shotgun", Color::new(1.0, 0.55, 0.1, 1.0)),
-                ("MachineGun", Color::new(0.2, 0.8, 1.0, 1.0)),
-                ("Melee", Color::new(0.7, 0.7, 0.75, 1.0)),
-            ];
-            for (name, col) in pickups {
-                let c = cell(i);
-                graphics.draw_rectangle(
-                    Vec2::new(c.x - 11.0, c.y - 7.0),
-                    22.0,
-                    14.0,
-                    Color::new(0.0, 0.0, 0.0, 0.35),
+            if self.viz_selected < 0 {
+                graphics.draw_text(
+                    "pick one \u{2192}",
+                    Vec2::new(600.0, 360.0),
+                    20.0,
+                    Color::GRAY,
                 );
-                graphics.draw_rectangle(Vec2::new(c.x - 8.0, c.y - 2.0), 16.0, 4.0, col);
-                graphics.draw_rectangle(Vec2::new(c.x - 6.0, c.y + 2.0), 4.0, 4.0, col);
-                graphics.draw_rectangle_lines(
-                    Vec2::new(c.x - 11.0, c.y - 7.0),
-                    22.0,
-                    14.0,
-                    1.0,
-                    col,
-                );
-                label(c, name);
-                i += 1;
             }
-
-            // Bullet.
-            let c = cell(i);
-            graphics.draw_circle(c, 3.0, Color::new(1.0, 0.9, 0.3, 1.0));
-            label(c, "Bullet");
-            i += 1;
-
-            // Wall.
-            let c = cell(i);
-            graphics.draw_rectangle(
-                Vec2::new(c.x - 24.0, c.y - 16.0),
-                48.0,
-                32.0,
-                Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
-            );
-            graphics.draw_rectangle_lines(
-                Vec2::new(c.x - 24.0, c.y - 16.0),
-                48.0,
-                32.0,
-                2.0,
-                Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
-            );
-            label(c, "Wall");
-            i += 1;
-
-            // Floor tiles (the two checker shades).
-            let c = cell(i);
-            let a = Color::new(40.0 / 255.0, 35.0 / 255.0, 45.0 / 255.0, 1.0);
-            let b = Color::new(35.0 / 255.0, 30.0 / 255.0, 40.0 / 255.0, 1.0);
-            graphics.draw_rectangle(Vec2::new(c.x - 20.0, c.y - 20.0), 20.0, 20.0, a);
-            graphics.draw_rectangle(Vec2::new(c.x, c.y - 20.0), 20.0, 20.0, b);
-            graphics.draw_rectangle(Vec2::new(c.x - 20.0, c.y), 20.0, 20.0, b);
-            graphics.draw_rectangle(Vec2::new(c.x, c.y), 20.0, 20.0, a);
-            label(c, "Floor");
-            i += 1;
-
-            // The boss, both phases.
-            let c = cell(i);
-            graphics.draw_shoggoth(c, 32.0, false);
-            label(c, "SHOGGOTH mask");
-            i += 1;
-            let c = cell(i);
-            graphics.draw_shoggoth(c, 32.0, true);
-            label(c, "SHOGGOTH raw");
         }
 
-        /// MUSICS tab: a button per sound + the music loop. Clicking plays it.
+        /// MUSICS tab: a step-sequencer *tracker* for the live audio engine. A
+        /// SECTIONS strip of clickable miniatures (one per arrangement section,
+        /// shaded by note density, current section highlighted) sits above the
+        /// PATTERN grid of the currently-playing section (five channels; filled
+        /// cells are notes; playhead column; click a column to seek; M/S mute/
+        /// solo per row). Song-select buttons above; per-weapon SFX below.
         fn draw_viz_musics(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let coral = Color::from_rgba(217, 119, 87, 255);
             graphics.draw_text(
-                "Click to play. (audio unlocks on the first click)",
-                Vec2::new(40.0, 88.0),
+                "TRACKER — click a song, a section miniature, or a grid column.",
+                Vec2::new(40.0, 84.0),
                 18.0,
                 Color::GRAY,
             );
 
-            // One song per floor-mood — the sequencer's four tracks.
-            graphics.draw_text(
-                "SONGS (one per floor mood)",
-                Vec2::new(40.0, 120.0),
-                16.0,
-                Color::from_rgba(217, 119, 87, 255),
-            );
-            for (i, song) in crate::audio::SONGS.iter().enumerate() {
-                let x = 40.0 + (i % 2) as f32 * 270.0;
-                let y = 138.0 + (i / 2) as f32 * 54.0;
-                if viz_button(graphics, mouse, x, y, 240.0, 44.0, song.name, false) && click {
+            // --- song select -----------------------------------------------
+            graphics.draw_text("SONGS", Vec2::new(40.0, 108.0), 16.0, coral);
+            let cur_name = self.audio.current_song().name;
+            let songs = crate::audio::SONGS;
+            for (i, song) in songs.iter().enumerate() {
+                let x = 40.0 + (i % 4) as f32 * 168.0;
+                let y = 118.0 + (i / 4) as f32 * 46.0;
+                let active = song.name == cur_name && self.audio.is_playing();
+                if viz_button(graphics, mouse, x, y, 158.0, 40.0, song.name, active) && click {
                     self.audio.resume();
                     self.audio.play_song(i);
                 }
             }
-            let stop_y = 138.0 + 2.0 * 54.0 + 8.0;
-            if viz_button(
-                graphics,
-                mouse,
-                40.0,
-                stop_y,
-                240.0,
-                44.0,
-                "Stop music",
-                false,
-            ) && click
-            {
+            let song_rows = songs.len().div_ceil(4) as f32;
+            let mut y = 118.0 + song_rows * 46.0 + 4.0;
+            if viz_button(graphics, mouse, 40.0, y, 158.0, 40.0, "STOP", false) && click {
                 self.audio.stop_music();
             }
 
-            // One-shot sound effects.
+            // --- section miniatures (the arrangement mini-map) ---------------
+            y += 54.0;
+            graphics.draw_text("SECTIONS", Vec2::new(40.0, y), 16.0, coral);
+            let strip_top = y + 8.0;
+            let n_sections = self.audio.section_count().max(1);
+            let cur_section = self.audio.current_section();
+            let gx = 210.0f32;
+            let gw = (graphics.width() - gx - 40.0).max(160.0);
+            let mh = 34.0f32; // miniature height
+            let mw = gw / n_sections as f32;
+            for sec in 0..n_sections {
+                let mx = gx + sec as f32 * mw;
+                let is_cur = sec == cur_section && self.audio.is_playing();
+                let over = mouse.x >= mx
+                    && mouse.x <= mx + mw
+                    && mouse.y >= strip_top
+                    && mouse.y <= strip_top + mh;
+                // Card, shaded by how dense the section is.
+                let d = self.audio.section_density(sec);
+                let bg = if is_cur {
+                    Color::new(1.0, 0.09, 0.26, 0.30)
+                } else if over {
+                    Color::new(0.28, 0.22, 0.33, 1.0)
+                } else {
+                    Color::new(0.10 + d * 0.10, 0.08 + d * 0.06, 0.14 + d * 0.10, 1.0)
+                };
+                graphics.draw_rectangle(Vec2::new(mx + 1.0, strip_top), mw - 2.0, mh, bg);
+                // Miniature pattern: the section's cells squeezed into the card.
+                let s_len = self.audio.section_pattern_len(sec).max(1);
+                let cw_m = (mw - 6.0) / s_len as f32;
+                let rh_m = (mh - 6.0) / crate::audio::NUM_CHANNELS as f32;
+                for r in 0..crate::audio::NUM_CHANNELS {
+                    for s in 0..s_len {
+                        if self.audio.section_cell(sec, r, s) {
+                            graphics.draw_rectangle(
+                                Vec2::new(
+                                    mx + 3.0 + s as f32 * cw_m,
+                                    strip_top + 3.0 + r as f32 * rh_m,
+                                ),
+                                cw_m.max(1.0),
+                                rh_m.max(1.0),
+                                if is_cur {
+                                    Color::new(1.0, 0.75, 0.6, 0.95)
+                                } else {
+                                    Color::new(0.62, 0.5, 0.72, 0.9)
+                                },
+                            );
+                        }
+                    }
+                }
+                let border = if is_cur {
+                    Color::new(1.0, 0.09, 0.26, 1.0)
+                } else {
+                    Color::new(0.35, 0.28, 0.4, 1.0)
+                };
+                graphics.draw_rectangle_lines(
+                    Vec2::new(mx + 1.0, strip_top),
+                    mw - 2.0,
+                    mh,
+                    1.0,
+                    border,
+                );
+                if over && click {
+                    self.audio.resume();
+                    self.audio.jump_to_section(sec);
+                }
+            }
+            // Section labels under the strip (current one highlighted).
             graphics.draw_text(
-                "SFX",
-                Vec2::new(40.0, stop_y + 74.0),
-                16.0,
-                Color::from_rgba(217, 119, 87, 255),
+                self.audio.current_section_label(),
+                Vec2::new(gx, strip_top + mh + 16.0),
+                14.0,
+                coral,
             );
-            let sfx = [
-                "Shoot",
-                "Hit",
+
+            // --- tracker grid (the currently-playing section) ----------------
+            y = strip_top + mh + 26.0;
+            graphics.draw_text("PATTERN", Vec2::new(40.0, y), 16.0, coral);
+            let grid_top = y + 12.0;
+            let steps = self.audio.pattern_len().max(1);
+            let cur_step = self.audio.current_step();
+            let playing = self.audio.is_playing();
+            let rows = crate::audio::NUM_CHANNELS;
+            let names = crate::audio::CHANNEL_NAMES;
+            let chan_col = [
+                Color::from_rgba(217, 119, 87, 255), // bass
+                Color::from_rgba(80, 200, 240, 255), // lead
+                Color::from_rgba(150, 90, 210, 255), // pad
+                Color::from_rgba(224, 80, 170, 255), // arp
+                Color::from_rgba(230, 200, 60, 255), // drums
+            ];
+            let rh = 26.0f32;
+            let cw = gw / steps as f32;
+
+            // Playhead column highlight (drawn behind the cells).
+            if playing {
+                graphics.draw_rectangle(
+                    Vec2::new(gx + cur_step as f32 * cw, grid_top - 2.0),
+                    cw,
+                    rows as f32 * rh + 4.0,
+                    Color::new(1.0, 1.0, 1.0, 0.14),
+                );
+            }
+
+            for r in 0..rows {
+                let ry = grid_top + r as f32 * rh;
+                let muted = self.audio.is_muted(r);
+                let soloed = self.audio.is_solo(r);
+                let col = chan_col[r.min(chan_col.len() - 1)];
+                let name_col = if muted { Color::GRAY } else { col };
+                graphics.draw_text(
+                    names[r],
+                    Vec2::new(40.0, ry + rh * 0.5 + 6.0),
+                    16.0,
+                    name_col,
+                );
+                if viz_button(graphics, mouse, 118.0, ry + 2.0, 26.0, rh - 6.0, "M", muted) && click
+                {
+                    self.audio.toggle_mute(r);
+                }
+                if viz_button(
+                    graphics,
+                    mouse,
+                    150.0,
+                    ry + 2.0,
+                    26.0,
+                    rh - 6.0,
+                    "S",
+                    soloed,
+                ) && click
+                {
+                    self.audio.toggle_solo(r);
+                }
+                for s in 0..steps {
+                    let cx = gx + s as f32 * cw;
+                    // Beat markers: every 4th column reads a touch brighter.
+                    let bg = if s % 4 == 0 {
+                        Color::new(0.16, 0.13, 0.20, 1.0)
+                    } else {
+                        Color::new(0.10, 0.09, 0.13, 1.0)
+                    };
+                    graphics.draw_rectangle(Vec2::new(cx + 1.0, ry + 2.0), cw - 2.0, rh - 4.0, bg);
+                    if self.audio.channel_active(r, s) {
+                        let c = if muted {
+                            Color::new(col.r * 0.4, col.g * 0.4, col.b * 0.4, 1.0)
+                        } else {
+                            col
+                        };
+                        let inset = if playing && s == cur_step { 2.0 } else { 4.0 };
+                        graphics.draw_rectangle(
+                            Vec2::new(cx + inset, ry + inset),
+                            (cw - inset * 2.0).max(2.0),
+                            rh - inset * 2.0,
+                            c,
+                        );
+                    }
+                }
+            }
+            graphics.draw_rectangle_lines(
+                Vec2::new(gx, grid_top),
+                steps as f32 * cw,
+                rows as f32 * rh,
+                1.5,
+                Color::new(0.45, 0.35, 0.5, 1.0),
+            );
+
+            // Click anywhere in the grid to seek to that column's step.
+            let grid_bottom = grid_top + rows as f32 * rh;
+            if click
+                && mouse.x >= gx
+                && mouse.x <= gx + steps as f32 * cw
+                && mouse.y >= grid_top
+                && mouse.y <= grid_bottom
+            {
+                let s = ((mouse.x - gx) / cw) as usize;
+                self.audio.seek(s.min(steps - 1));
+            }
+
+            // --- SFX: the full per-weapon taxonomy ---------------------------
+            // Row 1: attack (the weapon firing/swinging).
+            // Row 2: hit (that weapon's impact on a metal bot).
+            // Row 3: the rest of the one-shot game sounds.
+            let mut sy = grid_bottom + 18.0;
+            graphics.draw_text("SFX", Vec2::new(40.0, sy), 16.0, coral);
+            sy += 12.0;
+            let bw_s = 158.0f32;
+            let bh_s = 34.0f32;
+            let attack = [
+                "attack: club",
+                "attack: gun",
+                "attack: machinegun",
+                "attack: shotgun",
+            ];
+            for (i, &name) in attack.iter().enumerate() {
+                let x = 40.0 + i as f32 * 168.0;
+                if viz_button(graphics, mouse, x, sy, bw_s, bh_s, name, false) && click {
+                    self.audio.resume();
+                    match i {
+                        0 => self.audio.play_attack_club(),
+                        1 => self.audio.play_attack_gun(),
+                        2 => self.audio.play_attack_machinegun(),
+                        _ => self.audio.play_attack_shotgun(),
+                    }
+                }
+            }
+            sy += bh_s + 6.0;
+            let hit = ["hit: club", "hit: gun", "hit: machinegun", "hit: shotgun"];
+            for (i, &name) in hit.iter().enumerate() {
+                let x = 40.0 + i as f32 * 168.0;
+                if viz_button(graphics, mouse, x, sy, bw_s, bh_s, name, false) && click {
+                    self.audio.resume();
+                    match i {
+                        0 => self.audio.play_hit_club(),
+                        1 => self.audio.play_hit_gun(),
+                        2 => self.audio.play_hit_machinegun(),
+                        _ => self.audio.play_hit_shotgun(),
+                    }
+                }
+            }
+            sy += bh_s + 6.0;
+            let misc = [
                 "Rogue down",
                 "Pickup",
                 "Throw",
@@ -568,22 +939,22 @@ mod wasm_entry {
                 "Death",
                 "Level clear",
                 "Mask crack",
+                "Elevator",
             ];
-            for (i, &name) in sfx.iter().enumerate() {
-                let x = 40.0 + (i % 3) as f32 * 230.0;
-                let y = stop_y + 96.0 + (i / 3) as f32 * 52.0;
-                if viz_button(graphics, mouse, x, y, 210.0, 42.0, name, false) && click {
+            for (i, &name) in misc.iter().enumerate() {
+                let x = 40.0 + (i % 4) as f32 * 168.0;
+                let by = sy + (i / 4) as f32 * (bh_s + 6.0);
+                if viz_button(graphics, mouse, x, by, bw_s, bh_s, name, false) && click {
                     self.audio.resume();
                     match i {
-                        0 => self.audio.play_shoot(),
-                        1 => self.audio.play_hit(),
-                        2 => self.audio.play_enemy_down(),
-                        3 => self.audio.play_pickup(),
-                        4 => self.audio.play_throw(),
-                        5 => self.audio.play_player_hurt(),
-                        6 => self.audio.play_death(),
-                        7 => self.audio.play_level_clear(),
-                        _ => self.audio.play_mask_crack(),
+                        0 => self.audio.play_enemy_down(),
+                        1 => self.audio.play_pickup(),
+                        2 => self.audio.play_throw(),
+                        3 => self.audio.play_player_hurt(),
+                        4 => self.audio.play_death(),
+                        5 => self.audio.play_level_clear(),
+                        6 => self.audio.play_mask_crack(),
+                        _ => self.audio.play_elevator(),
                     }
                 }
             }
@@ -1153,6 +1524,12 @@ mod wasm_entry {
 
             // Render all entities
             render_entities(&self.world, graphics, self.show_infos);
+
+            // Overlay baked 3D sprites on top of the primitives (no-op until the
+            // JS atlas is ready, so the primitive draw acts as the fallback).
+            // Drawn while the camera transform is still applied so world-space
+            // positions land correctly (camera zoom is 1.0).
+            draw_baked_entities(&self.world);
 
             // Reset camera for UI rendering
             self.camera.reset(graphics);

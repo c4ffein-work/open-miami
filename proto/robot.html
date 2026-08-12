@@ -8,28 +8,30 @@
   #wrap{display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px;}
   canvas{image-rendering:pixelated;background:#12161d;box-shadow:0 0 0 1px #2a3340;}
   .hud{font-size:12px;opacity:.7;}
+  a{color:#7cc;}
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="c" width="384" height="384"></canvas>
   <div class="hud" id="hud"></div>
+  <div class="hud">interactive editor: <a href="editor.html">editor.html</a></div>
 </div>
-<script>
-"use strict";
+<script type="module">
 /* =========================================================================
-   OPEN MIAMI - standalone 3D -> top-down -> stylized 2D sprite pipeline proto
-   Vanilla WebGL 1, no libraries. Robot built from boxes + a tiny skeleton.
+   OPEN MIAMI - standalone 3D -> top-down -> stylized 2D sprite pipeline proto.
+   All rendering now lives in the reusable ./robot-core.js module; this page
+   is just the query-param driver + screenshot harness it always was.
    Query params:
      ?frame=N     integer -> deterministic animation phase (for screenshots)
      ?t=SECONDS   float   -> alternative continuous time (overrides frame)
-     ?pose=walk|shoot
+     ?pose=idle|walk|shoot|hit
      ?color=coral|red|magenta|violet   (player + 3 rogue palettes)
      ?px=6        pixelation block size (post pass)
    If neither frame nor t given -> live animation via requestAnimationFrame.
    ========================================================================= */
+import { createRenderer, PALETTES, POSES } from "./robot-core.js";
 
-/* ---------- query params ---------- */
 const Q = new URLSearchParams(location.search);
 const POSE = (Q.get("pose") || "walk").toLowerCase();
 const COLORNAME = (Q.get("color") || "coral").toLowerCase();
@@ -38,411 +40,35 @@ const hasFrame = Q.has("frame");
 const hasT = Q.has("t");
 const FIXED = hasT ? parseFloat(Q.get("t")) : (hasFrame ? parseInt(Q.get("frame"),10) * (1/12) : null);
 
-const PALETTES = {
-  // body, accent(limbs/visor glow), dark trim
-  coral:   {body:[0.98,0.52,0.42], accent:[1.0,0.75,0.55], trim:[0.35,0.14,0.12]},
-  red:     {body:[0.86,0.16,0.18], accent:[1.0,0.45,0.30], trim:[0.28,0.05,0.06]},
-  magenta: {body:[0.86,0.18,0.72], accent:[1.0,0.45,0.95], trim:[0.30,0.06,0.24]},
-  violet:  {body:[0.55,0.35,0.90], accent:[0.75,0.60,1.0], trim:[0.18,0.12,0.34]},
-};
-const PAL = PALETTES[COLORNAME] || PALETTES.coral;
-
-/* ---------- tiny mat4 math (column-major, like GL) ---------- */
-const M4 = {
-  ident(){return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);},
-  mul(a,b){ // a*b
-    const o=new Float32Array(16);
-    for(let r=0;r<4;r++)for(let c=0;c<4;c++){
-      o[c*4+r]=a[0*4+r]*b[c*4+0]+a[1*4+r]*b[c*4+1]+a[2*4+r]*b[c*4+2]+a[3*4+r]*b[c*4+3];
-    }
-    return o;
-  },
-  translate(x,y,z){const m=M4.ident();m[12]=x;m[13]=y;m[14]=z;return m;},
-  scale(x,y,z){const m=M4.ident();m[0]=x;m[5]=y;m[10]=z;return m;},
-  rotX(a){const c=Math.cos(a),s=Math.sin(a);const m=M4.ident();m[5]=c;m[6]=s;m[9]=-s;m[10]=c;return m;},
-  rotY(a){const c=Math.cos(a),s=Math.sin(a);const m=M4.ident();m[0]=c;m[2]=-s;m[8]=s;m[10]=c;return m;},
-  rotZ(a){const c=Math.cos(a),s=Math.sin(a);const m=M4.ident();m[0]=c;m[1]=s;m[4]=-s;m[5]=c;return m;},
-  ortho(l,r,b,t,n,f){
-    const m=M4.ident();
-    m[0]=2/(r-l);m[5]=2/(t-b);m[10]=-2/(f-n);
-    m[12]=-(r+l)/(r-l);m[13]=-(t+b)/(t-b);m[14]=-(f+n)/(f-n);
-    return m;
-  },
-  // look from eye toward center, up. returns view matrix.
-  lookAt(eye,center,up){
-    const z=norm(sub(eye,center));
-    const x=norm(cross(up,z));
-    const y=cross(z,x);
-    const m=M4.ident();
-    m[0]=x[0];m[4]=x[1];m[8]=x[2];
-    m[1]=y[0];m[5]=y[1];m[9]=y[2];
-    m[2]=z[0];m[6]=z[1];m[10]=z[2];
-    m[12]=-dot(x,eye);m[13]=-dot(y,eye);m[14]=-dot(z,eye);
-    return m;
-  },
-  // 3x3 normal matrix (inverse-transpose of upper-left) packed for mat3 uniform
-  normalFromModel(m){
-    // good enough: our model transforms are rotations + uniform-ish scales;
-    // use upper-left 3x3 directly (non-uniform scale on boxes is fine visually).
-    return new Float32Array([m[0],m[1],m[2], m[4],m[5],m[6], m[8],m[9],m[10]]);
-  }
-};
-function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
-function cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];}
-function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
-function norm(a){const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l];}
-
-/* ---------- GL setup ---------- */
-const canvas = document.getElementById("c");
-const gl = canvas.getContext("webgl", {antialias:false, preserveDrawingBuffer:true});
-if(!gl){ document.getElementById("hud").textContent="WebGL unavailable"; throw new Error("no webgl"); }
-const W = canvas.width, H = canvas.height;
-
-function compile(type,src){
-  const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
-  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)+"\n"+src);
-  return s;
-}
-function program(vs,fs){
-  const p=gl.createProgram();
-  gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));
-  gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));
-  gl.linkProgram(p);
-  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
-  return p;
-}
-
-/* ---------- scene shader: renders lit boxes into a color texture,
-   packing a face-normal-derived tint we later use for edge detection.
-   We output linear-ish shaded color; depth+normal discontinuities come
-   from a separate 'id/normal' encoded in the alpha & a second target-free
-   trick: we just do edge detection on luminance + a per-part id channel. */
-const sceneVS = `
-attribute vec3 aPos;
-attribute vec3 aNormal;
-uniform mat4 uMVP;
-uniform mat3 uNormalMat;
-uniform vec3 uModelPos; // for cheap id
-varying vec3 vN;
-varying float vDepth;
-void main(){
-  vec4 p = uMVP * vec4(aPos,1.0);
-  gl_Position = p;
-  vN = normalize(uNormalMat * aNormal);
-  vDepth = p.z; // clip-space depth-ish for edge cues
-}
-`;
-const sceneFS = `
-precision mediump float;
-varying vec3 vN;
-varying float vDepth;
-uniform vec3 uColor;
-uniform vec3 uAccent;
-uniform float uId;
-void main(){
-  // top-down key light slightly angled so limbs read
-  vec3 L = normalize(vec3(0.35, 0.9, 0.45));
-  float ndl = max(dot(normalize(vN), L), 0.0);
-  float amb = 0.35;
-  float shade = amb + ndl*0.75;
-  // rim from side to help silhouette
-  vec3 base = mix(uColor, uAccent, clamp(vN.y*0.5+0.2,0.0,1.0)*0.4);
-  vec3 col = base * shade;
-  // store part id in alpha so post pass can detect part boundaries as edges
-  gl_FragColor = vec4(col, uId);
-}
-`;
-const sceneProg = program(sceneVS, sceneFS);
-const sLoc = {
-  aPos: gl.getAttribLocation(sceneProg,"aPos"),
-  aNormal: gl.getAttribLocation(sceneProg,"aNormal"),
-  uMVP: gl.getUniformLocation(sceneProg,"uMVP"),
-  uNormalMat: gl.getUniformLocation(sceneProg,"uNormalMat"),
-  uColor: gl.getUniformLocation(sceneProg,"uColor"),
-  uAccent: gl.getUniformLocation(sceneProg,"uAccent"),
-  uId: gl.getUniformLocation(sceneProg,"uId"),
-};
-
-/* ---------- post-process shader: edge detect + posterize + pixelate ---------- */
-const postVS = `
-attribute vec2 aPos;
-varying vec2 vUv;
-void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }
-`;
-const postFS = `
-precision mediump float;
-varying vec2 vUv;
-uniform sampler2D uTex;
-uniform vec2 uTexel;   // 1/size
-uniform float uPx;     // pixel block size in px
-uniform vec2 uSize;    // texture size
-float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
-vec4 samp(vec2 uv){ return texture2D(uTex, uv); }
-void main(){
-  // pixelation: snap uv to blocks
-  vec2 px = uSize;
-  vec2 block = floor(vUv*px/uPx)*uPx + uPx*0.5;
-  vec2 uv = block/px;
-
-  vec4 c = samp(uv);
-  vec3 col = c.rgb;
-
-  // --- edge detection (Sobel on luminance + part-id discontinuity) ---
-  vec2 t = uTexel*uPx;
-  float l00=luma(samp(uv+vec2(-t.x,-t.y)).rgb);
-  float l10=luma(samp(uv+vec2( 0.0,-t.y)).rgb);
-  float l20=luma(samp(uv+vec2( t.x,-t.y)).rgb);
-  float l01=luma(samp(uv+vec2(-t.x, 0.0)).rgb);
-  float l21=luma(samp(uv+vec2( t.x, 0.0)).rgb);
-  float l02=luma(samp(uv+vec2(-t.x, t.y)).rgb);
-  float l12=luma(samp(uv+vec2( 0.0, t.y)).rgb);
-  float l22=luma(samp(uv+vec2( t.x, t.y)).rgb);
-  float gx = -l00 -2.0*l01 -l02 + l20 + 2.0*l21 + l22;
-  float gy = -l00 -2.0*l10 -l20 + l02 + 2.0*l12 + l22;
-  float lumEdge = sqrt(gx*gx+gy*gy);
-
-  // part id edges (alpha channel) -> crisp inner outlines between limbs
-  float a = c.a;
-  float ai = max(max(abs(a-samp(uv+vec2(t.x,0.0)).a),abs(a-samp(uv+vec2(-t.x,0.0)).a)),
-                 max(abs(a-samp(uv+vec2(0.0,t.y)).a),abs(a-samp(uv+vec2(0.0,-t.y)).a)));
-
-  // silhouette edge: background is id 0 (alpha 0)
-  float silh = 0.0;
-  if(a < 0.02){ // background pixel next to robot?
-    float near = max(max(samp(uv+vec2(t.x,0.0)).a,samp(uv+vec2(-t.x,0.0)).a),
-                     max(samp(uv+vec2(0.0,t.y)).a,samp(uv+vec2(0.0,-t.y)).a));
-    silh = near>0.02 ? 1.0 : 0.0;
-  }
-
-  float edge = max(max(step(0.25, lumEdge), step(0.03, ai)), silh);
-
-  // --- posterize the fill for the inked/cel look ---
-  float levels = 4.0;
-  col = floor(col*levels + 0.5)/levels;
-
-  // background
-  if(a < 0.02 && silh < 0.5){
-    col = vec3(0.055,0.07,0.09); // dark neon-glass backdrop
-  }
-
-  // ink the edges near-black
-  col = mix(col, vec3(0.02,0.02,0.03), edge);
-
-  gl_FragColor = vec4(col,1.0);
-}
-`;
-const postProg = program(postVS, postFS);
-const pLoc = {
-  aPos: gl.getAttribLocation(postProg,"aPos"),
-  uTex: gl.getUniformLocation(postProg,"uTex"),
-  uTexel: gl.getUniformLocation(postProg,"uTexel"),
-  uPx: gl.getUniformLocation(postProg,"uPx"),
-  uSize: gl.getUniformLocation(postProg,"uSize"),
-};
-
-/* ---------- unit cube geometry (positions + normals), centered, size 1 ---------- */
-function makeCube(){
-  const p=[], n=[];
-  // faces: dir, normal
-  const faces=[
-    {n:[0,0,1],  v:[[-.5,-.5,.5],[.5,-.5,.5],[.5,.5,.5],[-.5,.5,.5]]},
-    {n:[0,0,-1], v:[[.5,-.5,-.5],[-.5,-.5,-.5],[-.5,.5,-.5],[.5,.5,-.5]]},
-    {n:[1,0,0],  v:[[.5,-.5,.5],[.5,-.5,-.5],[.5,.5,-.5],[.5,.5,.5]]},
-    {n:[-1,0,0], v:[[-.5,-.5,-.5],[-.5,-.5,.5],[-.5,.5,.5],[-.5,.5,-.5]]},
-    {n:[0,1,0],  v:[[-.5,.5,.5],[.5,.5,.5],[.5,.5,-.5],[-.5,.5,-.5]]},
-    {n:[0,-1,0], v:[[-.5,-.5,-.5],[.5,-.5,-.5],[.5,-.5,.5],[-.5,-.5,.5]]},
-  ];
-  for(const f of faces){
-    const [a,b,c,d]=f.v;
-    for(const tri of [[a,b,c],[a,c,d]]) for(const vtx of tri){ p.push(...vtx); n.push(...f.n); }
-  }
-  return {pos:new Float32Array(p), nrm:new Float32Array(n), count:p.length/3};
-}
-const cube = makeCube();
-const posBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,posBuf); gl.bufferData(gl.ARRAY_BUFFER,cube.pos,gl.STATIC_DRAW);
-const nrmBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,nrmBuf); gl.bufferData(gl.ARRAY_BUFFER,cube.nrm,gl.STATIC_DRAW);
-
-/* fullscreen quad */
-const quadBuf = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
-gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]),gl.STATIC_DRAW);
-
-/* ---------- offscreen framebuffer (render target) ---------- */
-const RT = W; // square target
-const rtTex = gl.createTexture();
-gl.bindTexture(gl.TEXTURE_2D, rtTex);
-gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,RT,RT,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
-gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-const depthRB = gl.createRenderbuffer();
-gl.bindRenderbuffer(gl.RENDERBUFFER, depthRB);
-gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, RT, RT);
-const fbo = gl.createFramebuffer();
-gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rtTex, 0);
-gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRB);
-if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) console.warn("FBO incomplete");
-gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-
-/* ---------- camera: straight-down top-down (slight tilt so limbs read) ---------- */
-// Pure top-down would flatten arms/legs; we tilt a few degrees so the walk/shoot
-// pose is legible as a sprite, which is what a top-down game sprite actually shows.
-// Slightly-angled top-down (Hotline-Miami style): mostly overhead with enough
-// tilt that limb swing (fwd/back along Z) actually reads as a sprite.
-const halfV = 2.05;
-const proj = M4.ortho(-halfV,halfV,-halfV,halfV,0.1,40);
-const eye=[0, 9, 4.6], center=[0,0.9,0], up=[0,0,-1];
-const view = M4.lookAt(eye,center,up);
-const VP = M4.mul(proj, view);
-
-/* ---------- skeleton: draw one box part with local transform ---------- */
-function drawPart(local, colBody, accent, id){
-  const mvp = M4.mul(VP, local);
-  gl.uniformMatrix4fv(sLoc.uMVP, false, mvp);
-  gl.uniformMatrix3fv(sLoc.uNormalMat, false, M4.normalFromModel(local));
-  gl.uniform3fv(sLoc.uColor, colBody);
-  gl.uniform3fv(sLoc.uAccent, accent);
-  gl.uniform1f(sLoc.uId, id);
-  gl.drawArrays(gl.TRIANGLES, 0, cube.count);
-}
-
-/* compose local = translate * rot * scale, built parent-first */
-function part(parent, tx,ty,tz, rx,ry,rz, sx,sy,sz){
-  let m = M4.translate(tx,ty,tz);
-  if(rz) m = M4.mul(m, M4.rotZ(rz));
-  if(ry) m = M4.mul(m, M4.rotY(ry));
-  if(rx) m = M4.mul(m, M4.rotX(rx));
-  const withScale = M4.mul(m, M4.scale(sx,sy,sz));
-  return {node:parent?M4.mul(parent,m):m, draw:parent?M4.mul(parent,withScale):withScale};
-}
-
-/* ---------- the robot ---------- */
-function renderRobot(time){
-  // animation phase
-  const walkPhase = time*2.0*Math.PI; // cycles/sec-ish scaled by time
-  const isShoot = POSE==="shoot";
-
-  // leg/arm swing
-  const swing = Math.sin(walkPhase)*0.6;
-  const swing2 = Math.sin(walkPhase+Math.PI)*0.6;
-  const bob = Math.abs(Math.sin(walkPhase))*0.08;
-
-  // shoot: right arm forward + recoil pulse
-  const recoil = isShoot ? Math.max(0.0, Math.sin(time*10.0))*0.18 : 0.0;
-
-  const body=PAL.body, accent=PAL.accent, trim=PAL.trim;
-
-  // root: whole robot faces +Z (screen up-ish). Add slight body bob.
-  let root = M4.mul(M4.translate(0, bob, 0), M4.rotY(0.0));
-
-  // --- torso ---
-  const torso = part(root, 0,1.15,0, 0,0,0, 0.9,1.0,0.55);
-  drawPart(torso.draw, body, accent, 0.2);
-
-  // --- head (squared) ---
-  const head = part(root, 0,1.95,0.02, 0,0,0, 0.62,0.55,0.55);
-  drawPart(head.draw, body, accent, 0.35);
-  // visor strip (accent) - thin box in front of head
-  const visor = part(root, 0,1.98,0.28, 0,0,0, 0.5,0.16,0.08);
-  drawPart(visor.draw, accent, accent, 0.9);
-
-  // --- hip base ---
-  const hips = part(root, 0,0.72,0, 0,0,0, 0.8,0.3,0.5);
-  drawPart(hips.draw, trim, body, 0.25);
-
-  // --- legs (pivot at hip, swing around X so they step fwd/back along Z) ---
-  function leg(sideX, ph){
-    const hipPivot = M4.mul(root, M4.translate(sideX,0.6,0));
-    const swung = M4.mul(hipPivot, M4.rotX(ph));
-    // thigh
-    const thigh = M4.mul(swung, M4.mul(M4.translate(0,-0.28,0), M4.scale(0.3,0.62,0.32)));
-    drawPart(thigh, body, accent, 0.4+sideX);
-    // shin
-    const knee = M4.mul(swung, M4.translate(0,-0.6,0));
-    const shinRot = M4.mul(knee, M4.rotX(Math.max(0,-ph)*0.6));
-    const shin = M4.mul(shinRot, M4.mul(M4.translate(0,-0.28,0), M4.scale(0.26,0.6,0.28)));
-    drawPart(shin, trim, accent, 0.45+sideX);
-    // tread/foot
-    const foot = M4.mul(shinRot, M4.mul(M4.translate(0,-0.6,0.06), M4.scale(0.32,0.22,0.5)));
-    drawPart(foot, trim, body, 0.5+sideX);
-  }
-  leg(-0.32, isShoot? 0.12 : swing);
-  leg( 0.32, isShoot?-0.12 : swing2);
-
-  // --- arms (pivot at shoulder) ---
-  function arm(sideX, ph, forward){
-    const shoulder = M4.mul(root, M4.translate(sideX,1.5,0));
-    let rot;
-    if(forward){
-      // shoot pose: arm raised forward along +Z, minus recoil
-      rot = M4.mul(shoulder, M4.rotX(-1.35 + recoil));
-    } else {
-      rot = M4.mul(shoulder, M4.rotX(ph));
-    }
-    const upper = M4.mul(rot, M4.mul(M4.translate(0,-0.26,0), M4.scale(0.24,0.55,0.26)));
-    drawPart(upper, body, accent, 0.6+sideX);
-    const elbow = M4.mul(rot, M4.translate(0,-0.52,0));
-    const fore = M4.mul(elbow, M4.mul(M4.translate(0,-0.24,0), M4.scale(0.2,0.5,0.22)));
-    drawPart(fore, trim, accent, 0.65+sideX);
-    if(forward){
-      // gun barrel (accent) sticking out of the forearm end
-      const barrel = M4.mul(elbow, M4.mul(M4.translate(0,-0.5,0.0), M4.scale(0.14,0.5,0.14)));
-      drawPart(barrel, accent, accent, 0.95);
-    }
-  }
-  // left arm, right arm. In shoot, right arm (sideX +) goes forward.
-  arm(-0.62, isShoot? 0.5 : swing2, false);
-  arm( 0.62, isShoot? 0    : swing,  isShoot);
-}
-
-/* ---------- draw one full frame ---------- */
-function drawFrame(time){
-  // pass 1: scene -> FBO
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-  gl.viewport(0,0,RT,RT);
-  gl.clearColor(0,0,0,0); // alpha 0 = background id
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-  gl.enable(gl.DEPTH_TEST);
-  gl.useProgram(sceneProg);
-  gl.bindBuffer(gl.ARRAY_BUFFER,posBuf); gl.enableVertexAttribArray(sLoc.aPos); gl.vertexAttribPointer(sLoc.aPos,3,gl.FLOAT,false,0,0);
-  gl.bindBuffer(gl.ARRAY_BUFFER,nrmBuf); gl.enableVertexAttribArray(sLoc.aNormal); gl.vertexAttribPointer(sLoc.aNormal,3,gl.FLOAT,false,0,0);
-  renderRobot(time);
-
-  // pass 2: post -> screen
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0,0,W,H);
-  gl.disable(gl.DEPTH_TEST);
-  gl.clearColor(0.03,0.04,0.05,1); gl.clear(gl.COLOR_BUFFER_BIT);
-  gl.useProgram(postProg);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, rtTex);
-  gl.uniform1i(pLoc.uTex,0);
-  gl.uniform2f(pLoc.uTexel, 1/RT, 1/RT);
-  gl.uniform2f(pLoc.uSize, RT, RT);
-  gl.uniform1f(pLoc.uPx, PX);
-  gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf); gl.enableVertexAttribArray(pLoc.aPos); gl.vertexAttribPointer(pLoc.aPos,2,gl.FLOAT,false,0,0);
-  gl.drawArrays(gl.TRIANGLES,0,6);
-}
-
-/* ---------- run ---------- */
 const hud = document.getElementById("hud");
-window.__ready = false;
-function label(t){ hud.textContent = `pose=${POSE} color=${COLORNAME} px=${PX} t=${t.toFixed(3)}`; }
+const canvas = document.getElementById("c");
 
+let renderer;
+try {
+  renderer = createRenderer(canvas);
+} catch(e){
+  hud.textContent = "WebGL unavailable: " + e.message;
+  throw e;
+}
+
+const color = PALETTES[COLORNAME] ? COLORNAME : "coral";
+const pose  = POSES.includes(POSE) ? POSE : "walk";
+
+function label(t){ hud.textContent = `pose=${pose} color=${color} px=${PX} t=${t.toFixed(3)}`; }
+function draw(t){ renderer.render({pose, color, px:PX, time:t}); }
+
+window.__ready = false;
 if(FIXED!==null){
-  drawFrame(FIXED);
-  label(FIXED);
+  draw(FIXED); label(FIXED);
   window.__ready = true; // screenshot flag
 } else {
   const t0 = performance.now();
-  function loop(){
+  (function loop(){
     const t=(performance.now()-t0)/1000;
-    drawFrame(t); label(t);
+    draw(t); label(t);
     window.__ready = true;
     requestAnimationFrame(loop);
-  }
-  loop();
+  })();
 }
 </script>
 </body>

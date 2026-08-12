@@ -1,4 +1,6 @@
-use crate::components::{AIState, Boss, Enemy, Health, Player, Position, Radius, Stunned, AI};
+use crate::components::{
+    AIState, Boss, Enemy, Health, Knockback, Player, Position, Radius, Stunned, AI,
+};
 use crate::ecs::{Entity, System, World};
 
 /// Damage an enemy deals to the player per contact attack. Kept high so a swarm
@@ -11,10 +13,42 @@ pub const BOSS_MASK_DAMAGE: i32 = 15;
 /// Contact damage from the boss once the mask cracks off (frantic and deadly).
 pub const BOSS_ENRAGED_DAMAGE: i32 = 45;
 
+/// Impulse speed (px/s) a single bullet imparts to the enemy it strikes, thrown
+/// along the bullet's travel direction. With the movement system's decay this is
+/// a shove of a few dozen pixels — punchy, but nowhere near a room-crossing fling.
+pub const BULLET_KNOCKBACK: f32 = 500.0;
+
+/// Melee connects with the whole body, so it shoves the target noticeably harder
+/// than a single bullet (matching the heavier feel of a swing).
+pub const MELEE_KNOCKBACK: f32 = 1000.0;
+
+/// How hard an enemy's contact attack shoves the player straight away from it.
+pub const PLAYER_KNOCKBACK: f32 = 650.0;
+
 /// System that handles combat damage dealing
 pub struct CombatSystem;
 
 impl CombatSystem {
+    /// Apply a directional knockback impulse to `entity`, shoving it along the
+    /// `(dx, dy)` direction at `speed` px/s (the vector is normalised here). A
+    /// zero-length direction (attacker and target exactly overlapping) is
+    /// ignored. If the entity is already being shoved, the new impulse stacks
+    /// additively with the one still in flight.
+    pub(crate) fn apply_knockback(world: &mut World, entity: Entity, dx: f32, dy: f32, speed: f32) {
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= f32::EPSILON {
+            return;
+        }
+        let ix = dx / len * speed;
+        let iy = dy / len * speed;
+        if let Some(kb) = world.get_component_mut::<Knockback>(entity) {
+            kb.x += ix;
+            kb.y += iy;
+        } else {
+            world.add_component(entity, Knockback::new(ix, iy));
+        }
+    }
+
     /// Check if a line segment (bullet) intersects with a circle (enemy)
     fn line_circle_collision(
         start: &Position,
@@ -85,6 +119,11 @@ impl CombatSystem {
                 // Deal damage
                 if let Some(health) = world.get_component_mut::<Health>(enemy) {
                     health.take_damage(damage);
+                    // Shove the enemy along the bullet's travel direction
+                    // (shooter -> target), i.e. away from the shooter.
+                    let dir_x = target_pos.x - shooter_pos.x;
+                    let dir_y = target_pos.y - shooter_pos.y;
+                    Self::apply_knockback(world, enemy, dir_x, dir_y, BULLET_KNOCKBACK);
                     return true; // Hit confirmed
                 }
             }
@@ -147,6 +186,10 @@ impl CombatSystem {
                     health.take_damage(damage);
                     hit_any = true;
                 }
+                // Shove the enemy away from the attacker (attacker -> enemy).
+                let dir_x = enemy_pos.x - attacker_pos.x;
+                let dir_y = enemy_pos.y - attacker_pos.y;
+                Self::apply_knockback(world, enemy, dir_x, dir_y, MELEE_KNOCKBACK);
             }
         }
 
@@ -204,6 +247,11 @@ impl CombatSystem {
                     if let Some(health) = world.get_component_mut::<Health>(player_entity) {
                         health.take_damage(damage);
                     }
+
+                    // Shove the player directly away from the attacking enemy.
+                    let dir_x = player_pos.x - enemy_pos.x;
+                    let dir_y = player_pos.y - enemy_pos.y;
+                    Self::apply_knockback(world, player_entity, dir_x, dir_y, PLAYER_KNOCKBACK);
 
                     // Reset cooldown
                     if let Some(ai) = world.get_component_mut::<AI>(enemy) {
@@ -392,6 +440,80 @@ mod tests {
 
         let player_health = world.get_component::<Health>(player).unwrap();
         assert_eq!(player_health.current, 100 - ENEMY_ATTACK_DAMAGE);
+    }
+
+    #[test]
+    fn test_process_shoot_knocks_enemy_along_bullet() {
+        let mut world = World::new();
+
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, Position::new(50.0, 0.0));
+        world.add_component(enemy, Radius::new(10.0));
+        world.add_component(enemy, Health::new(100));
+
+        // Bullet travels straight along +x.
+        CombatSystem::process_shoot(
+            &mut world,
+            Position::new(0.0, 0.0),
+            Position::new(100.0, 0.0),
+            30,
+        );
+
+        let kb = world.get_component::<Knockback>(enemy).unwrap();
+        // Shoved along +x (away from the shooter), no sideways component.
+        assert!((kb.x - BULLET_KNOCKBACK).abs() < 0.001);
+        assert!(kb.y.abs() < 0.001);
+    }
+
+    #[test]
+    fn test_process_melee_knocks_enemy_away_from_attacker() {
+        let mut world = World::new();
+
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, Position::new(30.0, 0.0));
+        world.add_component(enemy, Health::new(100));
+
+        CombatSystem::process_melee(
+            &mut world,
+            Position::new(0.0, 0.0),
+            Position::new(100.0, 0.0),
+            50,
+            50.0,
+        );
+
+        let kb = world.get_component::<Knockback>(enemy).unwrap();
+        // Enemy sits on +x from the attacker, so it is shoved further along +x.
+        assert!((kb.x - MELEE_KNOCKBACK).abs() < 0.001);
+        assert!(kb.y.abs() < 0.001);
+    }
+
+    #[test]
+    fn test_enemy_attack_knocks_player_away() {
+        let mut world = World::new();
+
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, Position::new(0.0, 0.0));
+        world.add_component(player, Health::new(100));
+
+        // Enemy to the player's +x side.
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, Position::new(30.0, 0.0));
+        world.add_component(enemy, Health::new(100));
+        let mut ai = AI::new();
+        ai.state = AIState::SurePlayerSeen;
+        world.add_component(enemy, ai);
+
+        let mut system = CombatSystem;
+        system.run(&mut world, 0.016);
+
+        let kb = world.get_component::<Knockback>(player).unwrap();
+        // Player is shoved away from the enemy: toward -x.
+        assert!((kb.x + PLAYER_KNOCKBACK).abs() < 0.001);
+        assert!(kb.y.abs() < 0.001);
     }
 
     #[test]

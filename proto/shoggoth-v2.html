@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OPEN MIAMI // Shoggoth BOSS v2 (masked drift / mask-off / raw)</title>
+<style>
+  html,body{margin:0;background:#0b0e13;color:#cdd;font-family:monospace;}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px;}
+  canvas{image-rendering:pixelated;background:#12161d;box-shadow:0 0 0 1px #2a3340;}
+  .hud{font-size:12px;opacity:.7;}
+  #trigger{
+    font-family:monospace;font-size:13px;font-weight:bold;letter-spacing:1px;
+    color:#ffe07a;background:#241a06;border:1px solid #7a5a12;border-radius:4px;
+    padding:8px 16px;cursor:pointer;text-transform:uppercase;
+  }
+  #trigger:hover{background:#3a2c0a;color:#fff2b0;}
+  #trigger.raw{color:#ff8a7a;background:#2a0e0a;border-color:#7a2412;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="384" height="384"></canvas>
+  <button id="trigger">Become Raw &#9654;</button>
+  <div class="hud" id="hud"></div>
+</div>
+<script>
+"use strict";
+/* =========================================================================
+   OPEN MIAMI - FLOOR 13.5 boss: the SHOGGOTH  (v2).
+   Standalone 3D -> top-down -> stylized 2D (inked + posterize + pixelate).
+   Same rendering pipeline / post-process / camera as shoggoth.html (v1).
+
+   What is new in v2:
+     1. MASKED phase now WANDERS. The mass drifts on the floor with a slow
+        heading and the smiley mask leans toward the direction of travel.
+        Every so often it STOPS and LOOKS UP (mask tilts flat toward the
+        camera/player) for a beat, as if noticing you, then resumes drifting.
+     2. A real MASK-OFF TRANSITION: the smiley cracks, the shell breaks into
+        shards that fling up & outward off the crown, revealing the raw form
+        beneath while the tentacles grow in and the eyes fade up.
+     3. Raw form v2: MANY more, chunkier lashing tentacles, and the eyes are
+        now small pale-yellow glowing DOTS scattered over the mass (not the
+        old big red cluster).
+
+   Query params:
+     ?phase=masked|transition|enraged
+        masked      -> wandering + look-up behaviour, mask on
+        transition  -> plays the mask-off animation (t=0..~3.4s) then raw
+        enraged     -> raw form, tentacles + yellow-dot eyes
+        (no phase)  -> AUTO-cycles masked -> transition -> enraged, so the
+                       whole beat can be played / screenshotted in one go
+     ?frame=N   integer  -> deterministic animation phase (for screenshots)
+     ?t=SECONDS float    -> continuous time (overrides frame)
+     ?px=6      pixelation block size (post pass)
+   If neither frame nor t -> live animation via requestAnimationFrame.
+   ========================================================================= */
+
+/* ---------- query params ---------- */
+const Q = new URLSearchParams(location.search);
+const PHASE = (Q.get("phase") || "").toLowerCase();   // "" -> auto-cycle
+const AUTO  = (PHASE === "");
+const PX = Math.max(1, parseInt(Q.get("px") || "5", 10));
+const hasFrame = Q.has("frame");
+const hasT = Q.has("t");
+const FIXED = hasT ? parseFloat(Q.get("t")) : (hasFrame ? parseInt(Q.get("frame"),10) * (1/12) : null);
+
+/* auto-cycle timeline */
+const MASK_DUR  = 9.0;    // seconds wandering while masked
+const TRANS_DUR = 3.4;    // seconds of mask-off animation
+
+/* ---------- palette (the boss is not recolored) ---------- */
+const C_BODY   = [0.11,0.14,0.13];  // dark flesh
+const C_BODYA  = [0.17,0.22,0.19];  // its top-lit accent
+const C_PURPLE = [0.14,0.10,0.17];  // bruised purple lobes
+const C_PURPLEA= [0.20,0.15,0.24];
+const C_TIP    = [0.34,0.12,0.13];  // tentacle tips, wet red
+const C_TIPA   = [0.48,0.18,0.17];
+const C_MASK   = [1.00,0.83,0.14];  // friendly yellow smiley
+const C_INK    = [0.05,0.04,0.02];  // dark features on the mask
+const C_YEYE   = [1.00,0.95,0.55];  // pale-yellow dot eyes (raw form)
+const C_YHOT   = [1.00,1.00,0.86];  // hot core of the dot
+
+/* ---------- tiny mat4 math (column-major, like GL) ---------- */
+const M4 = {
+  ident(){return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);},
+  mul(a,b){
+    const o=new Float32Array(16);
+    for(let r=0;r<4;r++)for(let c=0;c<4;c++){
+      o[c*4+r]=a[0*4+r]*b[c*4+0]+a[1*4+r]*b[c*4+1]+a[2*4+r]*b[c*4+2]+a[3*4+r]*b[c*4+3];
+    }
+    return o;
+  },
+  translate(x,y,z){const m=M4.ident();m[12]=x;m[13]=y;m[14]=z;return m;},
+  scale(x,y,z){const m=M4.ident();m[0]=x;m[5]=y;m[10]=z;return m;},
+  rotX(a){const c=Math.cos(a),s=Math.sin(a);const m=M4.ident();m[5]=c;m[6]=s;m[9]=-s;m[10]=c;return m;},
+  rotY(a){const c=Math.cos(a),s=Math.sin(a);const m=M4.ident();m[0]=c;m[2]=-s;m[8]=s;m[10]=c;return m;},
+  rotZ(a){const c=Math.cos(a),s=Math.sin(a);const m=M4.ident();m[0]=c;m[1]=s;m[4]=-s;m[5]=c;return m;},
+  ortho(l,r,b,t,n,f){
+    const m=M4.ident();
+    m[0]=2/(r-l);m[5]=2/(t-b);m[10]=-2/(f-n);
+    m[12]=-(r+l)/(r-l);m[13]=-(t+b)/(t-b);m[14]=-(f+n)/(f-n);
+    return m;
+  },
+  lookAt(eye,center,up){
+    const z=norm(sub(eye,center));
+    const x=norm(cross(up,z));
+    const y=cross(z,x);
+    const m=M4.ident();
+    m[0]=x[0];m[4]=x[1];m[8]=x[2];
+    m[1]=y[0];m[5]=y[1];m[9]=y[2];
+    m[2]=z[0];m[6]=z[1];m[10]=z[2];
+    m[12]=-dot(x,eye);m[13]=-dot(y,eye);m[14]=-dot(z,eye);
+    return m;
+  },
+  normalFromModel(m){
+    return new Float32Array([m[0],m[1],m[2], m[4],m[5],m[6], m[8],m[9],m[10]]);
+  }
+};
+function sub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function norm(a){const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l];}
+function clamp01(x){return x<0?0:(x>1?1:x);}
+function smoothstep(a,b,x){const t=clamp01((x-a)/(b-a));return t*t*(3-2*t);}
+function ease(x){return smoothstep(0,1,x);}
+function mix(a,b,t){return a+(b-a)*t;}
+
+/* ---------- GL setup ---------- */
+const canvas = document.getElementById("c");
+const gl = canvas.getContext("webgl", {antialias:false, preserveDrawingBuffer:true});
+if(!gl){ document.getElementById("hud").textContent="WebGL unavailable"; throw new Error("no webgl"); }
+const W = canvas.width, H = canvas.height;
+
+function compile(type,src){
+  const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)+"\n"+src);
+  return s;
+}
+function program(vs,fs){
+  const p=gl.createProgram();
+  gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));
+  gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+/* ---------- scene shader: lit surfaces + per-part id in alpha (for edges),
+   plus an emissive term so the yellow mask and eyes glow flat through
+   the posterize. Same lighting model / look as v1. ---------- */
+const sceneVS = `
+attribute vec3 aPos;
+attribute vec3 aNormal;
+uniform mat4 uMVP;
+uniform mat3 uNormalMat;
+varying vec3 vN;
+void main(){
+  vec4 p = uMVP * vec4(aPos,1.0);
+  gl_Position = p;
+  vN = normalize(uNormalMat * aNormal);
+}
+`;
+const sceneFS = `
+precision mediump float;
+varying vec3 vN;
+uniform vec3 uColor;
+uniform vec3 uAccent;
+uniform float uId;
+uniform float uEmis;   // 0 = fully lit, 1 = flat glow color
+void main(){
+  vec3 L = normalize(vec3(0.35, 0.9, 0.45));
+  float ndl = max(dot(normalize(vN), L), 0.0);
+  float amb = 0.35;
+  float shade = amb + ndl*0.75;
+  vec3 base = mix(uColor, uAccent, clamp(vN.y*0.5+0.2,0.0,1.0)*0.5);
+  vec3 col = base * shade;
+  col = mix(col, uColor, uEmis);
+  gl_FragColor = vec4(col, uId);
+}
+`;
+const sceneProg = program(sceneVS, sceneFS);
+const sLoc = {
+  aPos: gl.getAttribLocation(sceneProg,"aPos"),
+  aNormal: gl.getAttribLocation(sceneProg,"aNormal"),
+  uMVP: gl.getUniformLocation(sceneProg,"uMVP"),
+  uNormalMat: gl.getUniformLocation(sceneProg,"uNormalMat"),
+  uColor: gl.getUniformLocation(sceneProg,"uColor"),
+  uAccent: gl.getUniformLocation(sceneProg,"uAccent"),
+  uId: gl.getUniformLocation(sceneProg,"uId"),
+  uEmis: gl.getUniformLocation(sceneProg,"uEmis"),
+};
+
+/* ---------- post-process: edge detect + posterize + pixelate (from v1) --- */
+const postVS = `
+attribute vec2 aPos;
+varying vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.0,1.0); }
+`;
+const postFS = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+uniform float uPx;
+uniform vec2 uSize;
+float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
+vec4 samp(vec2 uv){ return texture2D(uTex, uv); }
+void main(){
+  vec2 px = uSize;
+  vec2 block = floor(vUv*px/uPx)*uPx + uPx*0.5;
+  vec2 uv = block/px;
+
+  vec4 c = samp(uv);
+  vec3 col = c.rgb;
+
+  vec2 t = uTexel*uPx;
+  float l00=luma(samp(uv+vec2(-t.x,-t.y)).rgb);
+  float l10=luma(samp(uv+vec2( 0.0,-t.y)).rgb);
+  float l20=luma(samp(uv+vec2( t.x,-t.y)).rgb);
+  float l01=luma(samp(uv+vec2(-t.x, 0.0)).rgb);
+  float l21=luma(samp(uv+vec2( t.x, 0.0)).rgb);
+  float l02=luma(samp(uv+vec2(-t.x, t.y)).rgb);
+  float l12=luma(samp(uv+vec2( 0.0, t.y)).rgb);
+  float l22=luma(samp(uv+vec2( t.x, t.y)).rgb);
+  float gx = -l00 -2.0*l01 -l02 + l20 + 2.0*l21 + l22;
+  float gy = -l00 -2.0*l10 -l20 + l02 + 2.0*l12 + l22;
+  float lumEdge = sqrt(gx*gx+gy*gy);
+
+  float a = c.a;
+  float ai = max(max(abs(a-samp(uv+vec2(t.x,0.0)).a),abs(a-samp(uv+vec2(-t.x,0.0)).a)),
+                 max(abs(a-samp(uv+vec2(0.0,t.y)).a),abs(a-samp(uv+vec2(0.0,-t.y)).a)));
+
+  float silh = 0.0;
+  if(a < 0.02){
+    float near = max(max(samp(uv+vec2(t.x,0.0)).a,samp(uv+vec2(-t.x,0.0)).a),
+                     max(samp(uv+vec2(0.0,t.y)).a,samp(uv+vec2(0.0,-t.y)).a));
+    silh = near>0.02 ? 1.0 : 0.0;
+  }
+
+  float edge = max(max(step(0.30, lumEdge), step(0.03, ai)), silh);
+
+  float levels = 4.0;
+  col = floor(col*levels + 0.5)/levels;
+
+  if(a < 0.02 && silh < 0.5){
+    col = vec3(0.045,0.055,0.075); // dark server-glass backdrop
+  }
+
+  col = mix(col, vec3(0.02,0.02,0.03), edge);
+  gl_FragColor = vec4(col,1.0);
+}
+`;
+const postProg = program(postVS, postFS);
+const pLoc = {
+  aPos: gl.getAttribLocation(postProg,"aPos"),
+  uTex: gl.getUniformLocation(postProg,"uTex"),
+  uTexel: gl.getUniformLocation(postProg,"uTexel"),
+  uPx: gl.getUniformLocation(postProg,"uPx"),
+  uSize: gl.getUniformLocation(postProg,"uSize"),
+};
+
+/* ---------- unit sphere geometry (positions + normals) ---------- */
+function makeSphere(stacks, slices){
+  const p=[], n=[];
+  function vert(i,j){
+    const v = i/stacks, u = j/slices;
+    const phi = v*Math.PI;
+    const th  = u*2*Math.PI;
+    const x = Math.sin(phi)*Math.cos(th);
+    const y = Math.cos(phi);
+    const z = Math.sin(phi)*Math.sin(th);
+    return [x,y,z];
+  }
+  for(let i=0;i<stacks;i++){
+    for(let j=0;j<slices;j++){
+      const a=vert(i,j), b=vert(i,j+1), c=vert(i+1,j+1), d=vert(i+1,j);
+      for(const v of [a,b,c, a,c,d]){ p.push(v[0],v[1],v[2]); n.push(v[0],v[1],v[2]); }
+    }
+  }
+  return {pos:new Float32Array(p), nrm:new Float32Array(n), count:p.length/3};
+}
+const sphere = makeSphere(16, 20);
+const posBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,posBuf); gl.bufferData(gl.ARRAY_BUFFER,sphere.pos,gl.STATIC_DRAW);
+const nrmBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,nrmBuf); gl.bufferData(gl.ARRAY_BUFFER,sphere.nrm,gl.STATIC_DRAW);
+
+/* fullscreen quad */
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]),gl.STATIC_DRAW);
+
+/* ---------- offscreen framebuffer ---------- */
+const RT = W;
+const rtTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, rtTex);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,RT,RT,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+const depthRB = gl.createRenderbuffer();
+gl.bindRenderbuffer(gl.RENDERBUFFER, depthRB);
+gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, RT, RT);
+const fbo = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rtTex, 0);
+gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRB);
+if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) console.warn("FBO incomplete");
+gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+/* ---------- camera: slightly-tilted top-down (same as v1) ---------- */
+const halfV = 3.05;
+const proj = M4.ortho(-halfV,halfV,-halfV,halfV,0.1,60);
+const eye=[0, 12, 6.1], center=[0,0.4,0], up=[0,0,-1];
+const view = M4.lookAt(eye,center,up);
+const VP = M4.mul(proj, view);
+
+/* ---------- draw one sphere instance ---------- */
+function drawSphere(model, colBody, accent, id, emis){
+  const mvp = M4.mul(VP, model);
+  gl.uniformMatrix4fv(sLoc.uMVP, false, mvp);
+  gl.uniformMatrix3fv(sLoc.uNormalMat, false, M4.normalFromModel(model));
+  gl.uniform3fv(sLoc.uColor, colBody);
+  gl.uniform3fv(sLoc.uAccent, accent);
+  gl.uniform1f(sLoc.uId, id);
+  gl.uniform1f(sLoc.uEmis, emis||0.0);
+  gl.drawArrays(gl.TRIANGLES, 0, sphere.count);
+}
+function blob(root, x,y,z, rx,ry,rz, col,acc, id, emis){
+  const m = M4.mul(root, M4.mul(M4.translate(x,y,z), M4.scale(rx,ry,rz)));
+  drawSphere(m, col, acc, id, emis);
+}
+
+/* ---------- deterministic pseudo-random ---------- */
+function hash(i){ const s=Math.sin(i*127.1+0.7)*43758.5453; return s-Math.floor(s); }
+
+/* =========================================================================
+   WANDER BEHAVIOUR (masked phase)
+   A tiny deterministic state machine, stepped at a fixed dt. It drifts along
+   a heading, occasionally stops and looks up, then picks a new heading. The
+   sim state is cached so live playback is cheap and screenshots at ?t= are
+   reproducible (re-simulated from 0).
+   ========================================================================= */
+function newBeh(){
+  return { t:0, x:0, z:0, heading:hash(1)*6.283, tgt:hash(1)*6.283,
+           mode:0, modeT:0, dur:3.5+hash(2)*2.5, look:0, dec:1 };
+}
+function stepBeh(b,dt){
+  b.t+=dt; b.modeT+=dt;
+  if(b.mode===0){                       // drifting
+    let d=b.tgt-b.heading; while(d>Math.PI)d-=6.283; while(d<-Math.PI)d+=6.283;
+    b.heading += d*Math.min(1,dt*1.6);  // steer smoothly toward target heading
+    const spd=0.55;
+    b.x += Math.cos(b.heading)*spd*dt;
+    b.z += Math.sin(b.heading)*spd*dt;
+    if(Math.hypot(b.x,b.z)>1.35){        // stay in frame: steer back inward
+      b.tgt = Math.atan2(-b.z,-b.x) + (hash(b.dec+7)-0.5)*0.8;
+    }
+    b.look += (0-b.look)*Math.min(1,dt*3.0);
+    if(b.modeT>b.dur){ b.mode=1; b.modeT=0; b.dur=1.8+hash(b.dec+3)*1.6; b.dec++; }
+  } else {                              // stopped, looking up
+    b.look += (1-b.look)*Math.min(1,dt*2.6);
+    if(b.modeT>b.dur){
+      b.mode=0; b.modeT=0; b.dur=3.2+hash(b.dec+3)*2.6;
+      b.tgt = b.heading + (hash(b.dec+5)-0.5)*3.2; b.dec++;
+    }
+  }
+}
+let simState=null, simT=-1;
+function behaviorAt(t){
+  if(simState===null || t < simT-1e-6){ simState=newBeh(); simT=0; }
+  const dt=1/60; let guard=0;
+  while(simT < t-1e-9 && guard<300000){
+    const s=Math.min(dt, t-simT); stepBeh(simState,s); simT+=s; guard++;
+  }
+  return simState;
+}
+
+/* =========================================================================
+   THE WRITHING MASS  (unchanged from v1: 1 core + orbiting satellite lobes)
+   ========================================================================= */
+const LOBES = 9;
+function drawMass(root, time, frantic){
+  const coreSq = 1.0 + 0.06*Math.sin(time*0.9);
+  blob(root, 0,0,0, 1.65, 1.35*coreSq, 1.65, C_BODY, C_BODYA, 0.14, 0.0);
+  blob(root, 0.25*Math.sin(time*0.6), 0.15, -0.2*Math.cos(time*0.5),
+       1.25,1.15,1.3, C_PURPLE, C_PURPLEA, 0.22, 0.0);
+
+  for(let k=0;k<LOBES;k++){
+    const a = (k/LOBES)*Math.PI*2;
+    const spd = 0.4 + hash(k)*0.5;
+    const ph = hash(k+10)*6.28;
+    const wob = frantic ? 0.55 : 0.28;
+    const rad = 1.15 + hash(k+3)*0.5 + Math.sin(time*spd+ph)*wob;
+    const yb  = -0.35 + Math.sin(time*spd*1.3+ph)*(frantic?0.5:0.28) + hash(k+7)*0.5;
+    const x = Math.cos(a + time*(frantic?0.5:0.22))*rad;
+    const z = Math.sin(a + time*(frantic?0.5:0.22))*rad;
+    const r = 0.62 + hash(k+5)*0.45;
+    const pr = 1.0 + 0.14*Math.sin(time*1.7+ph);
+    const purple = hash(k+2) > 0.55;
+    blob(root, x, yb, z, r*pr, r*(0.85+0.2*Math.sin(time+ph)), r*pr,
+         purple?C_PURPLE:C_BODY, purple?C_PURPLEA:C_BODYA, 0.30 + k*0.055, 0.0);
+  }
+}
+
+/* =========================================================================
+   THE SMILEY MASK / MASK-OFF TRANSITION
+   Drawn as an assembly of yellow shards (a ring of wedges + a centre cap)
+   plus the ink features. At reveal=0 the shards overlap into a clean dome
+   (the intact mask). As reveal climbs the shell cracks, then the shards and
+   the features fling up & outward off the crown, uncovering the raw form.
+   `mroot` already places/rotates the mask on the crown (heading + look tilt).
+   ========================================================================= */
+function drawMaskAssembly(mroot, time, reveal){
+  const s = ease(clamp01(reveal*1.05));   // consume progress 0..1
+  const jitter = (reveal>0.02 && reveal<0.55) ? (reveal*0.05) : 0.0;
+  // it stays yellow while it shatters, then darkens toward dead flesh as it is
+  // swallowed; the glow fades out over the same window.
+  const dk = smoothstep(0.42,1.0,reveal);
+  const shardCol = [mix(C_MASK[0],C_BODY[0],dk*0.95), mix(C_MASK[1],C_BODY[1],dk*0.95), mix(C_MASK[2],C_BODY[2],dk*0.95)];
+  const shardEm  = 0.85*(1.0 - smoothstep(0.30,1.0,reveal));
+  const shrink   = mix(1.0, 0.06, s);     // shards shrink as they are pulled in
+  const inR      = 1.0 - s;               // ring radius collapses toward the maw
+  const sink     = s*0.6;                 // slight downward drift into the maw
+
+  // hairline cracks that appear just before the shell lets go
+  if(reveal>0.02 && reveal<0.5){
+    const ca = smoothstep(0.02,0.16,reveal) * (1.0-smoothstep(0.36,0.5,reveal));
+    for(let c=0;c<3;c++){
+      const ang=c*1.05+0.3;
+      let m=M4.mul(mroot, M4.translate(0,0.30,0));
+      m=M4.mul(m, M4.rotY(ang));
+      m=M4.mul(m, M4.scale(1.15*ca, 0.05, 0.055));
+      drawSphere(m, C_INK, C_INK, 0.58, 0.0);
+    }
+  }
+
+  // ring of wedge shards: SUCKED INWARD + DOWN into the mass while spiralling
+  const SH=6;
+  for(let k=0;k<SH;k++){
+    const a=(k/SH)*Math.PI*2;
+    const swirl=a + s*2.4*((k%2)?1:-1);          // spiral into the maw
+    const jx=Math.sin(time*23+k)*jitter, jz=Math.cos(time*21+k)*jitter;
+    const px=Math.cos(swirl)*0.60*inR + jx;
+    const pz=Math.sin(swirl)*0.60*inR + jz;
+    const py=-sink*(0.6+hash(k+41)*0.5);         // slight sink toward the maw
+    const spin=s*(4.0+hash(k+42)*3.0);
+    let m=M4.translate(px,py,pz);
+    m=M4.mul(m, M4.rotZ(spin*((k%2)?1:-1)));
+    m=M4.mul(m, M4.rotX(spin*0.6));
+    m=M4.mul(m, M4.scale(0.62*shrink,0.26*shrink,0.62*shrink));
+    drawSphere(M4.mul(mroot,m), shardCol, shardCol, 0.80+k*0.006, shardEm);
+  }
+  // centre cap: shrinks down into the maw
+  {
+    let m=M4.translate(0, -sink*0.8, 0);
+    m=M4.mul(m, M4.rotX(s*4.0));
+    m=M4.mul(m, M4.scale(0.66*shrink,0.30*shrink,0.66*shrink));
+    drawSphere(M4.mul(mroot,m), shardCol, shardCol, 0.79, shardEm);
+  }
+
+  // ink features (two eyes + upward smile) are drawn in toward the centre
+  const fy=0.42;
+  function feat(x,z){
+    const inx=x*inR, inz=z*inR;
+    let m=M4.translate(inx, fy - sink, inz);
+    m=M4.mul(m, M4.rotZ(s*5.0));
+    m=M4.mul(m, M4.scale(shrink,shrink,shrink));
+    return M4.mul(mroot,m);
+  }
+  drawSphere(M4.mul(feat(-0.44,-0.42), M4.scale(0.20,0.15,0.24)), C_INK,C_INK,0.55,0.0);
+  drawSphere(M4.mul(feat( 0.44,-0.42), M4.scale(0.20,0.15,0.24)), C_INK,C_INK,0.55,0.0);
+  const N=7;
+  for(let i=0;i<N;i++){
+    const tt=(i/(N-1))*2-1;
+    const x=tt*0.66;
+    const z=0.16+0.34*(1.0-tt*tt);
+    drawSphere(M4.mul(feat(x,z), M4.scale(0.135,0.12,0.135)), C_INK,C_INK,0.55,0.0);
+  }
+}
+
+/* =========================================================================
+   RAW FORM v2
+   ========================================================================= */
+/* small pale-yellow glowing DOT eyes scattered over the upper mass */
+function drawYellowEyes(root, time, fade){
+  const N=15;
+  for(let i=0;i<N;i++){
+    const a=i*2.399;                       // golden-angle scatter
+    const rr=0.18 + hash(i+30)*0.92;       // cluster over the crown
+    const x=Math.cos(a)*rr + 0.08*Math.sin(time*1.2+i);
+    const z=Math.sin(a)*rr*0.9 + 0.08*Math.cos(time*1.0+i);
+    const y=1.35 + hash(i+31)*0.65;        // up on the crown, in front of the cam
+    const tw=0.85 + 0.15*Math.abs(Math.sin(time*2.5 + i*1.3)); // gentle twinkle
+    // big enough that the yellow core survives the ink outline at this px size
+    const s=(0.16 + hash(i+32)*0.07) * (0.55+0.45*fade);
+    blob(root, x,y,z, s,s,s, C_YEYE, C_YEYE, 0.62+i*0.012, tw*fade);
+    blob(root, x,y+0.03,z, s*0.45,s*0.45,s*0.45, C_YHOT, C_YHOT, 0.92, fade);
+  }
+}
+
+/* many more, chunkier lashing tentacles. `grow` scales them in during the
+   transition (0 -> hidden, 1 -> full length). `eyeFade` fades in the little
+   pale-yellow dot-eyes that also stud the arms & tips. */
+function drawTentacles(root, time, grow, frantic, eyeFade){
+  const T=11, SEG=8;
+  for(let k=0;k<T;k++){
+    const a=(k/T)*Math.PI*2 + 0.3;
+    let m=M4.mul(root, M4.translate(Math.cos(a)*1.20, -0.05, Math.sin(a)*1.20));
+    m=M4.mul(m, M4.rotY(-a));               // face outward
+    m=M4.mul(m, M4.rotZ(-1.05));            // tip the up-axis outward
+    const seglen=0.60*grow;
+    for(let i=0;i<SEG;i++){
+      const bend = Math.sin(time*2.5 + i*0.9 + k*1.7)*(frantic?0.62:0.4);
+      const sweep= Math.cos(time*1.9 + i*0.7 + k*2.1)*(frantic?0.55:0.35);
+      m=M4.mul(m, M4.rotX(sweep));
+      m=M4.mul(m, M4.rotZ(bend*0.5));
+      const tp=i/(SEG-1);
+      const r=0.50*(1.0 - tp*0.70);          // chunkier than v1
+      const seg=M4.mul(m, M4.mul(M4.translate(0, seglen*0.5, 0), M4.scale(r, seglen*0.62, r)));
+      const tm=tp;
+      const col=[mix(C_BODY[0],C_TIP[0],tm), mix(C_BODY[1],C_TIP[1],tm), mix(C_BODY[2],C_TIP[2],tm)];
+      const acc=[mix(C_BODYA[0],C_TIPA[0],tm),mix(C_BODYA[1],C_TIPA[1],tm),mix(C_BODYA[2],C_TIPA[2],tm)];
+      drawSphere(seg, col, acc, 0.30 + k*0.03 + i*0.005, 0.0);
+      // dot-eyes on the arm: always one at the tip, plus a few scattered along
+      if(eyeFade>0.02 && grow>0.6 && (i===SEG-1 || hash(k*13+i+50) > 0.62)){
+        const es = Math.max(0.13, r*0.75);
+        const tw = 0.82 + 0.18*Math.abs(Math.sin(time*2.6 + k*1.3 + i));
+        // sit it just proud of the tube, on the +z local side
+        blob(m, 0, seglen*0.5, r*0.85, es,es,es, C_YEYE, C_YEYE, 0.66 + k*0.02 + i*0.006, tw*eyeFade);
+        blob(m, 0, seglen*0.55, r*0.9,  es*0.45,es*0.45,es*0.45, C_YHOT, C_YHOT, 0.94, eyeFade);
+      }
+      m=M4.mul(m, M4.translate(0, seglen, 0));
+    }
+  }
+}
+
+/* =========================================================================
+   PHASE / REVEAL timeline
+   ========================================================================= */
+let manualStart = null;   // set by the on-screen TRIGGER button (live mode)
+function timelineReveal(t){
+  // a manual trigger overrides everything: masked until pressed, then it plays
+  // the mask-off from the moment of the press.
+  if(manualStart!==null){
+    if(t < manualStart) return 0.0;
+    return clamp01((t-manualStart)/TRANS_DUR);
+  }
+  if(PHASE==="masked")     return 0.0;
+  if(PHASE==="enraged")    return 1.0;
+  if(PHASE==="transition") return clamp01(t/TRANS_DUR);
+  // AUTO cycle
+  if(t < MASK_DUR)              return 0.0;
+  if(t < MASK_DUR+TRANS_DUR)    return (t-MASK_DUR)/TRANS_DUR;
+  return 1.0;
+}
+
+/* ---------- render the boss ---------- */
+function renderShoggoth(time){
+  const reveal = timelineReveal(time);
+  const b = behaviorAt(time);
+
+  // look-up amount: behaviour's own look-ups, plus a forced "it notices you"
+  // stare right before the auto/transition mask-off.
+  let lookUp = b.look;
+  if(AUTO)                  lookUp = Math.max(lookUp, smoothstep(MASK_DUR-2.2, MASK_DUR-0.4, time));
+  if(PHASE==="transition")  lookUp = 1.0;
+  if(manualStart!==null && time>=manualStart) lookUp = Math.max(lookUp, 1.0 - smoothstep(manualStart+0.2, manualStart+1.1, time));
+
+  // drift eases to centre as it rears up; spin & list ramp in with the raw form
+  const dr    = 1.0-ease(reveal);
+  const spin  = ease(reveal)*0.32;
+  const list  = 0.05 + ease(reveal)*0.07;
+  let bodyRoot = M4.translate(b.x*dr, 0, b.z*dr);
+  bodyRoot = M4.mul(bodyRoot, M4.rotY(time*spin));
+  bodyRoot = M4.mul(bodyRoot, M4.rotZ(Math.sin(time*0.5)*list));
+  bodyRoot = M4.mul(bodyRoot, M4.rotX(Math.cos(time*0.42)*list));
+
+  const frantic = reveal>0.5;
+  const grow    = smoothstep(0.12,0.95,reveal);
+  const eyeFade = smoothstep(0.35,1.0,reveal);
+
+  if(grow>0.02)     drawTentacles(bodyRoot, time, grow, frantic, eyeFade);
+  drawMass(bodyRoot, time, frantic);
+  if(eyeFade>0.02)  drawYellowEyes(bodyRoot, time, eyeFade);
+
+  // the mask / its break-up (skip once fully gone)
+  if(reveal < 0.999){
+    const yTop=1.55;                       // ride high on the crown, above the lobes
+    const lean=(1.0-lookUp)*0.34;          // lean toward heading when drifting; flat when looking up
+    let mroot=M4.mul(bodyRoot, M4.translate(0,yTop,0.05));
+    mroot=M4.mul(mroot, M4.rotY(-b.heading));
+    mroot=M4.mul(mroot, M4.rotX(lean));
+    // Draw the mask with depth-test OFF so (a) in masked/look-up it is ALWAYS in
+    // front of the mass/lobes at every heading, and (b) during the transition the
+    // shards stay visible as they spiral inward and are consumed (shrink+darken).
+    gl.disable(gl.DEPTH_TEST);
+    drawMaskAssembly(mroot, time, reveal);
+    gl.enable(gl.DEPTH_TEST);
+  }
+}
+
+/* ---------- draw one full frame ---------- */
+function drawFrame(time){
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.viewport(0,0,RT,RT);
+  gl.clearColor(0,0,0,0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+  gl.useProgram(sceneProg);
+  gl.bindBuffer(gl.ARRAY_BUFFER,posBuf); gl.enableVertexAttribArray(sLoc.aPos); gl.vertexAttribPointer(sLoc.aPos,3,gl.FLOAT,false,0,0);
+  gl.bindBuffer(gl.ARRAY_BUFFER,nrmBuf); gl.enableVertexAttribArray(sLoc.aNormal); gl.vertexAttribPointer(sLoc.aNormal,3,gl.FLOAT,false,0,0);
+  renderShoggoth(time);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0,0,W,H);
+  gl.disable(gl.DEPTH_TEST);
+  gl.clearColor(0.03,0.04,0.05,1); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(postProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, rtTex);
+  gl.uniform1i(pLoc.uTex,0);
+  gl.uniform2f(pLoc.uTexel, 1/RT, 1/RT);
+  gl.uniform2f(pLoc.uSize, RT, RT);
+  gl.uniform1f(pLoc.uPx, PX);
+  gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf); gl.enableVertexAttribArray(pLoc.aPos); gl.vertexAttribPointer(pLoc.aPos,2,gl.FLOAT,false,0,0);
+  gl.drawArrays(gl.TRIANGLES,0,6);
+}
+
+/* ---------- run ---------- */
+const hud = document.getElementById("hud");
+window.__ready = false;
+function label(t){
+  const r=timelineReveal(t);
+  const ph = PHASE || (r<=0?"auto:masked":(r>=1?"auto:enraged":"auto:transition"));
+  hud.textContent = `phase=${ph} reveal=${r.toFixed(2)} px=${PX} t=${t.toFixed(3)}`;
+}
+
+/* on-screen trigger: fire the masked -> raw transition on demand (live mode) */
+const triggerBtn = document.getElementById("trigger");
+let liveT = 0;
+triggerBtn.addEventListener("click", ()=>{
+  if(manualStart===null){
+    manualStart = liveT;                 // start the mask-off from right now
+    triggerBtn.textContent = "Reset ↺";
+    triggerBtn.classList.add("raw");
+  } else {
+    manualStart = null;                  // back to the wandering masked state
+    triggerBtn.innerHTML = "Become Raw ▶";
+    triggerBtn.classList.remove("raw");
+  }
+});
+
+if(FIXED!==null){
+  triggerBtn.style.display = "none";     // deterministic screenshot mode
+  drawFrame(FIXED);
+  label(FIXED);
+  window.__ready = true;
+} else {
+  const t0 = performance.now();
+  function loop(){
+    liveT=(performance.now()-t0)/1000;
+    drawFrame(liveT); label(liveT);
+    window.__ready = true;
+    requestAnimationFrame(loop);
+  }
+  loop();
+}
+</script>
+</body>
+</html>

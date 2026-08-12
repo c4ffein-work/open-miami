@@ -326,6 +326,32 @@ impl Stunned {
     }
 }
 
+/// A short-lived directional impulse layered on top of an entity's normal
+/// motion — the "shove" from taking a hit. It carries its own velocity (px/s)
+/// that the movement system adds to the entity's displacement and then decays
+/// toward zero over a fraction of a second, so a hit produces a quick punch of
+/// motion rather than a sustained push. Applied to enemies (thrown opposite the
+/// incoming blow) and to the player (shoved directly away from the attacker).
+/// It is resolved through the same wall/bounds clamping as ordinary movement, so
+/// a shove can never push an entity through a wall.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Knockback {
+    /// Remaining impulse velocity in pixels/second.
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Knockback {
+    pub fn new(x: f32, y: f32) -> Self {
+        Knockback { x, y }
+    }
+
+    /// Magnitude of the remaining impulse (px/s).
+    pub fn magnitude(&self) -> f32 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
+}
+
 /// Weapon component
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Weapon {

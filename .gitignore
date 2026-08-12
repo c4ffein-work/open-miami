@@ -24,5 +24,8 @@ Thumbs.db
 # Logs
 *.log
 
+# Claude
+.claude/worktrees
+
 # Session screenshots (generated, not part of the project)
 /shots/

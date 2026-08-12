@@ -111,6 +111,16 @@ impl System for BulletSystem {
                     if let Some(health) = world.get_component_mut::<Health>(enemy_entity) {
                         health.take_damage(bullet.damage);
                     }
+                    // Shove the enemy along the bullet's travel direction — the
+                    // live combat knockback (process_shoot is test-only; real
+                    // bullet damage resolves here in BulletSystem).
+                    crate::systems::combat::CombatSystem::apply_knockback(
+                        world,
+                        enemy_entity,
+                        bullet_vel.x,
+                        bullet_vel.y,
+                        crate::systems::combat::BULLET_KNOCKBACK,
+                    );
                     hit_enemy = true;
                     break;
                 }
