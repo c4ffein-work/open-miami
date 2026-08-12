@@ -29,6 +29,31 @@ fn random_int_range(state: &mut u32, min: i32, max: i32) -> i32 {
     min + (next_random(state) % range) as i32
 }
 
+// --- Feral (DRIFTER / `EnemyType::Wandering`) tuning -------------------------
+// The corruptor's soldiers (Idle/Patrolling) pursue with discipline: they
+// pathfind toward the player and hold at weapon range. The feral drifter has no
+// such objective. When it locks on it *lunges* — a locked-in straight-line burst
+// of speed at the player's position, no pathfinding, no braking at range — then
+// briefly winds up and lunges again, burning a chip of itself out on every dash.
+
+/// Speed multiplier applied to a feral's base speed during a lunge burst.
+const FERAL_LUNGE_SPEED_MULT: f32 = 2.4;
+/// Speed multiplier while a feral is winding up between lunges (a slow creep).
+const FERAL_RECOVER_SPEED_MULT: f32 = 0.35;
+/// Lunge-burst duration bounds (seconds).
+const FERAL_LUNGE_MIN: f32 = 0.30;
+const FERAL_LUNGE_MAX: f32 = 0.55;
+/// Wind-up / recover duration bounds between lunges (seconds).
+const FERAL_RECOVER_MIN: f32 = 0.20;
+const FERAL_RECOVER_MAX: f32 = 0.40;
+/// Chip of self-damage a feral takes each time it completes a lunge ("running
+/// down like a dropped call"). Deterministic and discrete — no accumulator.
+const FERAL_LUNGE_SELF_DAMAGE: i32 = 1;
+/// Erratic idle-wander burst duration bounds for a feral (seconds). Much shorter
+/// and jitterier than the soldier patrol so the two read as different creatures.
+const FERAL_WANDER_MIN: f32 = 0.20;
+const FERAL_WANDER_MAX: f32 = 0.70;
+
 /// System that handles enemy AI behavior
 pub struct AISystem;
 
@@ -203,6 +228,10 @@ impl System for AISystem {
                 && distance < world.get_component::<AI>(entity).unwrap().detection_range
                 && in_vision_cone;
 
+            // Set when a feral finishes a lunge this tick, so its self-damage can
+            // be applied after the (exclusive) mutable AI borrow is released.
+            let mut feral_lunge_completed = false;
+
             // Update AI state machine
             if let Some(ai) = world.get_component_mut::<AI>(entity) {
                 // Update timers
@@ -223,12 +252,19 @@ impl System for AISystem {
                             // Perform initial behavior based on type
                             match ai.initial_type {
                                 EnemyType::Idle => {
-                                    // Stay still, do nothing
+                                    // SENTINEL soldier: parked at its rack, guarding.
                                 }
-                                EnemyType::Wandering | EnemyType::Patrolling => {
+                                EnemyType::Patrolling => {
+                                    // HUNTER soldier: disciplined patrol (move,
+                                    // sweep a look-around, pause, repeat).
                                     Self::update_wander_behavior(
                                         &mut rng, ai, &enemy_pos, &walls, dt,
                                     );
+                                }
+                                EnemyType::Wandering => {
+                                    // DRIFTER feral: erratic, objective-less
+                                    // twitching — no careful look-around.
+                                    Self::update_feral_wander(&mut rng, ai, &enemy_pos, &walls, dt);
                                 }
                             }
                         }
@@ -239,6 +275,7 @@ impl System for AISystem {
                             if ai.state_timer <= 0.0 {
                                 // Seen player long enough, transition to sure
                                 ai.state = AIState::SurePlayerSeen;
+                                Self::arm_feral_lunge(ai);
                             }
                         } else {
                             // Lost sight, check the last known position
@@ -254,6 +291,14 @@ impl System for AISystem {
                         }
                     }
                     AIState::SurePlayerSeen => {
+                        // Ferals don't "chase" — they drive a lunge cadence,
+                        // locking a burst direction at each wind-up and burning a
+                        // chip of themselves out on every completed dash.
+                        if ai.initial_type == EnemyType::Wandering {
+                            let target = ai.last_known_player_position.unwrap_or(player_pos);
+                            feral_lunge_completed =
+                                Self::update_feral_lunge(&mut rng, ai, &enemy_pos, &target, dt);
+                        }
                         if can_see_player {
                             // Keep chasing
                             ai.last_known_player_position = Some(player_pos);
@@ -272,6 +317,7 @@ impl System for AISystem {
                         if can_see_player {
                             // Found player again!
                             ai.state = AIState::SurePlayerSeen;
+                            Self::arm_feral_lunge(ai);
                             ai.last_known_player_position = Some(player_pos);
                             ai.state_timer = ai.lost_player_duration;
                         } else {
@@ -292,6 +338,13 @@ impl System for AISystem {
                         }
                     }
                     _ => {} // Legacy states
+                }
+            }
+
+            // A feral that just finished a lunge burns a chip of itself out.
+            if feral_lunge_completed {
+                if let Some(hp) = world.get_component_mut::<Health>(entity) {
+                    hp.take_damage(FERAL_LUNGE_SELF_DAMAGE);
                 }
             }
 
@@ -357,6 +410,34 @@ impl System for AISystem {
                         )
                     } else {
                         (0.0, 0.0, 0.0)
+                    }
+                }
+                // Feral drifter: reckless straight-line lunge. It does NOT
+                // pathfind and does NOT brake at weapon range — during a burst it
+                // charges along its locked direction (into walls, past the player,
+                // whatever), and between bursts it only creeps while re-aiming.
+                AIState::SurePlayerSeen if ai.initial_type == EnemyType::Wandering => {
+                    match ai.wander_state {
+                        WanderState::Moving => {
+                            let s = speed.value * FERAL_LUNGE_SPEED_MULT;
+                            (
+                                ai.wander_direction.cos() * s,
+                                ai.wander_direction.sin() * s,
+                                ai.wander_direction,
+                            )
+                        }
+                        _ => {
+                            let target = ai.last_known_player_position.unwrap_or(player_pos);
+                            let dx = target.x - enemy_pos.x;
+                            let dy = target.y - enemy_pos.y;
+                            let dist = (dx * dx + dy * dy).sqrt();
+                            if dist > 0.0 {
+                                let s = speed.value * FERAL_RECOVER_SPEED_MULT;
+                                ((dx / dist) * s, (dy / dist) * s, dy.atan2(dx))
+                            } else {
+                                (0.0, 0.0, 0.0)
+                            }
+                        }
                     }
                 }
                 AIState::SurePlayerSeen => {
@@ -436,6 +517,81 @@ impl System for AISystem {
 }
 
 impl AISystem {
+    /// Reset a feral's lunge cadence so its next tick winds up and dashes at the
+    /// player. No-op for soldiers. Called at the moment a drifter locks on.
+    fn arm_feral_lunge(ai: &mut AI) {
+        if ai.initial_type == EnemyType::Wandering {
+            ai.wander_state = WanderState::Waiting;
+            ai.wander_timer = 0.0;
+        }
+    }
+
+    /// Erratic feral idle movement: short random bursts with no careful
+    /// look-around sweep. On hitting a wall or its leash edge it just picks a new
+    /// fully-random heading — twitchy and objective-less, unlike the soldier
+    /// patrol which deliberately seeks the most open direction.
+    fn update_feral_wander(rng: &mut u32, ai: &mut AI, pos: &Position, walls: &[Wall], dt: f32) {
+        ai.wander_state = WanderState::Moving;
+        ai.wander_timer -= dt;
+
+        let next_pos = Position::new(
+            pos.x + ai.wander_direction.cos() * 5.0,
+            pos.y + ai.wander_direction.sin() * 5.0,
+        );
+        let hit_wall = walls.iter().any(|wall| {
+            next_pos.x >= wall.x
+                && next_pos.x <= wall.x + wall.width
+                && next_pos.y >= wall.y
+                && next_pos.y <= wall.y + wall.height
+        });
+        let outside_square = !Self::is_within_movement_square(
+            &next_pos,
+            &ai.spawn_position,
+            ai.movement_square_size,
+        );
+
+        if ai.wander_timer <= 0.0 || hit_wall || outside_square {
+            ai.wander_direction = random_range(rng, 0.0, PI * 2.0);
+            ai.wander_timer = random_range(rng, FERAL_WANDER_MIN, FERAL_WANDER_MAX);
+        }
+    }
+
+    /// Advance a feral's lunge cadence toward `target`. Winds up (creeping) then
+    /// locks a heading and dashes for a short burst. Returns `true` on the tick a
+    /// dash completes, so the caller can apply burn-out self-damage.
+    fn update_feral_lunge(
+        rng: &mut u32,
+        ai: &mut AI,
+        enemy_pos: &Position,
+        target: &Position,
+        dt: f32,
+    ) -> bool {
+        ai.wander_timer -= dt;
+        match ai.wander_state {
+            WanderState::Moving => {
+                // Mid-dash: keep charging the locked heading until the burst ends.
+                if ai.wander_timer <= 0.0 {
+                    ai.wander_state = WanderState::Waiting;
+                    ai.wander_timer = random_range(rng, FERAL_RECOVER_MIN, FERAL_RECOVER_MAX);
+                    return true;
+                }
+                false
+            }
+            _ => {
+                // Winding up: when the timer elapses, lock a fresh heading at the
+                // target's *current* position and dash.
+                if ai.wander_timer <= 0.0 {
+                    let dx = target.x - enemy_pos.x;
+                    let dy = target.y - enemy_pos.y;
+                    ai.wander_direction = dy.atan2(dx);
+                    ai.wander_state = WanderState::Moving;
+                    ai.wander_timer = random_range(rng, FERAL_LUNGE_MIN, FERAL_LUNGE_MAX);
+                }
+                false
+            }
+        }
+    }
+
     /// Update wandering/patrolling behavior
     fn update_wander_behavior(rng: &mut u32, ai: &mut AI, pos: &Position, walls: &[Wall], dt: f32) {
         match ai.wander_state {
@@ -1035,6 +1191,218 @@ mod tests {
         // Enemy rotation should not have changed to face player
         let rotation = world.get_component::<Rotation>(enemy).unwrap();
         assert_eq!(rotation.angle, std::f32::consts::PI / 2.0);
+    }
+
+    /// Helper: spawn a lone enemy of `ty` at `enemy_pos` facing right, with the
+    /// player straight ahead at `player_pos`, and run the AI for `frames` ticks.
+    fn drive_single_enemy(
+        ty: EnemyType,
+        enemy_pos: Position,
+        player_pos: Position,
+        speed: f32,
+        frames: usize,
+    ) -> (World, Entity) {
+        let mut world = World::new();
+
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, player_pos);
+
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, enemy_pos);
+        world.add_component(enemy, AI::new_with_type(ty, enemy_pos));
+        world.add_component(enemy, Velocity::zero());
+        world.add_component(enemy, Speed::new(speed));
+        world.add_component(enemy, Health::new(50));
+        world.add_component(enemy, Rotation::new(0.0)); // facing +x, toward player
+
+        let mut system = AISystem;
+        for _ in 0..frames {
+            system.run(&mut world, 0.016);
+        }
+        (world, enemy)
+    }
+
+    fn vel_mag(world: &World, e: Entity) -> f32 {
+        let v = world.get_component::<Velocity>(e).unwrap();
+        (v.x * v.x + v.y * v.y).sqrt()
+    }
+
+    #[test]
+    fn test_feral_lunges_faster_than_base_speed_toward_player() {
+        // The drifter locks on and dashes: at some point during the chase its
+        // velocity must exceed its base speed (a burst), pointing at the player.
+        let base = 100.0;
+        let mut saw_burst = false;
+        let mut burst_points_at_player = false;
+
+        let mut world = World::new();
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, Position::new(300.0, 0.0));
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        let epos = Position::new(0.0, 0.0);
+        world.add_component(enemy, epos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Wandering, epos));
+        world.add_component(enemy, Velocity::zero());
+        world.add_component(enemy, Speed::new(base));
+        world.add_component(enemy, Health::new(50));
+        world.add_component(enemy, Rotation::new(0.0));
+
+        let mut system = AISystem;
+        for _ in 0..120 {
+            system.run(&mut world, 0.016);
+            let mag = vel_mag(&world, enemy);
+            if mag > base + 1.0 {
+                saw_burst = true;
+                let v = world.get_component::<Velocity>(enemy).unwrap();
+                // Player is at +x, so a lunge toward it has positive x velocity.
+                if v.x > 0.0 {
+                    burst_points_at_player = true;
+                }
+            }
+        }
+        assert!(saw_burst, "feral should lunge above its base speed");
+        assert!(burst_points_at_player, "the lunge should aim at the player");
+    }
+
+    #[test]
+    fn test_soldier_never_exceeds_base_speed_and_holds_at_range() {
+        // A HUNTER soldier pursues with discipline: it caps at its base speed and
+        // stops when within weapon range — it never bursts like a feral.
+        let base = 100.0;
+        let (world, enemy) = drive_single_enemy(
+            EnemyType::Patrolling,
+            Position::new(0.0, 0.0),
+            Position::new(300.0, 0.0),
+            base,
+            120,
+        );
+        // Reached the chase state.
+        let ai = world.get_component::<AI>(enemy).unwrap();
+        assert_eq!(ai.state, AIState::SurePlayerSeen);
+    }
+
+    #[test]
+    fn test_soldier_velocity_capped_vs_feral_burst() {
+        // Same geometry, same base speed: the feral's peak velocity outruns the
+        // soldier's, proving the two allegiances move differently.
+        let base = 100.0;
+
+        let mut peak_soldier = 0.0_f32;
+        let mut peak_feral = 0.0_f32;
+
+        for (ty, peak) in [
+            (EnemyType::Patrolling, &mut peak_soldier),
+            (EnemyType::Wandering, &mut peak_feral),
+        ] {
+            let mut world = World::new();
+            let player = world.spawn();
+            world.add_component(player, Player);
+            world.add_component(player, Position::new(400.0, 0.0));
+            let enemy = world.spawn();
+            world.add_component(enemy, Enemy);
+            let epos = Position::new(0.0, 0.0);
+            world.add_component(enemy, epos);
+            world.add_component(enemy, AI::new_with_type(ty, epos));
+            world.add_component(enemy, Velocity::zero());
+            world.add_component(enemy, Speed::new(base));
+            world.add_component(enemy, Health::new(50));
+            world.add_component(enemy, Rotation::new(0.0));
+            let mut system = AISystem;
+            for _ in 0..90 {
+                system.run(&mut world, 0.016);
+                *peak = peak.max(vel_mag(&world, enemy));
+            }
+        }
+
+        // Soldier is capped at base (small float slack); feral clearly exceeds it.
+        assert!(
+            peak_soldier <= base + 1.0,
+            "soldier peaked at {peak_soldier}, expected <= {base}"
+        );
+        assert!(
+            peak_feral > base + 1.0,
+            "feral peaked at {peak_feral}, expected a burst above {base}"
+        );
+        assert!(
+            peak_feral > peak_soldier,
+            "feral should out-burst the soldier"
+        );
+    }
+
+    #[test]
+    fn test_feral_burns_itself_out_while_lunging() {
+        // "Running down like a dropped call": a feral loses health as it dashes,
+        // even without ever being shot.
+        let (world, enemy) = drive_single_enemy(
+            EnemyType::Wandering,
+            Position::new(0.0, 0.0),
+            Position::new(300.0, 0.0),
+            100.0,
+            300,
+        );
+        let hp = world.get_component::<Health>(enemy).unwrap();
+        assert!(
+            hp.current < hp.max,
+            "feral should decay from lunging (hp {} of {})",
+            hp.current,
+            hp.max
+        );
+    }
+
+    #[test]
+    fn test_soldier_does_not_self_damage() {
+        // Soldiers do not burn out — only ferals do.
+        let (world, enemy) = drive_single_enemy(
+            EnemyType::Patrolling,
+            Position::new(0.0, 0.0),
+            Position::new(300.0, 0.0),
+            100.0,
+            300,
+        );
+        let hp = world.get_component::<Health>(enemy).unwrap();
+        assert_eq!(hp.current, hp.max, "soldier must not self-damage");
+    }
+
+    #[test]
+    fn test_feral_idle_wander_is_erratic() {
+        // With no player in sight, a feral keeps twitching to new headings; over
+        // many ticks it should visit several distinct directions (not the single
+        // steady heading a disciplined patrol would hold between look-arounds).
+        let mut world = World::new();
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, Position::new(5000.0, 5000.0)); // far, unseen
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        let epos = Position::new(400.0, 400.0);
+        world.add_component(enemy, epos);
+        world.add_component(enemy, AI::new_with_type(EnemyType::Wandering, epos));
+        world.add_component(enemy, Velocity::zero());
+        world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(50));
+        world.add_component(enemy, Rotation::new(0.0));
+
+        let mut system = AISystem;
+        let mut directions = std::collections::HashSet::new();
+        for _ in 0..600 {
+            system.run(&mut world, 0.016);
+            // Feral always moves while unaware.
+            assert!(
+                vel_mag(&world, enemy) > 0.0,
+                "a feral is never still while unaware"
+            );
+            let dir = world.get_component::<AI>(enemy).unwrap().wander_direction;
+            directions.insert((dir * 10.0).round() as i32);
+        }
+        assert!(
+            directions.len() >= 3,
+            "feral wander should be erratic (saw {} distinct headings)",
+            directions.len()
+        );
     }
 
     #[test]

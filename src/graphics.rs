@@ -275,7 +275,7 @@ impl Graphics {
             body_color.a,
         );
 
-        // Cream-ish highlight (Anthropic accent), dimmed when dead.
+        // Cream-ish highlight (the makers' accent), dimmed when dead.
         let accent = if dead {
             Color::new(0.55, 0.53, 0.48, base_color.a)
         } else {

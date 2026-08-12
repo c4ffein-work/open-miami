@@ -279,7 +279,7 @@ fn render_player(world: &World, graphics: &Graphics) {
         .unwrap_or(0);
 
     if health > 0 {
-        // Draw the friendly Claude purge bot in warm Anthropic coral.
+        // Draw the friendly coral purge bot in warm coral.
         let base_color = Color::from_rgba(217, 119, 87, 255);
         graphics.draw_pixelated_sprite(
             Vec2::new(pos.x, pos.y),

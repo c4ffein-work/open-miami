@@ -515,14 +515,50 @@ mod wasm_entry {
         /// MUSICS tab: a button per sound + the music loop. Clicking plays it.
         fn draw_viz_musics(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
             graphics.draw_text(
-                "Click a button to play it. (audio unlocks on the first click)",
-                Vec2::new(40.0, 100.0),
+                "Click to play. (audio unlocks on the first click)",
+                Vec2::new(40.0, 88.0),
                 18.0,
                 Color::GRAY,
             );
-            let items = [
-                "Music: START",
-                "Music: STOP",
+
+            // One song per floor-mood — the sequencer's four tracks.
+            graphics.draw_text(
+                "SONGS (one per floor mood)",
+                Vec2::new(40.0, 120.0),
+                16.0,
+                Color::from_rgba(217, 119, 87, 255),
+            );
+            for (i, song) in crate::audio::SONGS.iter().enumerate() {
+                let x = 40.0 + (i % 2) as f32 * 270.0;
+                let y = 138.0 + (i / 2) as f32 * 54.0;
+                if viz_button(graphics, mouse, x, y, 240.0, 44.0, song.name, false) && click {
+                    self.audio.resume();
+                    self.audio.play_song(i);
+                }
+            }
+            let stop_y = 138.0 + 2.0 * 54.0 + 8.0;
+            if viz_button(
+                graphics,
+                mouse,
+                40.0,
+                stop_y,
+                240.0,
+                44.0,
+                "Stop music",
+                false,
+            ) && click
+            {
+                self.audio.stop_music();
+            }
+
+            // One-shot sound effects.
+            graphics.draw_text(
+                "SFX",
+                Vec2::new(40.0, stop_y + 74.0),
+                16.0,
+                Color::from_rgba(217, 119, 87, 255),
+            );
+            let sfx = [
                 "Shoot",
                 "Hit",
                 "Rogue down",
@@ -533,22 +569,20 @@ mod wasm_entry {
                 "Level clear",
                 "Mask crack",
             ];
-            for (i, &name) in items.iter().enumerate() {
-                let x = 40.0 + (i % 2) as f32 * 270.0;
-                let y = 140.0 + (i / 2) as f32 * 62.0;
-                if viz_button(graphics, mouse, x, y, 240.0, 46.0, name, false) && click {
+            for (i, &name) in sfx.iter().enumerate() {
+                let x = 40.0 + (i % 3) as f32 * 230.0;
+                let y = stop_y + 96.0 + (i / 3) as f32 * 52.0;
+                if viz_button(graphics, mouse, x, y, 210.0, 42.0, name, false) && click {
                     self.audio.resume();
                     match i {
-                        0 => self.audio.start_music(),
-                        1 => self.audio.stop_music(),
-                        2 => self.audio.play_shoot(),
-                        3 => self.audio.play_hit(),
-                        4 => self.audio.play_enemy_down(),
-                        5 => self.audio.play_pickup(),
-                        6 => self.audio.play_throw(),
-                        7 => self.audio.play_player_hurt(),
-                        8 => self.audio.play_death(),
-                        9 => self.audio.play_level_clear(),
+                        0 => self.audio.play_shoot(),
+                        1 => self.audio.play_hit(),
+                        2 => self.audio.play_enemy_down(),
+                        3 => self.audio.play_pickup(),
+                        4 => self.audio.play_throw(),
+                        5 => self.audio.play_player_hurt(),
+                        6 => self.audio.play_death(),
+                        7 => self.audio.play_level_clear(),
                         _ => self.audio.play_mask_crack(),
                     }
                 }

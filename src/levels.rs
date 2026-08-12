@@ -55,54 +55,85 @@ pub fn level_def(level: usize) -> LevelDef {
             ],
         },
 
+        // Floor 2 — COLD STORAGE.
         1 => LevelDef {
-            // Crossroads: a central pillar splits the room into four approaches.
+            // Rows of storage-locker blocks: three ranks of identical iron
+            // lockers holding frozen weights, split by cross-aisles the player
+            // (and the rogues) thread between. Cold, repetitive, morgue-like.
             walls: vec![
-                (500.0, 100.0, 20.0, 400.0),
-                (200.0, 430.0, 420.0, 20.0),
-                (700.0, 400.0, 20.0, 260.0),
-                (150.0, 600.0, 300.0, 20.0),
+                // Rank A (upper).
+                (130.0, 130.0, 90.0, 45.0),
+                (300.0, 130.0, 90.0, 45.0),
+                (470.0, 130.0, 90.0, 45.0),
+                (640.0, 130.0, 90.0, 45.0),
+                (810.0, 130.0, 90.0, 45.0),
+                // Rank B (mid-lower; clear of the player spawn aisle).
+                (130.0, 430.0, 90.0, 45.0),
+                (300.0, 430.0, 90.0, 45.0),
+                (470.0, 430.0, 90.0, 45.0),
+                (640.0, 430.0, 90.0, 45.0),
+                (810.0, 430.0, 90.0, 45.0),
+                // Rank C (lower).
+                (130.0, 600.0, 90.0, 45.0),
+                (300.0, 600.0, 90.0, 45.0),
+                (470.0, 600.0, 90.0, 45.0),
+                (640.0, 600.0, 90.0, 45.0),
+                (810.0, 600.0, 90.0, 45.0),
             ],
             enemies: vec![
-                (200.0, 150.0, Idle),
-                (340.0, 150.0, Wandering),
-                (620.0, 150.0, Patrolling),
-                (780.0, 160.0, Idle),
-                (180.0, 250.0, Wandering),
-                (800.0, 300.0, Patrolling),
-                (560.0, 540.0, Idle),
-                (660.0, 560.0, Wandering),
-                (840.0, 520.0, Patrolling),
-                (250.0, 690.0, Idle),
-                (430.0, 690.0, Wandering),
-                (600.0, 700.0, Patrolling),
+                // Guards stationed along the top service aisle.
+                (90.0, 90.0, Idle),
+                (260.0, 90.0, Wandering),
+                (430.0, 90.0, Patrolling),
+                (600.0, 90.0, Idle),
+                (770.0, 90.0, Wandering),
+                // Prowling the cross-aisle beside the player.
+                (260.0, 300.0, Patrolling),
+                (600.0, 300.0, Idle),
+                (770.0, 300.0, Wandering),
+                // Between the lower ranks.
+                (260.0, 537.0, Patrolling),
+                (600.0, 537.0, Idle),
+                // Rear loading aisle.
+                (430.0, 710.0, Wandering),
+                (770.0, 710.0, Patrolling),
             ],
         },
 
+        // Floor 3 — INFERENCE PIT.
         2 => LevelDef {
-            // Holding room: a walled cell around the player with a single
-            // doorway (gap in the bottom wall) that must be breached to reach
-            // the garrison outside.
+            // An open pit ringed by rack-walls: a broken square of server racks
+            // encloses the arena the player drops into, one doorway breaching each
+            // side. Fight out of the pit, or draw the racks' guards down into it.
             walls: vec![
-                (300.0, 150.0, 300.0, 20.0),
-                (600.0, 150.0, 20.0, 300.0),
-                (300.0, 450.0, 60.0, 20.0), // bottom wall, left of the doorway
-                (460.0, 450.0, 140.0, 20.0), // bottom wall, right of the doorway
-                (300.0, 150.0, 20.0, 300.0),
+                // Top rack (doorway gap in the centre).
+                (200.0, 150.0, 180.0, 20.0),
+                (460.0, 150.0, 180.0, 20.0),
+                // Bottom rack (centre doorway).
+                (200.0, 450.0, 180.0, 20.0),
+                (460.0, 450.0, 180.0, 20.0),
+                // Left rack (mid doorway).
+                (200.0, 150.0, 20.0, 120.0),
+                (200.0, 350.0, 20.0, 120.0),
+                // Right rack (mid doorway).
+                (620.0, 150.0, 20.0, 120.0),
+                (620.0, 350.0, 20.0, 120.0),
             ],
             enemies: vec![
-                (420.0, 100.0, Idle),
-                (560.0, 100.0, Wandering),
-                (700.0, 250.0, Patrolling),
-                (760.0, 400.0, Idle),
-                (350.0, 410.0, Wandering),
-                (500.0, 380.0, Patrolling),
-                (180.0, 250.0, Idle),
-                (150.0, 450.0, Wandering),
-                (250.0, 600.0, Patrolling),
-                (450.0, 620.0, Idle),
-                (650.0, 600.0, Wandering),
-                (800.0, 550.0, Patrolling),
+                // Fallen into the pit itself.
+                (250.0, 190.0, Idle),
+                (580.0, 190.0, Wandering),
+                (250.0, 420.0, Patrolling),
+                (580.0, 420.0, Idle),
+                // Ringing the racks on the outside.
+                (110.0, 100.0, Wandering),
+                (700.0, 100.0, Patrolling),
+                (110.0, 560.0, Idle),
+                (700.0, 560.0, Wandering),
+                (420.0, 90.0, Patrolling),
+                (420.0, 560.0, Idle),
+                (110.0, 300.0, Wandering),
+                (720.0, 300.0, Patrolling),
             ],
         },
 
@@ -274,27 +305,34 @@ pub fn level_def(level: usize) -> LevelDef {
             ],
         },
 
+        // Floor 11 — WEIGHT SERVER.
         10 => LevelDef {
-            // Zigzag: staggered walls, no straight line to safety.
+            // Heavy central iron: one enormous server slab holding the model's
+            // weights dominates the room, flanked by four squat iron pylons in the
+            // corners. You circle the mass in the surrounding negative space.
             walls: vec![
-                (200.0, 230.0, 250.0, 20.0),
-                (450.0, 250.0, 20.0, 150.0),
-                (450.0, 400.0, 250.0, 20.0),
-                (700.0, 400.0, 20.0, 150.0),
+                (300.0, 370.0, 400.0, 220.0), // the central weight slab
+                (120.0, 120.0, 90.0, 90.0),   // corner pylons
+                (790.0, 120.0, 90.0, 90.0),
+                (120.0, 580.0, 90.0, 90.0),
+                (790.0, 580.0, 90.0, 90.0),
             ],
             enemies: vec![
-                (180.0, 160.0, Idle),
-                (350.0, 150.0, Wandering),
-                (560.0, 160.0, Patrolling),
-                (780.0, 200.0, Idle),
-                (180.0, 320.0, Wandering),
-                (280.0, 420.0, Patrolling),
-                (600.0, 300.0, Idle),
-                (560.0, 500.0, Wandering),
-                (800.0, 560.0, Patrolling),
-                (300.0, 620.0, Idle),
-                (500.0, 640.0, Wandering),
-                (760.0, 640.0, Patrolling),
+                // Line along the upper approach to the slab.
+                (300.0, 150.0, Idle),
+                (500.0, 150.0, Wandering),
+                (650.0, 150.0, Patrolling),
+                // Flanking the slab, left and right.
+                (250.0, 300.0, Idle),
+                (750.0, 300.0, Wandering),
+                (150.0, 430.0, Patrolling),
+                (850.0, 430.0, Idle),
+                (250.0, 470.0, Wandering),
+                (750.0, 540.0, Patrolling),
+                // Rear guard behind the slab.
+                (300.0, 700.0, Wandering),
+                (500.0, 700.0, Patrolling),
+                (700.0, 700.0, Idle),
             ],
         },
 

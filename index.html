@@ -63,8 +63,10 @@
                 async function run() {
                     try {
                         console.log('Starting WASM initialization...');
-                        // Initialize the WASM module
-                        await init();
+                        // Initialize the WASM module. Pass an explicit, cache-busted
+                        // wasm URL — otherwise init() derives it from import.meta.url
+                        // and the browser serves a stale open_miami_bg.wasm from cache.
+                        await init(`./open_miami_bg.wasm?v=${version}`);
                         console.log('WASM initialized successfully!');
 
                         // Ensure DOM is loaded before starting game
