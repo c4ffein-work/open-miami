@@ -59,6 +59,9 @@
             box-shadow: -3px 0 16px rgba(0,0,0,0.6);
         }
         #viz-panel.show { display: block; }
+        /* full-pane mode: the LEVELS tab is the level editor, filling the space
+           below the tab bar (the sprite inspector keeps the right-half layout). */
+        #viz-panel.full { left: 0; width: 100%; height: calc(100% - 74px); box-shadow: none; }
     </style>
 </head>
 <body>
@@ -73,12 +76,14 @@
         window.vizInspect = function (kind) {
             var f = document.getElementById('viz-panel');
             var src;
-            if (kind === 'shoggoth_masked')          src = './proto/shoggoth.html?phase=masked';
-            else if (kind === 'shoggoth_enraged')    src = './proto/shoggoth.html?phase=enraged';
-            else if (kind === 'shoggoth_v2_masked')  src = './proto/shoggoth-v2.html?phase=masked';
-            else if (kind === 'shoggoth_v2_enraged') src = './proto/shoggoth-v2.html?phase=enraged';
-            else src = './proto/editor.html?embed=1&color=' + encodeURIComponent(kind);
+            if (kind === 'shoggoth_masked')          src = './tools/shoggoth.html?phase=masked';
+            else if (kind === 'shoggoth_enraged')    src = './tools/shoggoth.html?phase=enraged';
+            else if (kind === 'shoggoth_v2_masked')  src = './tools/shoggoth-v2.html?phase=masked';
+            else if (kind === 'shoggoth_v2_enraged') src = './tools/shoggoth-v2.html?phase=enraged';
+            else if (kind === 'levels')              src = './tools/levels.html?embed=1';
+            else src = './tools/editor.html?embed=1&color=' + encodeURIComponent(kind);
             if (f.getAttribute('data-src') !== src) { f.src = src; f.setAttribute('data-src', src); }
+            f.classList.toggle('full', kind === 'levels');
             f.classList.add('show');
         };
         window.vizInspectHide = function () {

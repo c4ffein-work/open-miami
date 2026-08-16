@@ -1,4 +1,4 @@
-.PHONY: verify check-test check-clippy check-fmt check-build check-wasm-build check-e2e check-coverage build-wasm help
+.PHONY: verify check-test check-clippy check-fmt check-build check-wasm-build check-e2e check-coverage build-wasm gen-levels check-levels help
 
 # Colors for output
 RED=\033[0;31m
@@ -18,6 +18,8 @@ help:
 	@echo "  make build-wasm      - Build WASM and generate JavaScript glue (for local testing)"
 	@echo "  make check-e2e       - Run end-to-end tests (requires WASM dependencies)"
 	@echo "  make check-coverage  - Generate code coverage report (requires cargo-tarpaulin)"
+	@echo "  make gen-levels      - Regenerate src/levels_data.rs from levels/*.json"
+	@echo "  make check-levels    - Validate levels/*.json and check levels_data.rs is up to date"
 
 # Run all verification checks (E2E tests excluded by default due to dependency constraints)
 verify: check-fmt check-clippy check-test check-build check-wasm-build
@@ -102,6 +104,19 @@ check-e2e:
 		LD_LIBRARY_PATH="$$(find "$$PWD/playwright-deps/libs" -name '*.so*' -printf '%h\n' 2>/dev/null | sort -u | paste -sd:):$${LD_LIBRARY_PATH:-}" \
 		timeout 60 bunx playwright test
 	@echo "$(GREEN)✓ E2E tests passed$(NC)"
+
+# Levels - compile the floor/scenario JSON (levels/*.json, written by the
+# level editor) into static Rust data. Python 3 stdlib only.
+gen-levels:
+	@echo "$(YELLOW)Generating src/levels_data.rs from levels/*.json...$(NC)"
+	python3 tools/gen_levels.py
+	@echo "$(GREEN)✓ Levels generated$(NC)"
+
+# Levels check - validate the JSON and make sure the generated file is current
+check-levels:
+	@echo "$(YELLOW)Validating levels/*.json...$(NC)"
+	python3 tools/gen_levels.py --check
+	@echo "$(GREEN)✓ Levels valid and up to date$(NC)"
 
 # Code Coverage - requires cargo-tarpaulin (optional check)
 check-coverage:

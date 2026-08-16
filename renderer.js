@@ -20,6 +20,7 @@
      9 TRANSLATE  x y
     10 ROTATE     angle
     11 ROBOT      colorIdx poseIdx weaponIdx x y angle sizePx time
+    12 SCALE      sx sy
 
    Everything is drawn as vertex-colored, textured triangles in one
    interleaved dynamic buffer (a 1x1 white texture stands in for solid
@@ -31,32 +32,26 @@
    texture via a scratch 2D canvas, then drawn as quads like everything
    else.
 
-   Robots: the robot-core 3D->2D pipeline renders (color, pose, weapon,
-   animation-frame) tiles on demand — animation time is quantized to a few
-   frames per pose — and the tiles are cached in a texture atlas, so the
-   steady-state cost of a fully animated 3D robot is one textured quad.
+   Robots: true live 3D->2D, every frame, at continuous animation time. Each
+   ROBOT command reserves a tile in a per-frame scratch atlas and queues a
+   robot-core render (pass 1: lit boxes -> small scene FBO; pass 2: edge-ink /
+   posterize / pixelate, transparent background -> that atlas tile). The
+   queued renders run inside this same GL context right before the batch that
+   samples them is drawn, so a robot costs two tiny passes plus one textured
+   quad, with no tile cache, no quantization and no CPU readback.
    ========================================================================= */
 
-import { bakeSprite } from "./proto/robot-core.js";
+import { createRobotPipeline } from "./robot-core.js";
 
 const TEXT_SEP = "\u001f";
 
-/* ---- robot tile tables (indices mirror src/graphics.rs draw_robot) ------ */
+/* ---- robot tables (indices mirror src/graphics.rs draw_robot) ----------- */
 const ROBOT_COLORS = ["coral", "red", "violet", "magenta"];
+const ROBOT_POSES = ["idle", "walk", "shoot", "hit"];
 const ROBOT_WEAPONS = ["fist", "pistol", "machinegun", "shotgun"];
-// Animation cycle length and baked frame count per pose. Periods match the
-// periodic time-functions in robot-core's posePlan: walk phase is t*2pi
-// (period 1s), idle breath sin(t*1.9), shoot recoil sin(t*10), hit flinch
-// repeats every 1.3s. `wrap:false` clamps instead of looping (the hit flinch
-// plays once and settles — the engine sends time-since-impact).
-const ROBOT_POSES = [
-  { name: "idle", period: (2 * Math.PI) / 1.9, frames: 8, wrap: true },
-  { name: "walk", period: 1.0, frames: 8, wrap: true },
-  { name: "shoot", period: (2 * Math.PI) / 10, frames: 6, wrap: true },
-  { name: "hit", period: 1.3, frames: 10, wrap: false },
-];
-const ROBOT_TILE = 128; // baked tile resolution (px) in the robot atlas
-const ROBOT_BAKE_PX = 3; // robot-core pixelation block size at this tile size
+const ROBOT_TILE = 128; // per-robot tile resolution (px) in the scratch atlas
+const ROBOT_PX = 3; // robot-core pixelation block size at this tile size
+const ROBOT_ATLAS_SIZE = 1024; // 8x8 = 64 robots per batch; more just flush early
 
 /* ---- glyph atlas config ------------------------------------------------- */
 const GLYPH_FS = 48; // rasterization font size; quads scale from this
@@ -169,20 +164,95 @@ export function initRenderer(canvas) {
   );
 
   const glyphTex = makeTexture(GLYPH_ATLAS_SIZE);
-  const ROBOT_ATLAS_SIZE = Math.min(2048, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+
+  /* ---- robot scratch atlas: a render target the robot passes draw into ---- */
+  // Tiles are handed out per frame in stream order and recycled after every
+  // flush (once the quads that sample them have been drawn), so the atlas
+  // only ever needs to hold the robots of one batch.
   const robotTex = makeTexture(ROBOT_ATLAS_SIZE);
   const robotCols = Math.floor(ROBOT_ATLAS_SIZE / ROBOT_TILE);
   const robotSlots = robotCols * robotCols;
+  const robotFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, robotFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, robotTex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    throw new Error("Robot atlas framebuffer is incomplete; the game cannot render.");
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const robotPipe = createRobotPipeline(gl, { rt: ROBOT_TILE });
+  // Robots queued for the current batch: (colorIdx, poseIdx, weaponIdx, time)
+  // per slot, rendered into their tiles by flush() right before the draw.
+  const robotQueue = new Float32Array(robotSlots * 4);
+  let robotUsed = 0;
+  // Reused per render so the per-frame robot path never allocates.
+  const robotOpts = {
+    pose: "idle", color: "coral", weapon: "fist", time: 0,
+    facingDeg: 0, px: ROBOT_PX, transparent: true,
+  };
+  const robotTarget = { fbo: robotFbo, x: 0, y: 0, w: ROBOT_TILE, h: ROBOT_TILE };
+
+  // Re-establish everything the batched pipeline relies on. The robot passes
+  // rebind program/buffers/attribs/framebuffer/viewport/blend/depth, so this
+  // runs after them (and it is cheap enough to be defensive about it).
+  function bindBatchState() {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(prog);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(loc.aPos);
+    gl.vertexAttribPointer(loc.aPos, 2, gl.FLOAT, false, STRIDE, 0);
+    gl.enableVertexAttribArray(loc.aUv);
+    gl.vertexAttribPointer(loc.aUv, 2, gl.FLOAT, false, STRIDE, 8);
+    gl.enableVertexAttribArray(loc.aColor);
+    gl.vertexAttribPointer(loc.aColor, 4, gl.FLOAT, false, STRIDE, 16);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  // Run the queued robot renders into their atlas tiles. Leaves the batch
+  // state rebound (and TEXTURE0 unbound — flush binds what it needs).
+  function renderQueuedRobots() {
+    // Our attrib arrays would otherwise stay enabled (pointing at the batch
+    // VBO) while the robot programs draw; keep the two pipelines disjoint.
+    gl.disableVertexAttribArray(loc.aPos);
+    gl.disableVertexAttribArray(loc.aUv);
+    gl.disableVertexAttribArray(loc.aColor);
+    for (let i = 0; i < robotUsed; i++) {
+      const q = i * 4;
+      robotOpts.color = ROBOT_COLORS[robotQueue[q] | 0] || ROBOT_COLORS[0];
+      robotOpts.pose = ROBOT_POSES[robotQueue[q + 1] | 0] || ROBOT_POSES[0];
+      robotOpts.weapon = ROBOT_WEAPONS[robotQueue[q + 2] | 0] || ROBOT_WEAPONS[0];
+      robotOpts.time = robotQueue[q + 3];
+      robotTarget.x = (i % robotCols) * ROBOT_TILE;
+      robotTarget.y = Math.floor(i / robotCols) * ROBOT_TILE;
+      robotPipe.render(robotOpts, robotTarget);
+    }
+    // The pipeline sampled its own scene texture on TEXTURE0; drop it so the
+    // atlas is never both bound for sampling and attached to a framebuffer.
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    bindBatchState();
+  }
+
+  // The pipeline's constructor left its own buffers bound: put ours back.
+  bindBatchState();
 
   let boundTex = null;
   function flush() {
-    if (vCount === 0) return;
-    if (boundTex) {
-      gl.bindTexture(gl.TEXTURE_2D, boundTex);
+    if (robotUsed > 0) renderQueuedRobots(); // before the batch that samples them
+    if (vCount === 0) {
+      robotUsed = 0;
+      return;
     }
+    gl.bindTexture(gl.TEXTURE_2D, boundTex || whiteTex);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, verts.subarray(0, vCount * FLOATS_PER_VERT));
     gl.drawArrays(gl.TRIANGLES, 0, vCount);
     vCount = 0;
+    robotUsed = 0; // the quads sampling this batch's tiles are submitted: recycle
   }
 
   function setTexture(tex) {
@@ -205,6 +275,10 @@ export function initRenderer(canvas) {
   function tTranslate(x, y) {
     m[4] += m[0] * x + m[2] * y;
     m[5] += m[1] * x + m[3] * y;
+  }
+  function tScale(sx, sy) {
+    m[0] *= sx; m[1] *= sx;
+    m[2] *= sy; m[3] *= sy;
   }
   function tRotate(angle) {
     const c = Math.cos(angle), s = Math.sin(angle);
@@ -368,78 +442,46 @@ export function initRenderer(canvas) {
     }
   }
 
-  /* ---- robot tile cache: live robot-core bakes -> atlas texture ---- */
-  const robotTiles = new Map(); // key -> slot index
-  let robotNextSlot = 0;
-
-  function robotTile(colorIdx, poseIdx, weaponIdx, time) {
-    const pose = ROBOT_POSES[poseIdx | 0] || ROBOT_POSES[0];
-    let frame;
-    if (pose.wrap) {
-      const p = ((time % pose.period) + pose.period) % pose.period;
-      frame = Math.min(pose.frames - 1, Math.floor((p / pose.period) * pose.frames));
-    } else {
-      frame = Math.max(0, Math.min(pose.frames - 1, Math.floor((time / pose.period) * pose.frames)));
-    }
-    const color = ROBOT_COLORS[colorIdx | 0] || ROBOT_COLORS[0];
-    const weapon = ROBOT_WEAPONS[weaponIdx | 0] || ROBOT_WEAPONS[0];
-    const key = `${color}:${pose.name}:${weapon}:${frame}`;
-    let slot = robotTiles.get(key);
-    if (slot === undefined) {
-      if (robotNextSlot >= robotSlots) {
-        // Atlas full — drop everything and rebake on demand (rare).
-        robotTiles.clear();
-        robotNextSlot = 0;
-      }
-      slot = robotNextSlot++;
-      const frameTime = ((frame + 0.5) / pose.frames) * pose.period;
-      const tile = bakeSprite({
-        pose: pose.name,
-        color,
-        weapon,
-        time: frameTime,
-        facingDeg: 0,
-        size: ROBOT_TILE,
-        px: ROBOT_BAKE_PX,
-        transparent: true,
-      });
-      flush();
-      gl.bindTexture(gl.TEXTURE_2D, robotTex);
-      gl.texSubImage2D(
-        gl.TEXTURE_2D, 0,
-        (slot % robotCols) * ROBOT_TILE,
-        Math.floor(slot / robotCols) * ROBOT_TILE,
-        gl.RGBA, gl.UNSIGNED_BYTE, tile
-      );
-      robotTiles.set(key, slot);
-    }
-    return slot;
-  }
-
+  /* ---- robots: queue a live render into a scratch tile, draw it as a quad ---- */
+  // Facing is applied as quad rotation (the tile is rendered facing "up"), so
+  // the robot goes through the transform stack like every other quad. `time`
+  // is the engine's continuous animation clock, used as-is.
   function drawRobot(colorIdx, poseIdx, weaponIdx, x, y, angle, sizePx, time) {
-    const slot = robotTile(colorIdx, poseIdx, weaponIdx, time);
-    const inset = 0.5; // half-texel inset against neighbor-tile bleed
-    const u0 = ((slot % robotCols) * ROBOT_TILE + inset) / ROBOT_ATLAS_SIZE;
-    const v0 = (Math.floor(slot / robotCols) * ROBOT_TILE + inset) / ROBOT_ATLAS_SIZE;
-    const u1 = ((slot % robotCols) * ROBOT_TILE + ROBOT_TILE - inset) / ROBOT_ATLAS_SIZE;
-    const v1 = (Math.floor(slot / robotCols) * ROBOT_TILE + ROBOT_TILE - inset) / ROBOT_ATLAS_SIZE;
     setTexture(robotTex);
+    // Need a free tile AND room for the whole quad in this batch: a flush
+    // recycles tiles, so the six verts of one robot must never straddle one.
+    if (robotUsed >= robotSlots || vCount + 6 > MAX_VERTS) flush();
+    const slot = robotUsed++;
+    const q = slot * 4;
+    robotQueue[q] = colorIdx;
+    robotQueue[q + 1] = poseIdx;
+    robotQueue[q + 2] = weaponIdx;
+    robotQueue[q + 3] = time;
+    const inset = 0.5; // half-texel inset against neighbor-tile bleed
+    const tx = (slot % robotCols) * ROBOT_TILE;
+    const ty = Math.floor(slot / robotCols) * ROBOT_TILE;
+    // Pass 2 draws with GL's bottom-up viewport, so the tile's first row is
+    // the robot's bottom: flip v so the quad reads it top-down like the canvas.
+    const u0 = (tx + inset) / ROBOT_ATLAS_SIZE;
+    const v0 = (ty + ROBOT_TILE - inset) / ROBOT_ATLAS_SIZE;
+    const u1 = (tx + ROBOT_TILE - inset) / ROBOT_ATLAS_SIZE;
+    const v1 = (ty + inset) / ROBOT_ATLAS_SIZE;
     const h = sizePx / 2;
     const c = Math.cos(angle), s = Math.sin(angle);
-    // Rotated quad corners in local space, then through the transform stack.
-    const px = [-h, h, h, -h];
-    const py = [-h, -h, h, h];
-    const cx = [], cy = [];
-    for (let i = 0; i < 4; i++) {
-      cx.push(x + px[i] * c - py[i] * s);
-      cy.push(y + px[i] * s + py[i] * c);
-    }
-    vert(cx[0], cy[0], u0, v0, 1, 1, 1, 1);
-    vert(cx[1], cy[1], u1, v0, 1, 1, 1, 1);
-    vert(cx[2], cy[2], u1, v1, 1, 1, 1, 1);
-    vert(cx[0], cy[0], u0, v0, 1, 1, 1, 1);
-    vert(cx[2], cy[2], u1, v1, 1, 1, 1, 1);
-    vert(cx[3], cy[3], u0, v1, 1, 1, 1, 1);
+    // Rotated quad corners in local space (rotation about the robot's
+    // center), then through the transform stack in vert().
+    const ex = h * c, ey = h * s; // half-extent along the rotated x axis
+    const fx = -h * s, fy = h * c; // half-extent along the rotated y axis
+    const x0 = x - ex - fx, y0 = y - ey - fy; // top-left
+    const x1 = x + ex - fx, y1 = y + ey - fy; // top-right
+    const x2 = x + ex + fx, y2 = y + ey + fy; // bottom-right
+    const x3 = x - ex + fx, y3 = y - ey + fy; // bottom-left
+    vert(x0, y0, u0, v0, 1, 1, 1, 1);
+    vert(x1, y1, u1, v0, 1, 1, 1, 1);
+    vert(x2, y2, u1, v1, 1, 1, 1, 1);
+    vert(x0, y0, u0, v0, 1, 1, 1, 1);
+    vert(x2, y2, u1, v1, 1, 1, 1, 1);
+    vert(x3, y3, u0, v1, 1, 1, 1, 1);
   }
 
   /* ---- frame execution ---- */
@@ -456,6 +498,7 @@ export function initRenderer(canvas) {
     stack.length = 0;
     boundTex = null;
     vCount = 0;
+    robotUsed = 0;
 
     let i = 0;
     const n = cmds.length;
@@ -519,6 +562,10 @@ export function initRenderer(canvas) {
           drawRobot(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4],
             cmds[i + 5], cmds[i + 6], cmds[i + 7]);
           i += 8;
+          break;
+        case 12: // SCALE
+          tScale(cmds[i], cmds[i + 1]);
+          i += 2;
           break;
         default:
           // Unknown opcode: the stream is corrupt; stop rather than

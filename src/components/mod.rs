@@ -508,6 +508,79 @@ impl Default for DebugTrail {
     }
 }
 
+/// An elevator car on the floor: the entry you arrived in, or an exit you can
+/// leave by. Exits extract the player when open (see
+/// `systems::elevator::ElevatorSystem`); the entry is the spawn point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Elevator {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Door frame rectangle in world units.
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// `true` for exits, `false` for the entry car.
+    pub is_exit: bool,
+    /// Exits only: whether the doors are open (extractable).
+    pub open: bool,
+    /// Exits only: floor id this car leads to (`0` = the surface).
+    pub to: usize,
+    /// Seconds the player has been standing inside an open exit.
+    pub dwell: f32,
+}
+
+impl Elevator {
+    pub fn from_def(def: &crate::scenario::ElevatorDef, is_exit: bool) -> Self {
+        Elevator {
+            id: def.id,
+            label: def.label,
+            x: def.rect.x,
+            y: def.rect.y,
+            w: def.rect.w,
+            h: def.rect.h,
+            is_exit,
+            open: is_exit && def.open,
+            to: def.to,
+            dwell: 0.0,
+        }
+    }
+
+    pub fn contains(&self, p: Vec2) -> bool {
+        p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + self.h
+    }
+
+    pub fn center(&self) -> Vec2 {
+        Vec2::new(self.x + self.w / 2.0, self.y + self.h / 2.0)
+    }
+}
+
+/// A named trigger region (`enter_zone` in scenarios). No collision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Zone {
+    pub id: &'static str,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Zone {
+    pub fn from_def(def: &crate::scenario::ZoneDef) -> Self {
+        Zone {
+            id: def.id,
+            x: def.rect.x,
+            y: def.rect.y,
+            w: def.rect.w,
+            h: def.rect.h,
+        }
+    }
+
+    pub fn contains(&self, p: Vec2) -> bool {
+        p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + self.h
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

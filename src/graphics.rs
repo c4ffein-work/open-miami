@@ -35,6 +35,7 @@ mod op {
     pub const TRANSLATE: f32 = 9.0; // x y
     pub const ROTATE: f32 = 10.0; // angle
     pub const ROBOT: f32 = 11.0; // colorIdx poseIdx weaponIdx x y angle sizePx time
+    pub const SCALE: f32 = 12.0; // sx sy
 }
 
 /// Separator between entries in the per-frame text arena. renderer.js splits
@@ -250,10 +251,15 @@ impl Graphics {
         self.push(&[op::ROTATE, angle]);
     }
 
+    /// Scale the canvas around the current origin (camera zoom).
+    pub fn scale(&self, sx: f32, sy: f32) {
+        self.push(&[op::SCALE, sx, sy]);
+    }
+
     /// Draw a live-rendered 3D robot sprite. The JS renderer runs the
     /// robot-core 3D->2D pipeline for the requested (color, pose, weapon) at
-    /// the animation time `time` (quantized to a small number of frames and
-    /// cached as textures), and draws it as a rotated quad of `size_px` px.
+    /// the continuous animation time `time` — every frame, no caching — and
+    /// draws it as a rotated quad of `size_px` px.
     /// Indices follow renderer.js tables:
     ///   color:  0 coral, 1 red, 2 violet, 3 magenta
     ///   pose:   0 idle, 1 walk, 2 shoot, 3 hit

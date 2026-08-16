@@ -15,9 +15,14 @@ pub mod components;
 pub mod ecs;
 pub mod game;
 pub mod levels;
+#[rustfmt::skip]
+pub mod levels_data;
 pub mod pathfinding;
 #[cfg(target_arch = "wasm32")]
 pub mod render;
+#[cfg(target_arch = "wasm32")]
+pub mod render_comms;
+pub mod scenario;
 pub mod sim;
 pub mod systems;
 
@@ -44,11 +49,24 @@ mod wasm_entry {
     use crate::graphics::Graphics;
     use crate::input;
     use crate::level::Level;
-    use crate::levels::{level_def, BOSS_LEVEL, LEVEL_COUNT, PLAYER_SPAWN};
+    use crate::levels::{
+        floor_def, floor_title, level_def, level_index_for_floor_id, BOSS_LEVEL, LEVEL_COUNT,
+    };
     use crate::math::{Color, Vec2};
     use crate::render::*;
+    use crate::render_comms::{
+        render_comms, render_elevators, render_objective, render_zones_debug,
+    };
+    use crate::scenario::ScenarioState;
     use crate::systems::boss::any_boss_enraged;
     use crate::systems::*;
+
+    /// Seconds the "SECTOR PURGED / EXFILTRATE" card stays up after the player
+    /// extracts, before the next floor loads.
+    const EXTRACT_CARD_SECS: f32 = 2.4;
+
+    /// Longest simulation step a single frame may take (seconds).
+    const MAX_FRAME_DT: f32 = 0.1;
 
     #[wasm_bindgen]
     extern "C" {
@@ -66,6 +84,10 @@ mod wasm_entry {
     /// dia): a 60px tile draws a ~34px robot that sits over the hitbox like
     /// the primitive did.
     const ROBOT_TILE_PX: f32 = 60.0;
+
+    /// Kill flash: total duration and number of red/blue strobes.
+    const KILL_FLASH_SECS: f32 = 0.34;
+    const KILL_FLASH_STROBES: u32 = 4;
 
     /// The robot sprite's gun/forward points DOWN (+Y in image) at facingDeg=0,
     /// while the entity `angle` is atan2(aim) measured from +X. Rotating the
@@ -422,6 +444,12 @@ mod wasm_entry {
         thrown_system: ThrownWeaponSystem,
         stun_system: StunSystem,
         boss_system: BossSystem,
+        elevator_system: ElevatorSystem,
+        /// The running floor scenario (steps, comms feed, objective).
+        scenario: Option<ScenarioState>,
+        /// Set once the player has extracted: the destination floor id
+        /// (`0` = surface). The completion card plays, then the floor loads.
+        extracting: Option<usize>,
         level: Level,
         camera: Camera,
         last_time: f64,
@@ -442,9 +470,12 @@ mod wasm_entry {
         prev_player_health: i32,
         prev_player_ammo: i32,
         prev_enemies_alive: usize,
+        /// Seconds left on the kill flash (background strobes red/blue).
+        kill_flash: f32,
         prev_enemy_health: i32,
         prev_level_complete: bool,
         prev_boss_enraged: bool,
+        prev_all_dead: bool,
     }
 
     impl GameState {
@@ -454,7 +485,7 @@ mod wasm_entry {
             } else {
                 GameScreen::LevelSelect
             };
-            GameState {
+            let mut state = GameState {
                 screen,
                 selected_level: 0,
                 selected_menu_option: MenuOption::Play,
@@ -470,6 +501,9 @@ mod wasm_entry {
                 thrown_system: ThrownWeaponSystem,
                 stun_system: StunSystem,
                 boss_system: BossSystem,
+                elevator_system: ElevatorSystem,
+                scenario: None,
+                extracting: None,
                 level: Level::new(),
                 camera: Camera::new(),
                 last_time: 0.0,
@@ -488,25 +522,46 @@ mod wasm_entry {
                 prev_player_health: 100,
                 prev_player_ammo: 0,
                 prev_enemies_alive: 0,
+                kill_flash: 0.0,
                 prev_enemy_health: 0,
                 prev_level_complete: false,
                 prev_boss_enraged: false,
+                prev_all_dead: false,
+            };
+            // `?floor=N`: jump straight into that floor (editor "play" button,
+            // testing). Audio stays off until the first user gesture.
+            if !wants_visualizer() {
+                if let Some(level) = Self::url_start_floor() {
+                    state.selected_level = level;
+                    state.start_game();
+                }
             }
+            state
         }
 
-        fn start_game(&mut self) {
+        /// `?floor=N` in the URL (1-based; 14 = 13½): the level index to start
+        /// on directly, if present and valid.
+        fn url_start_floor() -> Option<usize> {
+            let q = url_query();
+            let q = q.trim_start_matches('?');
+            q.split('&').find_map(|kv| {
+                let (k, v) = kv.split_once('=')?;
+                if k != "floor" {
+                    return None;
+                }
+                let n: usize = v.parse().ok()?;
+                level_index_for_floor_id(n)
+            })
+        }
+
+        /// (Re)build the world for `selected_level` and start its scenario.
+        fn load_floor(&mut self) {
             self.world.clear();
             initialize_game(&mut self.world, self.selected_level);
+            self.scenario = Some(ScenarioState::new(floor_def(self.selected_level)));
+            self.extracting = None;
             self.death_time = 0.0;
             self.level_complete_time = 0.0;
-
-            // The Enter keypress that got us here is a user gesture, so it is now
-            // safe to start audio (browsers block it before the first gesture).
-            if !self.music_started {
-                self.audio.resume();
-                self.audio.start_music();
-                self.music_started = true;
-            }
 
             // Seed the sound-effect trackers from the fresh world so the first
             // frame does not fire spurious sounds.
@@ -517,6 +572,19 @@ mod wasm_entry {
             self.prev_enemy_health = total_enemy_health(&self.world);
             self.prev_level_complete = false;
             self.prev_boss_enraged = any_boss_enraged(&self.world);
+            self.prev_all_dead = self.prev_enemies_alive == 0;
+        }
+
+        fn start_game(&mut self) {
+            self.load_floor();
+
+            // The Enter keypress that got us here is a user gesture, so it is now
+            // safe to start audio (browsers block it before the first gesture).
+            if !self.music_started {
+                self.audio.resume();
+                self.audio.start_music();
+                self.music_started = true;
+            }
 
             // The hidden floor opens with a face-off before the fight.
             if self.selected_level == BOSS_LEVEL {
@@ -531,7 +599,10 @@ mod wasm_entry {
             let dt = if self.last_time == 0.0 {
                 0.016 // Initial frame assume 60fps
             } else {
-                ((current_time - self.last_time) / 1000.0) as f32
+                // Clamp long frames (first-frame atlas baking, tab switches,
+                // headless renderers) so actors cannot tunnel through walls
+                // or teleport across the floor in a single step.
+                (((current_time - self.last_time) / 1000.0) as f32).min(MAX_FRAME_DT)
             };
             self.last_time = current_time;
 
@@ -597,16 +668,21 @@ mod wasm_entry {
                     name,
                     self.viz_tab == tab,
                 );
-                if over && click {
+                if over && click && self.viz_tab != tab {
                     self.viz_tab = tab;
                     self.audio.resume(); // a click is a user gesture -> unlock audio
+                    match tab {
+                        // The LEVELS tab *is* the level + scenario editor: an
+                        // iframe filling the pane below the tab bar.
+                        VizTab::Levels => viz_inspect("levels"),
+                        // Any other tab closes the iframe panel (the sprites
+                        // gallery re-opens it when an item is clicked).
+                        _ => {
+                            viz_inspect_hide();
+                            self.viz_selected = -1;
+                        }
+                    }
                 }
-            }
-
-            // Leaving the sprites tab closes the inspector iframe panel.
-            if self.viz_tab != VizTab::Sprites && self.viz_selected >= 0 {
-                viz_inspect_hide();
-                self.viz_selected = -1;
             }
 
             match self.viz_tab {
@@ -1013,6 +1089,9 @@ mod wasm_entry {
 
         /// LEVELS tab: a scaled top-down map of the selected floor — walls, rogue
         /// spawns (by colour), the player start, and the boss on FLOOR 13½.
+        /// (When the LEVELS tab is open the level editor iframe covers this pane —
+        /// see `viz_inspect("levels")`; this wasm-drawn map stays as the fallback
+        /// behind it and for headless runs without the iframe.)
         fn draw_viz_levels(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
             let w = graphics.width();
             if viz_button(
@@ -1045,17 +1124,22 @@ mod wasm_entry {
             {
                 self.viz_level = (self.viz_level + 1) % LEVEL_COUNT;
             }
-            let title = if self.viz_level == BOSS_LEVEL {
-                "FLOOR 13\u{00BD}".to_string()
-            } else {
-                format!("FLOOR {}", self.viz_level + 1)
-            };
+            let floor = floor_def(self.viz_level);
+            let (ar, ag, ab) = floor.accent_rgb();
+            let accent = Color::from_rgba(ar, ag, ab, 255);
+            let title = floor_title(self.viz_level);
             graphics.draw_text(&title, Vec2::new(w / 2.0 - 70.0, 116.0), 26.0, Color::WHITE);
+            graphics.draw_text(
+                &format!("{} — {}", floor.name, floor.theme),
+                Vec2::new(w / 2.0 - 190.0, 140.0),
+                15.0,
+                accent,
+            );
 
-            // World space is roughly [0,1000] x [0,800]; scale it into a preview box.
+            // Scale the floor (~1000x800 world units) into a preview box.
             let (px, py, pw, ph) = (150.0f32, 155.0f32, 660.0f32, 528.0f32);
-            let sx = pw / 1000.0;
-            let sy = ph / 800.0;
+            let sx = pw / floor.width;
+            let sy = ph / floor.height;
             let map = |wx: f32, wy: f32| Vec2::new(px + wx * sx, py + wy * sy);
 
             graphics.draw_rectangle(Vec2::new(px, py), pw, ph, Color::new(0.09, 0.06, 0.12, 1.0));
@@ -1067,16 +1151,94 @@ mod wasm_entry {
                 Color::new(0.4, 0.3, 0.45, 1.0),
             );
 
-            let def = level_def(self.viz_level);
-            for &(x, y, ww, wh) in &def.walls {
+            // Rooms (annotation) and zones (triggers) under everything.
+            for r in floor.rooms {
                 graphics.draw_rectangle(
-                    map(x, y),
-                    ww * sx,
-                    wh * sy,
+                    map(r.rect.x, r.rect.y),
+                    r.rect.w * sx,
+                    r.rect.h * sy,
+                    Color::new(accent.r, accent.g, accent.b, 0.06),
+                );
+                graphics.draw_rectangle_lines(
+                    map(r.rect.x, r.rect.y),
+                    r.rect.w * sx,
+                    r.rect.h * sy,
+                    1.0,
+                    Color::new(accent.r, accent.g, accent.b, 0.35),
+                );
+                let p = map(r.rect.x, r.rect.y);
+                graphics.draw_text(
+                    r.label,
+                    Vec2::new(p.x + 3.0, p.y + 11.0),
+                    11.0,
+                    Color::new(0.85, 0.82, 1.0, 0.55),
+                );
+            }
+            for z in floor.zones {
+                graphics.draw_rectangle_lines(
+                    map(z.rect.x, z.rect.y),
+                    z.rect.w * sx,
+                    z.rect.h * sy,
+                    1.0,
+                    Color::new(0.2, 0.9, 0.9, 0.45),
+                );
+                let p = map(z.rect.x + z.rect.w, z.rect.y + z.rect.h);
+                graphics.draw_text(
+                    z.id,
+                    Vec2::new(p.x - z.id.len() as f32 * 5.0 - 4.0, p.y - 3.0),
+                    11.0,
+                    Color::new(0.2, 0.9, 0.9, 0.7),
+                );
+            }
+            for wall in floor.walls {
+                graphics.draw_rectangle(
+                    map(wall.x, wall.y),
+                    wall.w * sx,
+                    wall.h * sy,
                     Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
                 );
             }
-            for &(x, y, t) in &def.enemies {
+            // Elevators: entry (green) and exits (accent, closed = dim).
+            let cars =
+                std::iter::once((&floor.entry, false)).chain(floor.exits.iter().map(|e| (e, true)));
+            for (e, is_exit) in cars {
+                let col = if !is_exit {
+                    Color::from_rgba(61, 255, 154, 255)
+                } else if e.open {
+                    accent
+                } else {
+                    Color::new(accent.r, accent.g, accent.b, 0.55)
+                };
+                let p = map(e.rect.x, e.rect.y);
+                graphics.draw_rectangle(
+                    p,
+                    e.rect.w * sx,
+                    e.rect.h * sy,
+                    Color::new(col.r, col.g, col.b, 0.22),
+                );
+                graphics.draw_rectangle_lines(p, e.rect.w * sx, e.rect.h * sy, 1.5, col);
+                let label = if is_exit {
+                    format!(
+                        "{} -> {}",
+                        e.label,
+                        if e.to == 0 {
+                            "SURFACE".to_string()
+                        } else {
+                            format!("F{}", e.to)
+                        }
+                    )
+                } else {
+                    format!("{} (entry)", e.label)
+                };
+                let above = e.rect.y > floor.height / 2.0;
+                let ty = if above {
+                    p.y - 4.0
+                } else {
+                    p.y + e.rect.h * sy + 12.0
+                };
+                graphics.draw_text(&label, Vec2::new(p.x, ty), 12.0, col);
+            }
+            for &(x, y, t) in &level_def(self.viz_level).enemies {
                 let col = match t {
                     EnemyType::Idle => Color::from_rgba(224, 49, 66, 255),
                     EnemyType::Wandering => Color::from_rgba(150, 70, 210, 255),
@@ -1084,31 +1246,47 @@ mod wasm_entry {
                 };
                 graphics.draw_circle(map(x, y), 5.0, col);
             }
+            for pk in floor.pickups {
+                let p = map(pk.x, pk.y);
+                graphics.draw_rectangle(
+                    Vec2::new(p.x - 4.0, p.y - 3.0),
+                    8.0,
+                    6.0,
+                    Color::new(1.0, 0.85, 0.3, 1.0),
+                );
+            }
             if self.viz_level == BOSS_LEVEL {
                 graphics.draw_shoggoth(map(BOSS_SPAWN.x, BOSS_SPAWN.y), 14.0, false);
             }
 
-            let ps = map(PLAYER_SPAWN.x, PLAYER_SPAWN.y);
+            let spawn = floor.player_spawn();
+            let ps = map(spawn.x, spawn.y);
             graphics.draw_circle(ps, 6.0, Color::from_rgba(217, 119, 87, 255));
-            graphics.draw_text(
-                "start",
-                Vec2::new(ps.x - 16.0, ps.y - 12.0),
-                14.0,
-                Color::from_rgba(217, 119, 87, 255),
-            );
 
             let ly = py + ph + 22.0;
             graphics.draw_text(
-                "coral = you    red / violet / magenta = rogues    smiley = boss",
+                "coral = you   red / violet / magenta = rogues   green = entry   accent = exits   cyan = zones",
                 Vec2::new(px, ly),
-                15.0,
+                14.0,
                 Color::GRAY,
             );
             graphics.draw_text(
-                &format!("{} rogues", def.enemies.len()),
-                Vec2::new(px + pw - 96.0, ly),
-                15.0,
+                &format!(
+                    "{} rogues, {} steps, {} exit{}",
+                    floor.spawns.len(),
+                    floor.scenario.len(),
+                    floor.exits.len(),
+                    if floor.exits.len() == 1 { "" } else { "s" }
+                ),
+                Vec2::new(px, ly + 18.0),
+                14.0,
                 Color::GRAY,
+            );
+            graphics.draw_text(
+                &format!("> {}", floor.objective),
+                Vec2::new(px, ly + 36.0),
+                14.0,
+                accent,
             );
         }
 
@@ -1258,17 +1436,22 @@ mod wasm_entry {
                 arrow_color,
             );
 
-            // Level number
-            let level_text = if self.selected_level == BOSS_LEVEL {
-                "FLOOR 13\u{00BD}".to_string()
-            } else {
-                format!("FLOOR {}", self.selected_level + 1)
-            };
+            // Level number + the floor's name in its accent colour
+            let level_text = floor_title(self.selected_level);
             graphics.draw_text(
                 &level_text,
                 Vec2::new(screen_width / 2.0 - 80.0, level_y),
                 40.0,
                 Color::WHITE,
+            );
+            let floor = floor_def(self.selected_level);
+            let (ar, ag, ab) = floor.accent_rgb();
+            let name_w = floor.name.chars().count() as f32 * 22.0 * 0.42;
+            graphics.draw_text(
+                floor.name,
+                Vec2::new(screen_width / 2.0 - name_w / 2.0, level_y + 34.0),
+                22.0,
+                Color::from_rgba(ar, ag, ab, 255),
             );
 
             // Right arrow
@@ -1513,9 +1696,15 @@ mod wasm_entry {
             if let Some(pos) = player_pos {
                 self.camera.follow_player(pos);
             }
+            self.camera
+                .set_viewport(graphics.width(), graphics.height());
+
+            // Shift = look-ahead: ease the view toward the mouse while held.
+            let mouse_screen_pos = input::mouse_position();
+            let looking = input::is_key_down(input::keys::SHIFT);
+            self.camera.update_look(mouse_screen_pos, looking, dt);
 
             // Get mouse position in world coordinates
-            let mouse_screen_pos = input::mouse_position();
             let mouse_world_pos = self.camera.screen_to_world(mouse_screen_pos);
 
             // Handle input (only if player is alive)
@@ -1547,6 +1736,11 @@ mod wasm_entry {
             if self.debug_enabled && input::is_key_pressed("i") {
                 self.show_infos = !self.show_infos;
             }
+            // Debug: with the overlays on, K downs every rogue (fast-forwards
+            // the all-dead scenario steps / exit doors when testing a floor).
+            if self.debug_enabled && self.show_infos && input::is_key_pressed("k") {
+                purge_all_enemies(&mut self.world);
+            }
 
             // Run game systems
             self.stun_system.run(&mut self.world, dt);
@@ -1561,6 +1755,38 @@ mod wasm_entry {
             // Drop weapons from downed enemies (player collects via the E key)
             self.pickup_system.run(&mut self.world, dt);
 
+            // Scenario (triggers -> dialogue / waves / doors / objective) and
+            // elevator extraction. Both keep running while the completion
+            // card plays so the doors stay lit.
+            if let Some(sc) = self.scenario.as_mut() {
+                sc.tick(&mut self.world, dt);
+                for sfx in sc.drain_sfx() {
+                    match sfx {
+                        "elevator" => self.audio.play_elevator(),
+                        "mask_crack" => self.audio.play_mask_crack(),
+                        "level_clear" => self.audio.play_level_clear(),
+                        "pickup" => self.audio.play_pickup(),
+                        "throw" => self.audio.play_throw(),
+                        "enemy_down" => self.audio.play_enemy_down(),
+                        _ => {}
+                    }
+                }
+            }
+            self.elevator_system.run(&mut self.world, dt);
+            if self.extracting.is_none() && player_alive {
+                if let Some(to) = ElevatorSystem::extraction(&self.world) {
+                    self.extracting = Some(to);
+                    self.level_complete_time = 0.0;
+                    self.audio.play_elevator();
+                }
+            }
+
+            let accent = self
+                .scenario
+                .as_ref()
+                .map(|sc| sc.floor().accent_rgb())
+                .unwrap_or((217, 119, 87));
+
             // Apply camera transform for world rendering
             self.camera.apply(graphics);
 
@@ -1568,18 +1794,44 @@ mod wasm_entry {
             let (view_min, view_max) = self
                 .camera
                 .visible_bounds(graphics.width(), graphics.height());
-            self.level.render(graphics, view_min, view_max);
+            // Kill flash: the floor strobes red / blue / red / blue for a beat.
+            let tint = if self.kill_flash > 0.0 {
+                self.kill_flash = (self.kill_flash - dt).max(0.0);
+                let phase = ((KILL_FLASH_SECS - self.kill_flash) / KILL_FLASH_SECS
+                    * KILL_FLASH_STROBES as f32) as u32;
+                let fade = self.kill_flash / KILL_FLASH_SECS; // 1 -> 0
+                Some(if phase % 2 == 0 {
+                    Color::new(0.85, 0.08, 0.16, 0.55 * fade)
+                } else {
+                    Color::new(0.10, 0.25, 0.95, 0.55 * fade)
+                })
+            } else {
+                None
+            };
+            self.level.render(graphics, view_min, view_max, tint);
 
             // Render walls from the world
             render_walls(&self.world, graphics, self.show_infos);
 
-            // Render all entities
-            render_entities(&self.world, graphics, self.show_infos);
+            // Elevators (recessed door frames; exits light up when open) and,
+            // in debug mode, the scenario trigger zones.
+            render_elevators(
+                &self.world,
+                graphics,
+                accent,
+                self.last_time as f32 / 1000.0,
+            );
+            if self.show_infos {
+                render_zones_debug(&self.world, graphics);
+            }
 
-            // Overlay live 3D robot sprites on top of the primitives (the
-            // primitive draw acts as the fallback until the renderer has the
-            // robot pipeline ready). Drawn while the camera transform is still
-            // applied so world-space positions land correctly (zoom is 1.0).
+            // Render all entities except the player/rogue bots themselves
+            // (bullets, pickups, boss, debug overlays...).
+            render_entities(&self.world, graphics, self.show_infos, false);
+
+            // The player and rogues are the live 3D robot sprites, drawn while
+            // the camera transform (incl. zoom) is still applied so world-space
+            // positions and sizes land correctly.
             draw_robot_entities(&self.world, graphics, self.last_time as f32 / 1000.0);
 
             // Reset camera for UI rendering
@@ -1600,12 +1852,15 @@ mod wasm_entry {
                 self.death_time = 0.0;
             }
 
-            let level_complete = player_alive && enemies_alive == 0;
+            // The floor is complete once the player has EXTRACTED through an
+            // open exit elevator (kill-all only opens the doors).
+            let level_complete = player_alive && self.extracting.is_some();
             if level_complete {
                 self.level_complete_time += dt;
             } else {
                 self.level_complete_time = 0.0;
             }
+            let all_dead = enemies_alive == 0;
 
             // --- Sound effects: fire one-shots by comparing to the previous frame ---
             let player_alive_now = is_player_alive(&self.world);
@@ -1617,6 +1872,7 @@ mod wasm_entry {
             }
             if enemies_alive < self.prev_enemies_alive {
                 self.audio.play_enemy_down();
+                self.kill_flash = KILL_FLASH_SECS;
             } else if enemy_health < self.prev_enemy_health {
                 self.audio.play_hit();
             }
@@ -1629,7 +1885,7 @@ mod wasm_entry {
             } else if player_alive_now && health < self.prev_player_health {
                 self.audio.play_player_hurt();
             }
-            if level_complete && !self.prev_level_complete {
+            if all_dead && !self.prev_all_dead {
                 self.audio.play_level_clear();
             }
 
@@ -1640,6 +1896,7 @@ mod wasm_entry {
             self.prev_enemy_health = enemy_health;
             self.prev_level_complete = level_complete;
             self.prev_boss_enraged = boss_enraged;
+            self.prev_all_dead = all_dead;
 
             // Render UI
             render_ui(
@@ -1656,21 +1913,37 @@ mod wasm_entry {
                 self.show_infos,
             );
 
+            // Objective line under the HUD + the intercepted comms feed
+            // (bottom-left, above the controls hint), both in screen space.
+            if let Some(sc) = self.scenario.as_ref() {
+                if player_alive && !level_complete {
+                    render_objective(graphics, sc, accent, 150.0);
+                }
+                render_comms(graphics, sc, accent, graphics.height() - 34.0);
+            }
+
+            // Extraction card done -> ride to the next floor (13's car jams
+            // into 13½ and its boss intro; the boss floor's car goes home).
+            if level_complete && self.level_complete_time >= EXTRACT_CARD_SECS {
+                match self.extracting.and_then(level_index_for_floor_id) {
+                    Some(next) => {
+                        self.selected_level = next;
+                        self.start_game();
+                    }
+                    None => {
+                        self.scenario = None;
+                        self.extracting = None;
+                        self.screen = GameScreen::LevelSelect;
+                    }
+                }
+                return;
+            }
+
             // Handle restart
             if !player_alive && input::is_key_down("r") {
-                self.world.clear();
-                initialize_game(&mut self.world, self.selected_level);
-                self.death_time = 0.0;
-                self.level_complete_time = 0.0;
-                // Restart the music (it was stopped on death) and re-seed trackers.
+                self.load_floor();
+                // Restart the music (it was stopped on death).
                 self.audio.start_music();
-                self.prev_player_alive = true;
-                self.prev_player_health = get_player_health(&self.world);
-                self.prev_player_ammo = get_player_ammo(&self.world);
-                self.prev_enemies_alive = count_alive_enemies(&self.world);
-                self.prev_enemy_health = total_enemy_health(&self.world);
-                self.prev_level_complete = false;
-                self.prev_boss_enraged = any_boss_enraged(&self.world);
             }
 
             // Handle escape to open pause menu

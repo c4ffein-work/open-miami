@@ -7,11 +7,23 @@
   (rects, circles, lines, arcs, text, transforms, robots) and hands it to
   `window.frameRender` once per frame — a single zero-copy wasm->JS crossing
 - `renderer.js` owns the canvas/GPU: one batched triangle pipeline, VT323 text
-  via a lazily-built glyph atlas, robots live-rendered through the
-  proto/robot-core.js 3D->2D pipeline into a cached texture atlas (animation
-  time is quantized to a few frames per pose)
+  via a lazily-built glyph atlas, robots rendered LIVE every frame through the
+  robot-core.js 3D->2D pipeline (`createRobotPipeline(gl)` on the same GL
+  context, into a per-frame scratch tile atlas — continuous animation time, no
+  cache/quantization)
 - The command opcode tables in src/graphics.rs (`mod op`) and renderer.js must
   stay in sync
+
+## Repo layout (post-`proto/`)
+- Root: `index.html`, `renderer.js`, `robot-core.js` (the 3D->2D robot pipeline, imported by renderer.js at runtime), `serve.py` (dev server, no-store + level-editor write API)
+- `tools/`: the `?viz` panels — `editor.html` (character inspector, SPRITES tab), `shoggoth.html` / `shoggoth-v2.html` (boss v1/v2), `levels.html` + `levels-editor*.js` (level + scenario editor, LEVELS tab) — and `gen_levels.py`
+- `levels/`: `floor_01..13.json`, `floor_13h.json`, `index.json` — the floors' single source of truth (format: `docs/SCENARIO_FORMAT.md`)
+- `src/levels_data.rs` is GENERATED from `levels/*.json` by `make gen-levels`; `make check-levels` validates + checks it is current. Never hand-edit it.
+
+## `?viz` toolbox (one entry point)
+- `/?viz` tabs: SPRITES (click a character → 3D/2D inspector iframe), MUSICS (tracker + SFX), LEVELS (the level + scenario editor iframe, full pane), EFFECTS
+- `/?floor=N` starts the game directly on floor N (14 = 13½). With debug overlays on (I), **K** purges all rogues (debug/e2e helper)
+- Level editor SAVE = `PUT /levels/<file>.json` to serve.py, guarded by the `X-Editor-Token` header (token from `$EDITOR_TOKEN` or the gitignored `.editor-token`, printed at server start). COPY DIFF gives a `patch -p1` unified diff.
 
 ## Verification Requirements
 - ALWAYS run `make verify` before declaring any task complete or saying "we're done"

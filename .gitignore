@@ -29,3 +29,10 @@ Thumbs.db
 
 # Session screenshots (generated, not part of the project)
 /shots/
+
+# local editor write token for serve.py (never commit)
+.editor-token
+__pycache__/
+# reference audio / inspirations for analysis only — local, never shipped, never committed
+.audio-ref/
+inspirations/

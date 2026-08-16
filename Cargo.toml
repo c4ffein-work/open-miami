@@ -35,6 +35,11 @@ web-sys = { version = "0.3", features = [
     "AudioBuffer",
     "AudioBufferSourceNode",
     "AudioScheduledSourceNode",
+    "ConvolverNode",
+    "DynamicsCompressorNode",
+    "WaveShaperNode",
+    "OverSampleType",
+    "DelayNode",
 ] }
 
 [lib]

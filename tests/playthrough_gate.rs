@@ -36,7 +36,7 @@ use open_miami::components::{EnemyType, Position};
 use open_miami::ecs::world::Wall;
 use open_miami::ecs::World;
 use open_miami::game::{spawn_enemy_with_type, spawn_player};
-use open_miami::levels::{level_def, LEVEL_COUNT, PLAYER_SPAWN};
+use open_miami::levels::{level_def, LEVEL_COUNT};
 use open_miami::math::Vec2;
 use open_miami::sim::Simulation;
 use std::collections::HashSet;
@@ -130,6 +130,7 @@ fn unreachable_enemies(level: usize) -> Vec<(f32, f32)> {
     const PLAYER_RADIUS: f32 = 15.0;
 
     let def = level_def(level);
+    let player_spawn = def.player_spawn;
     let walls: Vec<Wall> = def
         .walls
         .iter()
@@ -148,13 +149,14 @@ fn unreachable_enemies(level: usize) -> Vec<(f32, f32)> {
 
     // Flood fill the walkable region reachable from the player spawn.
     let mut seen: HashSet<(i32, i32)> = HashSet::new();
-    let mut stack = vec![PLAYER_SPAWN];
-    seen.insert(key(PLAYER_SPAWN));
+    let mut stack = vec![player_spawn];
+    seen.insert(key(player_spawn));
     while let Some(p) = stack.pop() {
         for (dx, dy) in [(STEP, 0.0), (-STEP, 0.0), (0.0, STEP), (0.0, -STEP)] {
             let np = Vec2::new(p.x + dx, p.y + dy);
-            // Bound the search to the playable area for speed.
-            if np.x < 50.0 || np.x > 950.0 || np.y < 20.0 || np.y > 780.0 {
+            // Bound the search to the playable area for speed (every floor is
+            // ~1000x800 with a 20px perimeter wall).
+            if np.x < 20.0 || np.x > 980.0 || np.y < 20.0 || np.y > 780.0 {
                 continue;
             }
             if seen.contains(&key(np)) || !free(np) {

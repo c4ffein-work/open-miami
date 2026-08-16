@@ -93,9 +93,20 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
     )?;
     canvas.add_event_listener_with_callback("mouseup", mouseup_closure.as_ref().unchecked_ref())?;
 
+    // Right-click is the THROW button: swallow the browser context menu on the
+    // game canvas so it never pops over the action.
+    let contextmenu_closure = Closure::wrap(Box::new(|event: MouseEvent| {
+        event.prevent_default();
+    }) as Box<dyn FnMut(_)>);
+    canvas.add_event_listener_with_callback(
+        "contextmenu",
+        contextmenu_closure.as_ref().unchecked_ref(),
+    )?;
+
     mousemove_closure.forget();
     mousedown_closure.forget();
     mouseup_closure.forget();
+    contextmenu_closure.forget();
 
     Ok(())
 }

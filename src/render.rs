@@ -5,7 +5,10 @@ use crate::graphics::Graphics;
 use crate::math::{Color, Vec2};
 
 /// Render all entities in the world
-pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
+/// `draw_bots` selects whether the player/rogue sprites are drawn here; the
+/// game passes false and draws them as live 3D robots instead (the boss is
+/// always drawn here).
+pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool, draw_bots: bool) {
     // Render debug pathfinding info first (behind everything)
     if show_infos {
         render_debug_pathfinding(world, graphics);
@@ -29,13 +32,17 @@ pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool) {
     render_thrown_weapons(world, graphics);
 
     // Render enemies
-    render_enemies(world, graphics);
+    if draw_bots {
+        render_enemies(world, graphics);
+    }
 
     // Render the boss (big; under the player)
     render_bosses(world, graphics);
 
     // Render player (on top)
-    render_player(world, graphics);
+    if draw_bots {
+        render_player(world, graphics);
+    }
 }
 
 /// Render the shoggoth boss (drawn specially, not as a regular sprite).
@@ -505,9 +512,9 @@ pub fn render_ui(
             let y_offset = y_amplitude * (anim_time * y_speed * 2.0 * std::f32::consts::PI).sin();
 
             graphics.draw_text(
-                "EXFILTRATE",
+                "EXFILTRATING",
                 Vec2::new(
-                    screen_width / 2.0 - 90.0,
+                    screen_width / 2.0 - 100.0,
                     screen_height / 2.0 + 80.0 + y_offset,
                 ),
                 30.0,
@@ -534,6 +541,14 @@ pub fn render_ui(
             16.0,
             info_color,
         );
+        if show_infos {
+            graphics.draw_text(
+                "K: purge all rogues (debug)",
+                Vec2::new(screen_width - 280.0, 50.0),
+                14.0,
+                Color::GRAY,
+            );
+        }
     }
 
     // Controls info

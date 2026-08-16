@@ -1,8 +1,9 @@
 // Game setup and entity spawning helpers
 use crate::components::*;
 use crate::ecs::{Entity, World};
-use crate::levels::{level_def, BOSS_LEVEL, PLAYER_SPAWN};
+use crate::levels::{floor_def, BOSS_LEVEL};
 use crate::math::Vec2;
+use crate::scenario::spawn_floor_markers;
 use crate::systems::boss::{BOSS_ATTACK_RANGE, BOSS_MASK_SPEED, BOSS_MAX_HEALTH, BOSS_RADIUS};
 use crate::systems::combat::CombatSystem;
 
@@ -81,25 +82,53 @@ pub fn spawn_enemy(world: &mut World, position: Vec2) -> Entity {
     spawn_enemy_with_type(world, position, EnemyType::Idle)
 }
 
-/// Initialize a new game world with the player and a level's designed layout.
+/// Spawn a weapon lying on the floor (collected with the pick-up key).
+pub fn spawn_pickup(world: &mut World, position: Vec2, weapon_type: WeaponType) -> Entity {
+    let entity = world.spawn();
+    world.add_component(entity, WeaponPickup::new(weapon_type));
+    world.add_component(entity, Position::from_vec2(position));
+    world.add_component(entity, Radius::new(14.0));
+    entity
+}
+
+/// Initialize a new game world with the player and a floor's designed layout:
+/// walls, the initial rogues, floor pickups, the entry/exit elevators and the
+/// trigger zones. The player spawns in the entry elevator. (Scenario steps —
+/// dialogue, waves, door openings — are driven by `scenario::ScenarioState`,
+/// which the caller owns.)
 pub fn initialize_game(world: &mut World, level: usize) {
-    // Spawn player (same position for all levels)
-    spawn_player(world, PLAYER_SPAWN);
+    let floor = floor_def(level);
 
-    // Build the level from its data-driven definition
-    let def = level_def(level);
+    // Spawn the player in the entry car.
+    spawn_player(world, floor.player_spawn());
 
-    for (x, y, width, height) in def.walls {
-        world.add_wall(x, y, width, height);
+    for wall in floor.walls {
+        world.add_wall(wall.x, wall.y, wall.w, wall.h);
     }
 
-    for (x, y, enemy_type) in def.enemies {
-        spawn_enemy_with_type(world, Vec2::new(x, y), enemy_type);
+    for s in floor.spawns {
+        spawn_enemy_with_type(world, Vec2::new(s.x, s.y), s.kind);
     }
+
+    for p in floor.pickups {
+        spawn_pickup(world, Vec2::new(p.x, p.y), p.weapon);
+    }
+
+    spawn_floor_markers(world, floor);
 
     // The hidden final floor: the shoggoth waits below.
     if level == BOSS_LEVEL {
         spawn_boss(world, BOSS_SPAWN);
+    }
+}
+
+/// Debug helper: down every rogue on the floor (used by the debug **K** key
+/// and by tests to exercise the all-dead / extraction flow quickly).
+pub fn purge_all_enemies(world: &mut World) {
+    for entity in world.query::<Enemy>() {
+        if let Some(h) = world.get_component_mut::<Health>(entity) {
+            h.take_damage(h.max.max(1));
+        }
     }
 }
 
