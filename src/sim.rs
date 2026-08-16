@@ -225,7 +225,7 @@ impl Simulation {
             world,
             stun: StunSystem,
             weapon: WeaponUpdateSystem,
-            ai: AISystem,
+            ai: AISystem::default(),
             boss: BossSystem,
             movement: MovementSystem,
             combat: CombatSystem,
