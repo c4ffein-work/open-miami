@@ -50,17 +50,8 @@ mod wasm_entry {
     use crate::systems::boss::any_boss_enraged;
     use crate::systems::*;
 
-    // JS bridge: composite a pre-baked top-down 3D sprite onto the shared
-    // #glcanvas 2D context. Mirrors the wasm->JS extern pattern used elsewhere.
-    // `key` is "<color>:<pose>" (e.g. "coral:idle"); (x,y) is the draw position
-    // in the current canvas transform (world space under the camera transform);
-    // `angle` is the facing in radians; `scale` multiplies the atlas native px.
-    // Returns false when the atlas is not ready yet, so the caller can keep the
-    // primitive draw as a fallback.
     #[wasm_bindgen]
     extern "C" {
-        #[wasm_bindgen(js_namespace = window, js_name = drawBaked)]
-        fn draw_baked(key: &str, x: f32, y: f32, angle: f32, scale: f32) -> bool;
         // ?viz inspector panel: open the right-hand iframe on a gallery item /
         // hide it again (both defined in index.html).
         #[wasm_bindgen(js_namespace = window, js_name = vizInspect)]
@@ -69,48 +60,71 @@ mod wasm_entry {
         fn viz_inspect_hide();
     }
 
-    /// On-screen size (px) of a baked sprite tile before per-entity scaling.
-    /// The atlas tiles are square and the robot fills ~55% of the tile, so this
-    /// is tuned so the baked bot roughly matches the actor hitbox (player radius
-    /// 15 -> 30px dia, enemy radius 12 -> 24px dia): a 60px tile draws a ~34px
-    /// robot that sits over the hitbox like the primitive did.
-    const BAKED_TILE_PX: f32 = 60.0;
+    /// On-screen size (px) of a robot sprite tile. The tile is square and the
+    /// robot fills ~55% of it, so this is tuned so the bot roughly matches the
+    /// actor hitbox (player radius 15 -> 30px dia, enemy radius 12 -> 24px
+    /// dia): a 60px tile draws a ~34px robot that sits over the hitbox like
+    /// the primitive did.
+    const ROBOT_TILE_PX: f32 = 60.0;
 
-    /// Baked sprite atlas tile size (must match `size` used in index.html).
-    const BAKED_ATLAS_PX: f32 = 256.0;
-
-    /// The baked sprite's gun/forward points DOWN (+Y in image) at facingDeg=0,
+    /// The robot sprite's gun/forward points DOWN (+Y in image) at facingDeg=0,
     /// while the entity `angle` is atan2(aim) measured from +X. Rotating the
-    /// image by (angle - PI/2) makes the baked gun point along the aim/shoot
+    /// image by (angle - PI/2) makes the gun point along the aim/shoot
     /// direction (where bullets actually fly), which reads correctly top-down.
-    const BAKED_ANGLE_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
+    const ROBOT_ANGLE_OFFSET: f32 = -std::f32::consts::FRAC_PI_2;
 
-    /// Pick the atlas color name for the player.
-    const PLAYER_BAKED_COLOR: &str = "coral";
+    // Index tables shared with renderer.js (see Graphics::draw_robot).
+    const ROBOT_COLOR_CORAL: u32 = 0;
+    const ROBOT_POSE_IDLE: u32 = 0;
+    const ROBOT_POSE_WALK: u32 = 1;
+    const ROBOT_POSE_SHOOT: u32 = 2;
+    const ROBOT_POSE_HIT: u32 = 3;
+
+    /// Map a held weapon to the robot-core weapon model index
+    /// (0 fist, 1 pistol, 2 machinegun, 3 shotgun).
+    fn robot_weapon_idx(weapon: Option<crate::components::WeaponType>) -> u32 {
+        use crate::components::WeaponType;
+        match weapon {
+            None | Some(WeaponType::Melee) => 0,
+            Some(WeaponType::Pistol) => 1,
+            Some(WeaponType::MachineGun) => 2,
+            Some(WeaponType::Shotgun) => 3,
+        }
+    }
+
+    /// The hit-flinch cycle length in robot-core's posePlan (seconds). Used to
+    /// park dead bots on a settled late frame instead of looping the flinch.
+    const ROBOT_HIT_PERIOD: f32 = 1.3;
 
     /// Draw the player and rogue enemies as baked 3D sprites on top of the
     /// primitive draw. Must be called while the camera transform is applied so
     /// that world coordinates land on screen (camera zoom is 1.0). Returns once
     /// the atlas is ready; until then `draw_baked` no-ops and the primitives
     /// (already drawn by `render_entities`) remain visible.
-    fn draw_baked_entities(world: &World) {
+    /// Draw the player and rogue enemies as live-rendered 3D robot sprites on
+    /// top of the primitive draw. Must be called while the camera transform is
+    /// applied so that world coordinates land on screen (camera zoom is 1.0).
+    /// `now` is elapsed time in seconds and drives the pose animations; each
+    /// entity's clock is offset by its id so the squad doesn't move in
+    /// phase-locked unison, and knocked-down bots play the hit flinch synced
+    /// to the moment the stun landed.
+    fn draw_robot_entities(world: &World, graphics: &Graphics, now: f32) {
         use crate::components::{AIState, EnemyType};
         use crate::components::{
-            Boss, Enemy, Health, Player, Position, Rotation, Stunned, Velocity, AI,
+            Boss, Enemy, Health, Player, Position, Rotation, Stunned, Velocity, Weapon, AI,
         };
+        use crate::systems::thrown::STUN_DURATION;
 
-        let scale = BAKED_TILE_PX / BAKED_ATLAS_PX;
-
-        // Determines a pose name from motion / combat / knockdown state.
-        fn pose_for(speed: f32, prone: bool, attacking: bool) -> &'static str {
+        // Determines a pose index from motion / combat / knockdown state.
+        fn pose_for(speed: f32, prone: bool, attacking: bool) -> u32 {
             if prone {
-                "hit"
+                ROBOT_POSE_HIT
             } else if attacking {
-                "shoot"
+                ROBOT_POSE_SHOOT
             } else if speed > 6.0 {
-                "walk"
+                ROBOT_POSE_WALK
             } else {
-                "idle"
+                ROBOT_POSE_IDLE
             }
         }
 
@@ -128,20 +142,44 @@ mod wasm_entry {
                 (Some(p), Some(r), Some(h), Some(a)) => (p, r, h, a),
                 _ => continue,
             };
-            let color = match ai.initial_type {
-                EnemyType::Idle => "red",           // SENTINEL
-                EnemyType::Wandering => "violet",   // DRIFTER
-                EnemyType::Patrolling => "magenta", // HUNTER
+            let color_idx = match ai.initial_type {
+                EnemyType::Idle => 1,       // SENTINEL - red
+                EnemyType::Wandering => 2,  // DRIFTER - violet
+                EnemyType::Patrolling => 3, // HUNTER - magenta
             };
-            let prone = health.is_dead() || world.has_component::<Stunned>(entity);
+            let stunned = world.get_component::<Stunned>(entity);
+            let prone = health.is_dead() || stunned.is_some();
             let speed = world
                 .get_component::<Velocity>(entity)
                 .map(|v| (v.x * v.x + v.y * v.y).sqrt())
                 .unwrap_or(0.0);
             let attacking = ai.state == AIState::SurePlayerSeen && ai.attack_timer > 0.0;
-            let pose = pose_for(speed, prone, attacking);
-            let key = format!("{color}:{pose}");
-            draw_baked(&key, pos.x, pos.y, rot.angle + BAKED_ANGLE_OFFSET, scale);
+            let pose_idx = pose_for(speed, prone, attacking);
+            let weapon_idx =
+                robot_weapon_idx(world.get_component::<Weapon>(entity).map(|w| w.weapon_type));
+            // De-sync the squad: each bot's animation clock starts at a
+            // different phase derived from its entity id.
+            let phase = (entity.0 % 97) as f32 * 0.173;
+            let time = if health.is_dead() {
+                // Park dead bots on a settled late flinch frame (the flinch
+                // envelope has fully decayed by then) instead of looping it.
+                ROBOT_HIT_PERIOD * 0.9
+            } else if let Some(stun) = stunned {
+                // Time since the knockdown landed, so the flinch spike plays
+                // exactly once at impact and settles while the stun runs out.
+                (STUN_DURATION - stun.timer).clamp(0.0, ROBOT_HIT_PERIOD * 0.9)
+            } else {
+                now + phase
+            };
+            graphics.draw_robot(
+                color_idx,
+                pose_idx,
+                weapon_idx,
+                Vec2::new(pos.x, pos.y),
+                rot.angle + ROBOT_ANGLE_OFFSET,
+                ROBOT_TILE_PX,
+                time,
+            );
         }
 
         // --- Player (CL4-UD3, coral) ---
@@ -160,9 +198,19 @@ mod wasm_entry {
                         .unwrap_or(0.0);
                     let firing =
                         crate::input::is_mouse_button_down(crate::input::mouse_buttons::LEFT);
-                    let pose = pose_for(speed, false, firing);
-                    let key = format!("{PLAYER_BAKED_COLOR}:{pose}");
-                    draw_baked(&key, pos.x, pos.y, angle + BAKED_ANGLE_OFFSET, scale);
+                    let pose_idx = pose_for(speed, false, firing);
+                    let weapon_idx = robot_weapon_idx(
+                        world.get_component::<Weapon>(player).map(|w| w.weapon_type),
+                    );
+                    graphics.draw_robot(
+                        ROBOT_COLOR_CORAL,
+                        pose_idx,
+                        weapon_idx,
+                        Vec2::new(pos.x, pos.y),
+                        angle + ROBOT_ANGLE_OFFSET,
+                        ROBOT_TILE_PX,
+                        now,
+                    );
                 }
             }
         }
@@ -516,6 +564,9 @@ mod wasm_entry {
 
             // Keep the music scheduler fed regardless of screen.
             self.audio.update(current_time / 1000.0);
+
+            // Hand the completed frame to the JS WebGL renderer.
+            graphics.flush();
 
             // Update input state for next frame
             input::end_frame();
@@ -1525,11 +1576,11 @@ mod wasm_entry {
             // Render all entities
             render_entities(&self.world, graphics, self.show_infos);
 
-            // Overlay baked 3D sprites on top of the primitives (no-op until the
-            // JS atlas is ready, so the primitive draw acts as the fallback).
-            // Drawn while the camera transform is still applied so world-space
-            // positions land correctly (camera zoom is 1.0).
-            draw_baked_entities(&self.world);
+            // Overlay live 3D robot sprites on top of the primitives (the
+            // primitive draw acts as the fallback until the renderer has the
+            // robot pipeline ready). Drawn while the camera transform is still
+            // applied so world-space positions land correctly (zoom is 1.0).
+            draw_robot_entities(&self.world, graphics, self.last_time as f32 / 1000.0);
 
             // Reset camera for UI rendering
             self.camera.reset(graphics);

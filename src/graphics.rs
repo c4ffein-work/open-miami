@@ -1,13 +1,55 @@
 use crate::math::{Color, Vec2};
 #[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
+use web_sys::HtmlCanvasElement;
+
+// The renderer lives entirely in JS/WebGL (see renderer.js). Rust describes
+// each frame as a flat f32 command stream plus a text arena, and hands both to
+// `window.frameRender` once per frame — a single wasm->JS boundary crossing;
+// the &[f32] slice is passed as a zero-copy Float32Array view into wasm memory.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = window, js_name = frameRender)]
+    fn frame_render(cmds: &[f32], texts: &str);
+}
+
+// Command opcodes. Each command is the opcode followed by its fixed number of
+// f32 arguments. renderer.js holds the mirror of this table — keep in sync.
+#[cfg(target_arch = "wasm32")]
+mod op {
+    pub const CLEAR: f32 = 0.0; // r g b a
+    pub const RECT: f32 = 1.0; // x y w h  r g b a
+    pub const RECT_LINES: f32 = 2.0; // x y w h thickness  r g b a
+    pub const CIRCLE: f32 = 3.0; // x y radius  r g b a
+    pub const LINE: f32 = 4.0; // x1 y1 x2 y2 thickness  r g b a
+    pub const ARC: f32 = 5.0; // x y radius a0 a1  r g b a  (filled pie)
+    pub const TEXT: f32 = 6.0; // textIdx x y size  r g b a  (left/baseline)
+    pub const SAVE: f32 = 7.0; //
+    pub const RESTORE: f32 = 8.0; //
+    pub const TRANSLATE: f32 = 9.0; // x y
+    pub const ROTATE: f32 = 10.0; // angle
+    pub const ROBOT: f32 = 11.0; // colorIdx poseIdx weaponIdx x y angle sizePx time
+}
+
+/// Separator between entries in the per-frame text arena. renderer.js splits
+/// on the same character; it can never appear in game text.
+#[cfg(target_arch = "wasm32")]
+const TEXT_SEP: char = '\u{1f}';
 
 #[cfg(target_arch = "wasm32")]
 pub struct Graphics {
-    context: CanvasRenderingContext2d,
     canvas: HtmlCanvasElement,
+    // Interior mutability keeps the draw API `&self`, matching the previous
+    // canvas-context backend so no call site changes.
+    cmds: RefCell<Vec<f32>>,
+    texts: RefCell<String>,
+    text_count: RefCell<u32>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,9 +60,6 @@ impl Graphics {
     pub fn new() -> Result<Self, String> {
         let window = web_sys::window().ok_or("No window found")?;
         let document = window.document().ok_or("No document found")?;
-
-        // Debug: log what we're looking for
-        web_sys::console::log_1(&"Looking for canvas with id: glcanvas".into());
 
         let canvas = document
             .get_element_by_id("glcanvas")
@@ -42,14 +81,14 @@ impl Graphics {
         canvas.set_width(width);
         canvas.set_height(height);
 
-        let context = canvas
-            .get_context("2d")
-            .map_err(|_| "Failed to get 2d context")?
-            .ok_or("No 2d context")?
-            .dyn_into::<CanvasRenderingContext2d>()
-            .map_err(|_| "Failed to cast to 2d context")?;
-
-        Ok(Graphics { context, canvas })
+        // The WebGL context is created and owned by renderer.js; Rust never
+        // touches the canvas beyond sizing it.
+        Ok(Graphics {
+            canvas,
+            cmds: RefCell::new(Vec::with_capacity(4096)),
+            texts: RefCell::new(String::new()),
+            text_count: RefCell::new(0),
+        })
     }
 
     pub fn width(&self) -> f32 {
@@ -60,16 +99,37 @@ impl Graphics {
         self.canvas.height() as f32
     }
 
+    /// Hand the accumulated frame to the JS renderer and reset for the next
+    /// one. Called once at the end of every game-loop tick.
+    pub fn flush(&self) {
+        let mut cmds = self.cmds.borrow_mut();
+        let mut texts = self.texts.borrow_mut();
+        frame_render(&cmds, &texts);
+        cmds.clear();
+        texts.clear();
+        *self.text_count.borrow_mut() = 0;
+    }
+
+    fn push(&self, vals: &[f32]) {
+        self.cmds.borrow_mut().extend_from_slice(vals);
+    }
+
     pub fn clear(&self, color: Color) {
-        self.context.set_fill_style_str(&color.to_css_string());
-        self.context
-            .fill_rect(0.0, 0.0, self.width() as f64, self.height() as f64);
+        self.push(&[op::CLEAR, color.r, color.g, color.b, color.a]);
     }
 
     pub fn draw_rectangle(&self, pos: Vec2, width: f32, height: f32, color: Color) {
-        self.context.set_fill_style_str(&color.to_css_string());
-        self.context
-            .fill_rect(pos.x as f64, pos.y as f64, width as f64, height as f64);
+        self.push(&[
+            op::RECT,
+            pos.x,
+            pos.y,
+            width,
+            height,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ]);
     }
 
     pub fn draw_rectangle_lines(
@@ -80,41 +140,71 @@ impl Graphics {
         thickness: f32,
         color: Color,
     ) {
-        self.context.set_stroke_style_str(&color.to_css_string());
-        self.context.set_line_width(thickness as f64);
-        self.context
-            .stroke_rect(pos.x as f64, pos.y as f64, width as f64, height as f64);
+        self.push(&[
+            op::RECT_LINES,
+            pos.x,
+            pos.y,
+            width,
+            height,
+            thickness,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ]);
     }
 
     pub fn draw_circle(&self, center: Vec2, radius: f32, color: Color) {
-        self.context.set_fill_style_str(&color.to_css_string());
-        self.context.begin_path();
-        let _ = self.context.arc(
-            center.x as f64,
-            center.y as f64,
-            radius as f64,
-            0.0,
-            std::f64::consts::PI * 2.0,
-        );
-        self.context.fill();
+        self.push(&[
+            op::CIRCLE,
+            center.x,
+            center.y,
+            radius,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ]);
     }
 
     pub fn draw_line(&self, start: Vec2, end: Vec2, thickness: f32, color: Color) {
-        self.context.set_stroke_style_str(&color.to_css_string());
-        self.context.set_line_width(thickness as f64);
-        self.context.begin_path();
-        self.context.move_to(start.x as f64, start.y as f64);
-        self.context.line_to(end.x as f64, end.y as f64);
-        self.context.stroke();
+        self.push(&[
+            op::LINE,
+            start.x,
+            start.y,
+            end.x,
+            end.y,
+            thickness,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ]);
     }
 
     pub fn draw_text(&self, text: &str, pos: Vec2, font_size: f32, color: Color) {
-        self.context.set_fill_style_str(&color.to_css_string());
-        // 'GameFont' is the embedded VT323 (see index.html); falls back to
-        // monospace if it somehow failed to load.
-        self.context
-            .set_font(&format!("{}px 'GameFont', monospace", font_size));
-        let _ = self.context.fill_text(text, pos.x as f64, pos.y as f64);
+        let idx = {
+            let mut texts = self.texts.borrow_mut();
+            let mut count = self.text_count.borrow_mut();
+            if *count > 0 {
+                texts.push(TEXT_SEP);
+            }
+            texts.push_str(text);
+            let idx = *count;
+            *count += 1;
+            idx
+        };
+        self.push(&[
+            op::TEXT,
+            idx as f32,
+            pos.x,
+            pos.y,
+            font_size,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ]);
     }
 
     /// Draw a filled arc (pie slice) for vision cones
@@ -126,38 +216,70 @@ impl Graphics {
         end_angle: f32,
         color: Color,
     ) {
-        self.context.set_fill_style_str(&color.to_css_string());
-        self.context.begin_path();
-        self.context.move_to(center.x as f64, center.y as f64);
-        let _ = self.context.arc(
-            center.x as f64,
-            center.y as f64,
-            radius as f64,
-            start_angle as f64,
-            end_angle as f64,
-        );
-        self.context.close_path();
-        self.context.fill();
+        self.push(&[
+            op::ARC,
+            center.x,
+            center.y,
+            radius,
+            start_angle,
+            end_angle,
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+        ]);
     }
 
     /// Save the current transformation state
     pub fn save(&self) {
-        self.context.save();
+        self.push(&[op::SAVE]);
     }
 
     /// Restore the previous transformation state
     pub fn restore(&self) {
-        self.context.restore();
+        self.push(&[op::RESTORE]);
     }
 
     /// Translate the canvas
     pub fn translate(&self, x: f32, y: f32) {
-        let _ = self.context.translate(x as f64, y as f64);
+        self.push(&[op::TRANSLATE, x, y]);
     }
 
     /// Rotate the canvas around the current origin
     pub fn rotate(&self, angle: f32) {
-        let _ = self.context.rotate(angle as f64);
+        self.push(&[op::ROTATE, angle]);
+    }
+
+    /// Draw a live-rendered 3D robot sprite. The JS renderer runs the
+    /// robot-core 3D->2D pipeline for the requested (color, pose, weapon) at
+    /// the animation time `time` (quantized to a small number of frames and
+    /// cached as textures), and draws it as a rotated quad of `size_px` px.
+    /// Indices follow renderer.js tables:
+    ///   color:  0 coral, 1 red, 2 violet, 3 magenta
+    ///   pose:   0 idle, 1 walk, 2 shoot, 3 hit
+    ///   weapon: 0 fist, 1 pistol, 2 machinegun, 3 shotgun
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_robot(
+        &self,
+        color_idx: u32,
+        pose_idx: u32,
+        weapon_idx: u32,
+        center: Vec2,
+        angle: f32,
+        size_px: f32,
+        time: f32,
+    ) {
+        self.push(&[
+            op::ROBOT,
+            color_idx as f32,
+            pose_idx as f32,
+            weapon_idx as f32,
+            center.x,
+            center.y,
+            angle,
+            size_px,
+            time,
+        ]);
     }
 
     /// Draw the shoggoth boss: a writhing dark mass. While `enraged` is false it

@@ -159,6 +159,7 @@ uniform sampler2D uTex;
 uniform vec2 uTexel;   // 1/size
 uniform float uPx;     // pixel block size in px
 uniform vec2 uSize;    // texture size
+uniform float uTransparent; // 1.0 -> background blocks output alpha 0
 float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
 vec4 samp(vec2 uv){ return texture2D(uTex, uv); }
 void main(){
@@ -199,6 +200,7 @@ void main(){
   col = floor(col*levels + 0.5)/levels;
 
   if(a < 0.02 && silh < 0.5){
+    if(uTransparent > 0.5){ gl_FragColor = vec4(0.0); return; }
     col = vec3(0.055,0.07,0.09);
   }
 
@@ -346,6 +348,7 @@ class RobotRenderer {
       uTexel: gl.getUniformLocation(this.postProg,"uTexel"),
       uPx: gl.getUniformLocation(this.postProg,"uPx"),
       uSize: gl.getUniformLocation(this.postProg,"uSize"),
+      uTransparent: gl.getUniformLocation(this.postProg,"uTransparent"),
     };
 
     this.cube = makeCube();
@@ -513,16 +516,19 @@ class RobotRenderer {
     this._renderRobot(VP, pal, plan, facingRad, weapon);
 
     // pass 2: post -> canvas
+    const transparent = !!opts.transparent;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0,0,this.canvas.width,this.canvas.height);
     gl.disable(gl.DEPTH_TEST);
-    gl.clearColor(0.03,0.04,0.05,1); gl.clear(gl.COLOR_BUFFER_BIT);
+    if(transparent){ gl.clearColor(0,0,0,0); } else { gl.clearColor(0.03,0.04,0.05,1); }
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(this.postProg);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.rtTex);
     gl.uniform1i(this.pLoc.uTex,0);
     gl.uniform2f(this.pLoc.uTexel, 1/this.RT, 1/this.RT);
     gl.uniform2f(this.pLoc.uSize, this.RT, this.RT);
     gl.uniform1f(this.pLoc.uPx, px);
+    gl.uniform1f(this.pLoc.uTransparent, transparent ? 1.0 : 0.0);
     gl.bindBuffer(gl.ARRAY_BUFFER,this.quadBuf); gl.enableVertexAttribArray(this.pLoc.aPos); gl.vertexAttribPointer(this.pLoc.aPos,2,gl.FLOAT,false,0,0);
     gl.drawArrays(gl.TRIANGLES,0,6);
   }
@@ -536,14 +542,14 @@ export function createRenderer(canvas){ return new RobotRenderer(canvas); }
    so calling it repeatedly (e.g. per game frame) does not leak GL contexts. */
 let _bakeRenderer = null;
 let _bakeSize = 0;
-export function bakeSprite({pose="idle", color="coral", facingDeg=0, px=5, time=0, size=384, weapon="fist"} = {}){
+export function bakeSprite({pose="idle", color="coral", facingDeg=0, px=5, time=0, size=384, weapon="fist", transparent=false} = {}){
   if(!_bakeRenderer || _bakeSize !== size){
     const c = document.createElement("canvas");
     c.width = c.height = size;
     _bakeRenderer = new RobotRenderer(c);
     _bakeSize = size;
   }
-  _bakeRenderer.render({pose, color, px, time, facingDeg, weapon}); // top-down (no orbit)
+  _bakeRenderer.render({pose, color, px, time, facingDeg, weapon, transparent}); // top-down (no orbit)
 
   // copy into an independent canvas the caller owns
   const out = document.createElement("canvas");

@@ -1,6 +1,18 @@
 ## Development Constraints
 - NEVER add any additional dependency
 
+## Rendering Architecture
+- The Rust/wasm engine owns the simulation only; **all rendering is WebGL in JS**
+- Each frame, `Graphics` (src/graphics.rs) records a flat f32 command stream
+  (rects, circles, lines, arcs, text, transforms, robots) and hands it to
+  `window.frameRender` once per frame — a single zero-copy wasm->JS crossing
+- `renderer.js` owns the canvas/GPU: one batched triangle pipeline, VT323 text
+  via a lazily-built glyph atlas, robots live-rendered through the
+  proto/robot-core.js 3D->2D pipeline into a cached texture atlas (animation
+  time is quantized to a few frames per pose)
+- The command opcode tables in src/graphics.rs (`mod op`) and renderer.js must
+  stay in sync
+
 ## Verification Requirements
 - ALWAYS run `make verify` before declaring any task complete or saying "we're done"
 - The `make verify` command runs core CI pipeline checks locally:

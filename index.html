@@ -90,78 +90,17 @@
         const version = Date.now();
         console.log('Starting to load game module...');
 
-        // ---- Baked 3D sprite atlas -------------------------------------------
-        // Pre-bake a top-down sprite for each color x pose at facingDeg=0 (we
-        // rotate in JS). Keyed "coral:idle" etc. Exposed to wasm via
-        // window.drawBaked, which composites onto the shared #glcanvas 2D ctx.
-        const BAKE_COLORS = ['coral', 'red', 'violet', 'magenta'];
-        const BAKE_POSES = ['idle', 'walk', 'shoot', 'hit'];
-        const BAKE_ATLAS = {};
-        let bakeReady = false;
-
-        // Turn the bake's opaque floor background into transparency so the
-        // baked robot composites cleanly over the game floor. The measured
-        // background is ~(14,18,23) (sum ~55); robot pixels jump to sum >=240
-        // with the darkest trim ~99, so a threshold of 90 removes only the
-        // floor while keeping the whole robot.
-        const KNOCKOUT_SUM = 90;
-        function knockoutBackground(canvas) {
-            const ctx = canvas.getContext('2d');
-            const w = canvas.width, h = canvas.height;
-            const img = ctx.getImageData(0, 0, w, h);
-            const d = img.data;
-            for (let i = 0; i < d.length; i += 4) {
-                if (d[i] + d[i + 1] + d[i + 2] < KNOCKOUT_SUM) {
-                    d[i + 3] = 0;
-                }
-            }
-            ctx.putImageData(img, 0, 0);
+        // ---- WebGL renderer --------------------------------------------------
+        // The wasm engine owns the simulation and describes each frame as a
+        // flat command stream; renderer.js owns the canvas and the GPU. It
+        // exposes window.frameRender(cmds, texts), which the engine calls once
+        // per frame (see src/graphics.rs). Robots render live through the
+        // robot-core 3D->2D pipeline inside the renderer; text draws from a
+        // VT323 glyph atlas — so the whole frame is WebGL.
+        async function setupRenderer() {
+            const { initRenderer } = await import(`./renderer.js?v=${version}`);
+            window.frameRender = initRenderer(document.getElementById('glcanvas'));
         }
-
-        async function buildBakedAtlas() {
-            try {
-                const { bakeSprite } = await import('./proto/robot-core.js');
-                for (const color of BAKE_COLORS) {
-                    for (const pose of BAKE_POSES) {
-                        // pistol reads as a clear held weapon from straight above.
-                        const canvas = bakeSprite({ pose, color, facingDeg: 0, size: 256, weapon: 'pistol' });
-                        // The bake's final pass clears to an opaque near-black
-                        // floor (~0.03,0.04,0.05). Knock that background out to
-                        // transparent so only the robot composites over the game.
-                        knockoutBackground(canvas);
-                        BAKE_ATLAS[color + ':' + pose] = canvas;
-                    }
-                }
-                bakeReady = true;
-                console.log('Baked sprite atlas ready:', Object.keys(BAKE_ATLAS).length, 'tiles');
-            } catch (e) {
-                console.error('Failed to build baked atlas (falling back to primitives):', e);
-            }
-        }
-
-        // Called from wasm (extern draw_baked). Draws atlas[key] centered at
-        // world/screen (x,y) under the current canvas transform, rotated by
-        // angle (radians). scale multiplies the atlas native px size. Returns
-        // false (no-op) until the atlas is ready so the primitive draw shows.
-        const _bakeCtx = () => {
-            const c = document.getElementById('glcanvas');
-            return c ? c.getContext('2d') : null;
-        };
-        window.drawBaked = function (key, x, y, angle, scale) {
-            if (!bakeReady) return false;
-            const img = BAKE_ATLAS[key];
-            if (!img) return false;
-            const ctx = _bakeCtx();
-            if (!ctx) return false;
-            const w = img.width * scale;
-            const h = img.height * scale;
-            ctx.save();
-            ctx.translate(x, y);
-            ctx.rotate(angle);
-            ctx.drawImage(img, -w / 2, -h / 2, w, h);
-            ctx.restore();
-            return true;
-        };
 
         import(`./open_miami.js?v=${version}`)
             .then(async ({ default: init, start }) => {
@@ -176,17 +115,19 @@
                         await init(`./open_miami_bg.wasm?v=${version}`);
                         console.log('WASM initialized successfully!');
 
-                        // Pre-bake the 3D sprite atlas (non-fatal if it fails).
-                        await buildBakedAtlas();
-
                         // Ensure DOM is loaded before starting game
                         console.log('Canvas element:', document.getElementById('glcanvas'));
 
-                        // Make sure the game font is loaded before drawing text.
+                        // Make sure the game font is loaded before the renderer
+                        // rasterizes its first glyphs into the atlas.
                         try {
                             await document.fonts.load("16px 'GameFont'");
                             await document.fonts.ready;
                         } catch (e) { /* fall back to monospace */ }
+
+                        // The renderer must exist before the first engine
+                        // frame calls window.frameRender.
+                        await setupRenderer();
 
                         // Start the game
                         console.log('Starting game loop...');
