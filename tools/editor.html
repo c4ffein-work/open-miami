@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OPEN MIAMI // Character Editor</title>
+<script>
+  // Embedded mode (?embed=1): the SPRITES-tab inspector panel. Decided before
+  // first paint so the page title never flashes.
+  if (new URLSearchParams(location.search).has("embed")) document.documentElement.classList.add("embed");
+</script>
+<style>
+  :root{ --bg:#0b0e13; --panel:#12161d; --line:#2a3340; --fg:#cdd; --accent:#7cc; }
+  html,body{margin:0;background:var(--bg);color:var(--fg);font-family:monospace;}
+  h1{font-size:14px;letter-spacing:2px;margin:0;padding:12px 16px;border-bottom:1px solid var(--line);opacity:.85;}
+  #stage{display:flex;flex-wrap:wrap;gap:24px;justify-content:center;padding:20px;}
+  .view{display:flex;flex-direction:column;align-items:center;gap:8px;}
+  .view h2{font-size:12px;margin:0;opacity:.7;font-weight:normal;letter-spacing:1px;}
+  canvas{image-rendering:pixelated;background:var(--panel);box-shadow:0 0 0 1px var(--line);touch-action:none;}
+  #orbit{cursor:grab;}
+  #orbit:active{cursor:grabbing;}
+  .cap{font-size:11px;opacity:.55;max-width:360px;text-align:center;line-height:1.5;}
+  #controls{display:flex;flex-wrap:wrap;gap:20px;justify-content:center;
+            padding:16px;border-top:1px solid var(--line);}
+  .ctl{display:flex;flex-direction:column;gap:6px;font-size:11px;}
+  .ctl label{opacity:.7;letter-spacing:1px;text-transform:uppercase;}
+  .row{display:flex;gap:6px;}
+  button{font-family:monospace;font-size:12px;background:var(--panel);color:var(--fg);
+         border:1px solid var(--line);padding:6px 10px;cursor:pointer;border-radius:3px;}
+  button.on{border-color:var(--accent);color:#fff;box-shadow:0 0 0 1px var(--accent) inset;}
+  button:hover{border-color:var(--accent);}
+  .swatch{width:26px;height:26px;padding:0;border-radius:4px;}
+  input[type=range]{width:200px;}
+  .val{opacity:.6;}
+  code{color:var(--accent);}
+  /* Embedded mode: this page can be iframed as the ?viz inspector panel. */
+  html.embed h1, html.embed .cap { display:none; }
+  html.embed #controls .ctl:nth-child(2){ display:none; } /* hide Color (set by the gallery) */
+  html.embed #stage{ flex-direction:column; gap:10px; padding:10px 0; }
+  html.embed .view h2{ font-size:10px; }
+  html.embed canvas{ width:300px; height:300px; }
+  html.embed #controls{ padding:10px; gap:12px; }
+</style>
+</head>
+<body>
+<h1>OPEN MIAMI &nbsp;//&nbsp; CHARACTER EDITOR</h1>
+
+<div id="stage">
+  <div class="view">
+    <h2>3D ORBIT &mdash; inspect from any angle</h2>
+    <canvas id="orbit" width="384" height="384" tabindex="0"></canvas>
+    <div class="cap">drag to orbit (yaw + pitch) &middot; arrow keys also rotate &middot; this is the sculpt/inspect view</div>
+  </div>
+  <div class="view">
+    <h2>IN-GAME 2D &mdash; baked top-down sprite</h2>
+    <canvas id="game" width="384" height="384"></canvas>
+    <div class="cap">exactly what the game camera bakes via <code>bakeSprite()</code> &middot; turns on ONE axis (facing) only</div>
+  </div>
+</div>
+
+<div id="controls">
+  <div class="ctl">
+    <label>Pose</label>
+    <div class="row" id="poseRow"></div>
+  </div>
+  <div class="ctl">
+    <label>Color</label>
+    <div class="row" id="colorRow"></div>
+  </div>
+  <div class="ctl">
+    <label>Weapon</label>
+    <div class="row" id="weaponRow"></div>
+  </div>
+  <div class="ctl">
+    <label>Pixelation &mdash; <span class="val" id="pxVal"></span></label>
+    <input type="range" id="pxSlider" min="1" max="12" step="1" value="5">
+  </div>
+  <div class="ctl">
+    <label>Facing (2D view) &mdash; <span class="val" id="faceVal"></span></label>
+    <input type="range" id="faceSlider" min="0" max="360" step="1" value="0">
+  </div>
+</div>
+
+<script type="module">
+import { createRenderer, bakeSprite, PALETTES, POSES, WEAPONS } from "../robot-core.js";
+
+/* ---------- state ---------- */
+const state = {
+  pose: "idle",
+  color: "coral",
+  weapon: "pistol",
+  px: 5,
+  facingDeg: 0,
+  // orbit camera: gentle angled top-down by default
+  yaw: 0.6,
+  pitch: 0.95,
+};
+const COLORS = Object.keys(PALETTES);
+
+/* URL params so this page can be driven as the ?viz inspector panel */
+const _p = new URLSearchParams(location.search);
+if (_p.get("color") && PALETTES[_p.get("color")]) state.color = _p.get("color");
+if (_p.get("pose") && POSES.includes(_p.get("pose"))) state.pose = _p.get("pose");
+if (_p.get("weapon") && WEAPONS.includes(_p.get("weapon"))) state.weapon = _p.get("weapon");
+// (embed class is applied in <head>, before first paint)
+
+/* ---------- renderers ---------- */
+const orbitCanvas = document.getElementById("orbit");
+const gameCanvas  = document.getElementById("game");
+const gameCtx     = gameCanvas.getContext("2d");
+const orbit = createRenderer(orbitCanvas);
+// gameCanvas is a plain 2D surface we blit the baked sprite onto, proving the
+// bakeSprite() path the real game will call.
+
+/* ---------- build control widgets ---------- */
+const poseRow = document.getElementById("poseRow");
+const poseBtns = {};
+for(const p of POSES){
+  const b=document.createElement("button");
+  b.textContent=p; b.onclick=()=>{ state.pose=p; refreshPose(); };
+  poseRow.appendChild(b); poseBtns[p]=b;
+}
+function refreshPose(){ for(const p in poseBtns) poseBtns[p].classList.toggle("on", p===state.pose); }
+
+const colorRow = document.getElementById("colorRow");
+const colorBtns = {};
+for(const c of COLORS){
+  const b=document.createElement("button");
+  b.className="swatch"; b.title=c;
+  const col=PALETTES[c].body;
+  b.style.background=`rgb(${col.map(v=>Math.round(v*255)).join(",")})`;
+  b.onclick=()=>{ state.color=c; refreshColor(); };
+  colorRow.appendChild(b); colorBtns[c]=b;
+}
+function refreshColor(){ for(const c in colorBtns) colorBtns[c].classList.toggle("on", c===state.color); }
+
+const weaponRow = document.getElementById("weaponRow");
+const weaponBtns = {};
+for(const w of WEAPONS){
+  const b=document.createElement("button");
+  b.textContent=w; b.onclick=()=>{ state.weapon=w; refreshWeapon(); };
+  weaponRow.appendChild(b); weaponBtns[w]=b;
+}
+function refreshWeapon(){ for(const w in weaponBtns) weaponBtns[w].classList.toggle("on", w===state.weapon); }
+
+const pxSlider=document.getElementById("pxSlider"), pxVal=document.getElementById("pxVal");
+pxSlider.oninput=()=>{ state.px=parseInt(pxSlider.value,10); pxVal.textContent=state.px+" px"; };
+const faceSlider=document.getElementById("faceSlider"), faceVal=document.getElementById("faceVal");
+faceSlider.oninput=()=>{ state.facingDeg=parseInt(faceSlider.value,10); faceVal.textContent=state.facingDeg+"°"; };
+
+refreshPose(); refreshColor(); refreshWeapon();
+pxVal.textContent=state.px+" px"; faceVal.textContent=state.facingDeg+"°";
+
+/* ---------- orbit drag (yaw + pitch) ---------- */
+let dragging=false, lastX=0, lastY=0;
+orbitCanvas.addEventListener("pointerdown", e=>{
+  dragging=true; lastX=e.clientX; lastY=e.clientY;
+  orbitCanvas.setPointerCapture(e.pointerId); orbitCanvas.focus();
+});
+orbitCanvas.addEventListener("pointermove", e=>{
+  if(!dragging) return;
+  state.yaw   += (e.clientX-lastX)*0.01;
+  state.pitch += (e.clientY-lastY)*0.01;
+  state.pitch = Math.max(-1.45, Math.min(1.45, state.pitch));
+  lastX=e.clientX; lastY=e.clientY;
+});
+orbitCanvas.addEventListener("pointerup",  ()=>{ dragging=false; });
+orbitCanvas.addEventListener("pointercancel", ()=>{ dragging=false; });
+
+/* keyboard fallback (drivable without a real mouse) */
+orbitCanvas.addEventListener("keydown", e=>{
+  const step=0.08;
+  if(e.key==="ArrowLeft")  state.yaw-=step;
+  else if(e.key==="ArrowRight") state.yaw+=step;
+  else if(e.key==="ArrowUp")   state.pitch=Math.min(1.45,state.pitch+step);
+  else if(e.key==="ArrowDown") state.pitch=Math.max(-1.45,state.pitch-step);
+  else return;
+  e.preventDefault();
+});
+// window-level arrows too, so it's drivable even if the canvas isn't focused
+window.addEventListener("keydown", e=>{
+  if(document.activeElement===faceSlider || document.activeElement===pxSlider) return;
+  const step=0.08;
+  if(e.key==="ArrowLeft")  state.yaw-=step;
+  else if(e.key==="ArrowRight") state.yaw+=step;
+  else if(e.key==="ArrowUp")   state.pitch=Math.min(1.45,state.pitch+step);
+  else if(e.key==="ArrowDown") state.pitch=Math.max(-1.45,state.pitch-step);
+  else return;
+  e.preventDefault();
+});
+
+/* ---------- render loop ---------- */
+const t0=performance.now();
+window.__ready=false;
+function frame(){
+  const t=(performance.now()-t0)/1000;
+
+  // LEFT: live 3D orbit view (two-axis rotation of the camera)
+  orbit.render({
+    pose:state.pose, color:state.color, weapon:state.weapon, px:state.px, time:t,
+    orbit:{yaw:state.yaw, pitch:state.pitch},
+  });
+
+  // RIGHT: the in-game baked sprite (top-down, one-axis facing) via bakeSprite()
+  const sprite = bakeSprite({
+    pose:state.pose, color:state.color, weapon:state.weapon, facingDeg:state.facingDeg,
+    px:state.px, time:t, size:gameCanvas.width,
+  });
+  gameCtx.clearRect(0,0,gameCanvas.width,gameCanvas.height);
+  gameCtx.drawImage(sprite,0,0);
+
+  window.__ready=true;
+  requestAnimationFrame(frame);
+}
+frame();
+
+// expose a couple hooks for the screenshot harness / manual poking
+window.__editor = {
+  set:(patch)=>Object.assign(state,patch),
+  bake:(o)=>bakeSprite(o),
+  state,
+};
+</script>
+</body>
+</html>
