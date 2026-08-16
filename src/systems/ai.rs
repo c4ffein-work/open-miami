@@ -55,7 +55,13 @@ const FERAL_WANDER_MIN: f32 = 0.20;
 const FERAL_WANDER_MAX: f32 = 0.70;
 
 /// System that handles enemy AI behavior
-pub struct AISystem;
+#[derive(Default)]
+pub struct AISystem {
+    /// Cached navigation grid, rebuilt only when the wall layout changes.
+    /// Building the grid scans every cell against every wall, far too much
+    /// work to redo each tick for what is static level geometry.
+    nav_cache: Option<(Vec<Wall>, NavigationGrid)>,
+}
 
 impl AISystem {
     fn find_player_position(world: &World) -> Option<Position> {
@@ -176,8 +182,15 @@ impl System for AISystem {
         // It is written back at the end so the sequence continues across ticks.
         let mut rng = world.rng_state();
 
-        // Create navigation grid from world walls
-        let nav_grid = NavigationGrid::new(&walls);
+        // Reuse the cached navigation grid unless the walls changed (level swap)
+        let walls_changed = match &self.nav_cache {
+            Some((cached_walls, _)) => *cached_walls != walls,
+            None => true,
+        };
+        if walls_changed {
+            self.nav_cache = Some((walls.clone(), NavigationGrid::new(&walls)));
+        }
+        let nav_grid = &self.nav_cache.as_ref().unwrap().1;
 
         // Query all enemies
         let enemies: Vec<Entity> = world.query::<Enemy>();
@@ -416,10 +429,12 @@ impl System for AISystem {
                             );
                         }
 
-                        // Get next waypoint from the path
-                        nav_grid
-                            .get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
-                            .unwrap_or(target.to_vec2())
+                        // Get next waypoint from the already-computed path
+                        NavigationGrid::next_waypoint_in_path(
+                            &full_path,
+                            enemy_pos.to_vec2(),
+                            target.to_vec2(),
+                        )
                     } else {
                         // Clear debug path if no path found
                         if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
@@ -519,10 +534,12 @@ impl System for AISystem {
                                 );
                             }
 
-                            // Get next waypoint from the path
-                            nav_grid
-                                .get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
-                                .unwrap_or(target.to_vec2())
+                            // Get next waypoint from the already-computed path
+                            NavigationGrid::next_waypoint_in_path(
+                                &full_path,
+                                enemy_pos.to_vec2(),
+                                target.to_vec2(),
+                            )
                         } else {
                             // Clear debug path if no path found
                             if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
@@ -766,7 +783,7 @@ mod tests {
         world.add_component(enemy, Health::new(100));
         world.add_component(enemy, Rotation::new(0.0));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         // Run multiple frames to trigger state transitions (need > 0.3s to go from Unaware -> SpottedUnsure -> SurePlayerSeen)
         for _ in 0..30 {
             system.run(&mut world, 0.016);
@@ -799,7 +816,7 @@ mod tests {
         world.add_component(enemy, Health::new(100));
         world.add_component(enemy, Rotation::new(0.0));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         // Run multiple frames to trigger state transitions
         for _ in 0..30 {
             system.run(&mut world, 0.016);
@@ -831,7 +848,7 @@ mod tests {
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         system.run(&mut world, 0.016);
 
         let ai = world.get_component::<AI>(enemy).unwrap();
@@ -860,7 +877,7 @@ mod tests {
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         system.run(&mut world, 0.5);
 
         let ai = world.get_component::<AI>(enemy).unwrap();
@@ -886,7 +903,7 @@ mod tests {
             world.add_component(enemy, Health::new(100));
         }
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         system.run(&mut world, 0.016);
 
         // All enemies should have updated AI states
@@ -916,7 +933,7 @@ mod tests {
         world.add_component(enemy, Health::new(100));
         world.add_component(enemy, Rotation::new(0.0));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         // Run multiple frames for state transition
         for _ in 0..30 {
             system.run(&mut world, 0.016);
@@ -959,7 +976,7 @@ mod tests {
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         system.run(&mut world, 0.016);
 
         // Enemy should NOT detect player (line of sight blocked by wall)
@@ -996,7 +1013,7 @@ mod tests {
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         system.run(&mut world, 0.016);
 
         // Enemy should NOT detect player (line of sight blocked by walls)
@@ -1033,7 +1050,7 @@ mod tests {
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         system.run(&mut world, 0.016);
 
         // Enemy should NOT detect player (line of sight blocked by walls)
@@ -1071,7 +1088,7 @@ mod tests {
         let player_pos_clone = *world.get_component::<Position>(player).unwrap();
         let initial_distance = initial_pos.distance_to(&player_pos_clone);
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
 
         // Simulate multiple frames
         for _ in 0..10 {
@@ -1118,7 +1135,7 @@ mod tests {
         world.add_component(enemy, Health::new(100));
         world.add_component(enemy, Rotation::new(0.0));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         // Run multiple frames for state transition
         for _ in 0..30 {
             system.run(&mut world, 0.016);
@@ -1167,7 +1184,7 @@ mod tests {
         world.add_component(fast_enemy, Health::new(100));
         world.add_component(fast_enemy, Rotation::new(0.0));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         // Run multiple frames for state transition
         for _ in 0..30 {
             system.run(&mut world, 0.016);
@@ -1214,7 +1231,7 @@ mod tests {
         world.add_component(enemy, Speed::new(100.0));
         world.add_component(enemy, Health::new(100));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         system.run(&mut world, 0.016);
 
         // Enemy should NOT detect player through wall (line of sight blocked)
@@ -1250,7 +1267,7 @@ mod tests {
         world.add_component(enemy, Health::new(100));
         world.add_component(enemy, Rotation::new(std::f32::consts::PI / 2.0)); // Facing down
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         // Run multiple frames
         for _ in 0..30 {
             system.run(&mut world, 0.016);
@@ -1298,7 +1315,7 @@ mod tests {
         world.add_component(enemy, Health::new(50));
         world.add_component(enemy, Rotation::new(0.0)); // facing +x, toward player
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         for _ in 0..frames {
             system.run(&mut world, 0.016);
         }
@@ -1332,7 +1349,7 @@ mod tests {
         world.add_component(enemy, Health::new(50));
         world.add_component(enemy, Rotation::new(0.0));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         for _ in 0..120 {
             system.run(&mut world, 0.016);
             let mag = vel_mag(&world, enemy);
@@ -1392,7 +1409,7 @@ mod tests {
             world.add_component(enemy, Speed::new(base));
             world.add_component(enemy, Health::new(50));
             world.add_component(enemy, Rotation::new(0.0));
-            let mut system = AISystem;
+            let mut system = AISystem::default();
             for _ in 0..90 {
                 system.run(&mut world, 0.016);
                 *peak = peak.max(vel_mag(&world, enemy));
@@ -1467,7 +1484,7 @@ mod tests {
         world.add_component(enemy, Health::new(50));
         world.add_component(enemy, Rotation::new(0.0));
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         let mut directions = std::collections::HashSet::new();
         for _ in 0..600 {
             system.run(&mut world, 0.016);
@@ -1508,7 +1525,7 @@ mod tests {
         world.add_component(enemy, Health::new(100));
         world.add_component(enemy, Rotation::new(0.0)); // Facing right
 
-        let mut system = AISystem;
+        let mut system = AISystem::default();
         // Run a few frames - enemy shouldn't see player yet
         for _ in 0..5 {
             system.run(&mut world, 0.016);

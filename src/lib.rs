@@ -414,7 +414,7 @@ mod wasm_entry {
                 world: World::new(),
                 movement_system: MovementSystem,
                 weapon_system: WeaponUpdateSystem,
-                ai_system: AISystem,
+                ai_system: AISystem::default(),
                 combat_system: CombatSystem,
                 bullet_system: BulletSystem,
                 projectile_system: ProjectileTrailSystem,

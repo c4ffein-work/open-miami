@@ -292,16 +292,47 @@ impl NavigationGrid {
         path
     }
 
+    /// Find the nearest walkable cell to `coord`, searching outward ring by ring.
+    /// Cells get marked blocked when they merely sit close to a wall (the
+    /// inflation that prevents wall grinding), so an entity standing next to a
+    /// wall is often in a "blocked" cell while being perfectly reachable.
+    fn nearest_walkable(&self, coord: GridCoord) -> Option<GridCoord> {
+        if self.is_walkable(&coord) {
+            return Some(coord);
+        }
+        // 3 cells = 150px, comfortably beyond the wall inflation radius
+        const MAX_SEARCH_RADIUS: i32 = 3;
+        for radius in 1..=MAX_SEARCH_RADIUS {
+            let mut best: Option<(i32, GridCoord)> = None;
+            for di in -radius..=radius {
+                for dj in -radius..=radius {
+                    if di.abs().max(dj.abs()) != radius {
+                        continue; // Only inspect the outer ring at this radius
+                    }
+                    let candidate = GridCoord::new(coord.i + di, coord.j + dj);
+                    if self.is_walkable(&candidate) {
+                        let dist = coord.distance_squared(&candidate);
+                        if best.is_none_or(|(best_dist, _)| dist < best_dist) {
+                            best = Some((dist, candidate));
+                        }
+                    }
+                }
+            }
+            if let Some((_, candidate)) = best {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
     /// Find path from start to goal using A* algorithm
     /// Returns a list of world positions (waypoints) from start to goal
     pub fn find_path(&self, start: Vec2, goal: Vec2) -> Option<Vec<Vec2>> {
-        let start_coord = GridCoord::from_world_pos(start.x, start.y);
-        let goal_coord = GridCoord::from_world_pos(goal.x, goal.y);
-
-        // If start or goal is blocked, return None
-        if !self.is_walkable(&start_coord) || !self.is_walkable(&goal_coord) {
-            return None;
-        }
+        // Snap blocked endpoints to the nearest walkable cell: entities pressed
+        // against a wall (or chasing a player who is) still deserve a path
+        // instead of the beeline fallback that grinds along the wall.
+        let start_coord = self.nearest_walkable(GridCoord::from_world_pos(start.x, start.y))?;
+        let goal_coord = self.nearest_walkable(GridCoord::from_world_pos(goal.x, goal.y))?;
 
         // If we're already at the goal, return empty path
         if start_coord == goal_coord {
@@ -315,7 +346,9 @@ impl NavigationGrid {
         let mut closed_set: HashSet<GridCoord> = HashSet::new();
 
         g_score.insert(start_coord, 0);
-        let h_score = start_coord.distance_squared(&goal_coord);
+        // Manhattan distance is admissible on a 4-connected unit-cost grid,
+        // keeping A* optimal (squared distance would overestimate wildly).
+        let h_score = start_coord.manhattan_distance(&goal_coord);
         open_set.push(AStarNode {
             coord: start_coord,
             f_score: h_score,
@@ -355,7 +388,7 @@ impl NavigationGrid {
                     came_from.insert(neighbor, current);
                     g_score.insert(neighbor, tentative_g);
 
-                    let h_score = neighbor.distance_squared(&goal_coord);
+                    let h_score = neighbor.manhattan_distance(&goal_coord);
                     let f_score = tentative_g + h_score;
 
                     open_set.push(AStarNode {
@@ -390,21 +423,22 @@ impl NavigationGrid {
     /// Get the next waypoint to move toward (first step in path)
     pub fn get_next_waypoint(&self, start: Vec2, goal: Vec2) -> Option<Vec2> {
         let path = self.find_path(start, goal)?;
-        if path.is_empty() {
-            // Already at goal
-            Some(goal)
-        } else {
-            // Skip waypoints that are in the same grid cell as start
-            let start_coord = GridCoord::from_world_pos(start.x, start.y);
-            for waypoint in &path {
-                let waypoint_coord = GridCoord::from_world_pos(waypoint.x, waypoint.y);
-                if waypoint_coord != start_coord {
-                    return Some(*waypoint);
-                }
+        Some(Self::next_waypoint_in_path(&path, start, goal))
+    }
+
+    /// Pick the next waypoint from an already-computed path, so callers that
+    /// hold the full path (e.g. for debug display) don't pay for a second A*.
+    pub fn next_waypoint_in_path(path: &[Vec2], start: Vec2, goal: Vec2) -> Vec2 {
+        // Skip waypoints that are in the same grid cell as start
+        let start_coord = GridCoord::from_world_pos(start.x, start.y);
+        for waypoint in path {
+            let waypoint_coord = GridCoord::from_world_pos(waypoint.x, waypoint.y);
+            if waypoint_coord != start_coord {
+                return *waypoint;
             }
-            // All waypoints are in the same cell, just return the goal
-            Some(goal)
         }
+        // Empty path (already at goal) or all waypoints in the start cell
+        goal
     }
 }
 
@@ -565,7 +599,8 @@ mod tests {
 
     #[test]
     fn test_find_path_blocked_start() {
-        // Wall covering start position
+        // Wall covering start position: the start should snap to the nearest
+        // walkable cell so a path is still produced
         let walls = vec![Wall::new(0.0, 0.0, 100.0, 100.0)];
         let grid = NavigationGrid::new(&walls);
 
@@ -573,12 +608,13 @@ mod tests {
         let goal = Vec2::new(500.0, 500.0);
 
         let path = grid.find_path(start, goal);
-        assert!(path.is_none()); // Can't path from blocked position
+        assert!(path.is_some()); // Snapped start still reaches the goal
     }
 
     #[test]
     fn test_find_path_blocked_goal() {
-        // Wall covering goal position
+        // Wall covering goal position: the goal should snap to the nearest
+        // walkable cell (e.g. a player hugging a wall must stay reachable)
         let walls = vec![Wall::new(400.0, 400.0, 100.0, 100.0)];
         let grid = NavigationGrid::new(&walls);
 
@@ -586,7 +622,25 @@ mod tests {
         let goal = Vec2::new(450.0, 450.0); // Inside wall
 
         let path = grid.find_path(start, goal);
-        assert!(path.is_none()); // Can't path to blocked position
+        assert!(path.is_some()); // Path leads to the nearest walkable cell
+        let path = path.unwrap();
+        let last = path.last().unwrap();
+        // The path must end outside the wall itself
+        assert!(!(400.0..=500.0).contains(&last.x) || !(400.0..=500.0).contains(&last.y));
+    }
+
+    #[test]
+    fn test_find_path_deep_inside_blocked_region_fails() {
+        // A goal further from walkable space than the snap radius (3 cells)
+        // still fails: surround it with a huge wall
+        let walls = vec![Wall::new(200.0, 200.0, 600.0, 600.0)];
+        let grid = NavigationGrid::new(&walls);
+
+        let start = Vec2::new(50.0, 50.0);
+        let goal = Vec2::new(500.0, 500.0); // Deep inside the wall
+
+        let path = grid.find_path(start, goal);
+        assert!(path.is_none());
     }
 
     #[test]
