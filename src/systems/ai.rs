@@ -1,7 +1,7 @@
-use crate::collision::has_line_of_sight;
+use crate::collision::{has_line_of_sight, has_line_of_sight_with_padding};
 use crate::components::{
-    AIState, Enemy, EnemyType, Health, Player, Position, Rotation, Speed, Stunned, Velocity,
-    WanderState, AI,
+    AIState, DebugPath, DebugTrail, Enemy, EnemyType, Health, Player, Position, Rotation, Speed,
+    Stunned, Velocity, WanderState, AI,
 };
 use crate::ecs::world::Wall;
 use crate::ecs::{Entity, System, World};
@@ -384,18 +384,47 @@ impl System for AISystem {
                 AIState::SpottedUnsure => {
                     let target = ai.last_known_player_position.unwrap_or(player_pos);
 
-                    // Check if there's a clear line of sight to the target
-                    let has_clear_path =
-                        has_line_of_sight(enemy_pos.to_vec2(), target.to_vec2(), &walls);
+                    // Use inflated walls for pathfinding decision to prevent wall grinding
+                    // If target is close to a wall, we'll use pathfinding instead of direct movement
+                    let wall_padding = 25.0; // Inflate walls by 25 pixels for pathfinding check
+                    let has_clear_path = has_line_of_sight_with_padding(
+                        enemy_pos.to_vec2(),
+                        target.to_vec2(),
+                        &walls,
+                        wall_padding,
+                    );
 
-                    // If clear line of sight, move directly toward target; otherwise use pathfinding
+                    // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
                     let movement_target = if has_clear_path {
+                        // Clear debug path when moving directly
+                        if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                            *debug_path = DebugPath::clear();
+                        }
                         target.to_vec2()
-                    } else if let Some(next_waypoint) =
-                        nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                    } else if let Some(full_path) =
+                        nav_grid.find_path(enemy_pos.to_vec2(), target.to_vec2())
                     {
-                        next_waypoint
+                        // Store full path for debug visualization
+                        if world.has_component::<DebugPath>(entity) {
+                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                                *debug_path = DebugPath::new(full_path.clone(), target.to_vec2());
+                            }
+                        } else {
+                            world.add_component(
+                                entity,
+                                DebugPath::new(full_path.clone(), target.to_vec2()),
+                            );
+                        }
+
+                        // Get next waypoint from the path
+                        nav_grid
+                            .get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                            .unwrap_or(target.to_vec2())
                     } else {
+                        // Clear debug path if no path found
+                        if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                            *debug_path = DebugPath::clear();
+                        }
                         target.to_vec2()
                     };
 
@@ -448,23 +477,57 @@ impl System for AISystem {
                     };
 
                     let dist_to_target = enemy_pos.distance_to(&target);
+
                     if can_see_player && dist_to_target < ai.attack_range {
+                        // Stop and face player when close enough and can see them
                         let dx = player_pos.x - enemy_pos.x;
                         let dy = player_pos.y - enemy_pos.y;
                         (0.0, 0.0, dy.atan2(dx))
                     } else {
-                        // Check if there's a clear line of sight to the target
-                        let has_clear_path =
-                            has_line_of_sight(enemy_pos.to_vec2(), target.to_vec2(), &walls);
+                        // Use inflated walls for pathfinding decision to prevent wall grinding
+                        // If target is close to a wall, we'll use pathfinding instead of direct movement
+                        let wall_padding = 25.0; // Inflate walls by 25 pixels for pathfinding check
+                        let has_clear_path = has_line_of_sight_with_padding(
+                            enemy_pos.to_vec2(),
+                            target.to_vec2(),
+                            &walls,
+                            wall_padding,
+                        );
 
-                        // If clear line of sight, move directly toward target; otherwise use pathfinding
+                        // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
                         let movement_target = if has_clear_path {
+                            // Clear debug path when moving directly
+                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                                *debug_path = DebugPath::clear();
+                            }
                             target.to_vec2()
-                        } else if let Some(next_waypoint) =
-                            nav_grid.get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                        } else if let Some(full_path) =
+                            nav_grid.find_path(enemy_pos.to_vec2(), target.to_vec2())
                         {
-                            next_waypoint
+                            // Store full path for debug visualization
+                            if world.has_component::<DebugPath>(entity) {
+                                if let Some(debug_path) =
+                                    world.get_component_mut::<DebugPath>(entity)
+                                {
+                                    *debug_path =
+                                        DebugPath::new(full_path.clone(), target.to_vec2());
+                                }
+                            } else {
+                                world.add_component(
+                                    entity,
+                                    DebugPath::new(full_path.clone(), target.to_vec2()),
+                                );
+                            }
+
+                            // Get next waypoint from the path
+                            nav_grid
+                                .get_next_waypoint(enemy_pos.to_vec2(), target.to_vec2())
+                                .unwrap_or(target.to_vec2())
                         } else {
+                            // Clear debug path if no path found
+                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
+                                *debug_path = DebugPath::clear();
+                            }
                             target.to_vec2()
                         };
 
@@ -506,6 +569,24 @@ impl System for AISystem {
                     || !matches!(ai.state, AIState::Unaware if ai.initial_type == EnemyType::Idle)
                 {
                     rotation.angle = new_rot;
+                }
+            }
+
+            // Record position in trail for debug visualization (only for chasing enemies)
+            if matches!(ai.state, AIState::SpottedUnsure | AIState::SurePlayerSeen) {
+                if world.has_component::<DebugTrail>(entity) {
+                    if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                        trail.add_position(enemy_pos.to_vec2());
+                    }
+                } else {
+                    let mut trail = DebugTrail::default();
+                    trail.add_position(enemy_pos.to_vec2());
+                    world.add_component(entity, trail);
+                }
+            } else {
+                // Clear trail when not chasing
+                if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                    trail.clear();
                 }
             }
         }
