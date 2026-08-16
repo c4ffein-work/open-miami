@@ -74,7 +74,7 @@ fn test_enemy_ai_chases_player() {
     let _player = spawn_player(&mut world, Vec2::new(200.0, 0.0));
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
-    let mut ai_system = AISystem;
+    let mut ai_system = AISystem::default();
     // Run multiple frames for state transition (need > 0.3s)
     for _ in 0..30 {
         ai_system.run(&mut world, 0.016);
@@ -96,7 +96,7 @@ fn test_enemy_ai_attacks_when_close() {
     let _player = spawn_player(&mut world, Vec2::new(30.0, 0.0));
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
-    let mut ai_system = AISystem;
+    let mut ai_system = AISystem::default();
     // Run multiple frames for state transition
     for _ in 0..30 {
         ai_system.run(&mut world, 0.016);
@@ -119,7 +119,7 @@ fn test_enemy_ai_idle_when_far() {
     let _player = spawn_player(&mut world, Vec2::new(1000.0, 0.0)); // Beyond 900 detection range
     let enemy = spawn_enemy(&mut world, Vec2::new(0.0, 0.0));
 
-    let mut ai_system = AISystem;
+    let mut ai_system = AISystem::default();
     ai_system.run(&mut world, 0.016);
 
     // Enemy should be idle
@@ -245,7 +245,7 @@ fn test_multiple_systems_integration() {
     initialize_game(&mut world, 0);
 
     let mut movement_system = MovementSystem;
-    let mut ai_system = AISystem;
+    let mut ai_system = AISystem::default();
     let mut weapon_system = WeaponUpdateSystem;
     let mut combat_system = CombatSystem;
 
