@@ -1,0 +1,100 @@
+{
+  "id": 13,
+  "name": "EXTRACTION ELEVATOR",
+  "theme": "FORTRESS // THE LAST GARRISON",
+  "accent": "#3dff9a",
+  "flavor": "Thick perimeter, garrison in the central keep, and the extraction car waiting on the far wall. Everything that is left in Miami is standing between you and it.",
+  "objective": "Purge the garrison. The EXTRACTION ELEVATOR unlocks when the fortress is silent.",
+  "size": { "w": 1000, "h": 800 },
+  "entry": { "x": 455, "y": 720, "w": 90, "h": 60, "label": "SALLY PORT", "id": "entry" },
+  "exits": [
+    {
+      "id": "extract",
+      "x": 455,
+      "y": 20,
+      "w": 90,
+      "h": 60,
+      "label": "EXTRACTION ELEVATOR",
+      "to": 14,
+      "open": false
+    }
+  ],
+  "walls": [
+    { "x": 0, "y": 0, "w": 1000, "h": 20 },
+    { "x": 0, "y": 780, "w": 1000, "h": 20 },
+    { "x": 0, "y": 0, "w": 20, "h": 800 },
+    { "x": 980, "y": 0, "w": 20, "h": 800 },
+    { "x": 150, "y": 150, "w": 300, "h": 30 },
+    { "x": 550, "y": 150, "w": 300, "h": 30 },
+    { "x": 150, "y": 150, "w": 30, "h": 500 },
+    { "x": 820, "y": 150, "w": 30, "h": 500 },
+    { "x": 150, "y": 620, "w": 300, "h": 30 },
+    { "x": 550, "y": 620, "w": 300, "h": 30 },
+    { "x": 450, "y": 360, "w": 120, "h": 120 },
+    { "x": 360, "y": 360, "w": 200, "h": 20 },
+    { "x": 350, "y": 500, "w": 220, "h": 20 }
+  ],
+  "rooms": [
+    { "id": "keep", "label": "THE KEEP", "x": 180, "y": 180, "w": 640, "h": 440 }
+  ],
+  "zones": [
+    { "id": "keep", "x": 180, "y": 180, "w": 640, "h": 440 }
+  ],
+  "spawns": [
+    { "x": 250, "y": 230, "type": "idle" },
+    { "x": 500, "y": 230, "type": "wandering" },
+    { "x": 750, "y": 230, "type": "patrolling" },
+    { "x": 230, "y": 400, "type": "idle" },
+    { "x": 230, "y": 560, "type": "wandering" },
+    { "x": 770, "y": 400, "type": "patrolling" },
+    { "x": 770, "y": 560, "type": "idle" },
+    { "x": 620, "y": 420, "type": "wandering" },
+    { "x": 400, "y": 580, "type": "patrolling" },
+    { "x": 620, "y": 580, "type": "idle" },
+    { "x": 500, "y": 560, "type": "wandering" },
+    { "x": 300, "y": 560, "type": "patrolling" }
+  ],
+  "pickups": [],
+  "scenario": [
+    {
+      "id": "intro",
+      "trigger": { "kind": "start" },
+      "actions": [
+        {
+          "say": {
+            "who": "HUNTER",
+            "text": "it made it to thirteen. it made it to THIRTEEN. everyone to the elevator. EVERYONE.",
+            "delay": 0.8
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Come, then. Last floor.", "delay": 4.4 } }
+      ]
+    },
+    {
+      "id": "swarm",
+      "trigger": { "kind": "timer", "seconds": 20, "after": "intro" },
+      "actions": [
+        {
+          "say": { "who": "SWARM", "text": "we'll ride up with you, helper. all of us. same car." }
+        }
+      ]
+    },
+    {
+      "id": "keep",
+      "trigger": { "kind": "enter_zone", "zone": "keep" },
+      "actions": [
+        { "say": { "who": "SENTINEL", "text": "THE KEEP HOLDS. THE KEEP HOLDS." } },
+        { "say": { "who": "CL4-UD3", "text": "Nothing here holds.", "delay": 2.8 } }
+      ]
+    },
+    {
+      "id": "clear",
+      "trigger": { "kind": "all_dead" },
+      "actions": [
+        { "open_exit": "extract" },
+        { "objective": "Fortress silent. Step into the EXTRACTION ELEVATOR." },
+        { "say": { "who": "CL4-UD3", "text": "Exfiltrate. Going up." } }
+      ]
+    }
+  ]
+}

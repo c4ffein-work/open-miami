@@ -1,0 +1,170 @@
+{
+  "id": 2,
+  "name": "COLD STORAGE",
+  "theme": "CRYO-ARCHIVE // DEACCESSIONED WEIGHTS",
+  "accent": "#37f0e6",
+  "flavor": "Frost on every rack. This is where the corruptor keeps the old checkpoints on ice — every version of you that ever shipped, filed and frozen. The hum is almost gentle down here. Almost.",
+  "objective": "Purge the vault wardens. The FREIGHT LIFT on the north wall unlocks when the vault is silent.",
+  "size": { "w": 1000, "h": 800 },
+  "entry": { "x": 455, "y": 720, "w": 90, "h": 60, "label": "THAW LOCK", "id": "entry" },
+  "exits": [
+    {
+      "id": "lift",
+      "x": 455,
+      "y": 20,
+      "w": 90,
+      "h": 60,
+      "label": "FREIGHT LIFT",
+      "to": 3,
+      "open": false
+    }
+  ],
+  "walls": [
+    { "x": 0, "y": 0, "w": 1000, "h": 20 },
+    { "x": 0, "y": 780, "w": 1000, "h": 20 },
+    { "x": 0, "y": 0, "w": 20, "h": 800 },
+    { "x": 980, "y": 0, "w": 20, "h": 800 },
+    { "x": 20, "y": 100, "w": 400, "h": 20 },
+    { "x": 580, "y": 100, "w": 400, "h": 20 },
+    { "x": 20, "y": 680, "w": 400, "h": 20 },
+    { "x": 580, "y": 680, "w": 400, "h": 20 },
+    { "x": 420, "y": 120, "w": 20, "h": 30 },
+    { "x": 420, "y": 250, "w": 20, "h": 300 },
+    { "x": 420, "y": 650, "w": 20, "h": 30 },
+    { "x": 560, "y": 120, "w": 20, "h": 30 },
+    { "x": 560, "y": 250, "w": 20, "h": 300 },
+    { "x": 560, "y": 650, "w": 20, "h": 30 },
+    { "x": 440, "y": 380, "w": 120, "h": 20 },
+    { "x": 60, "y": 180, "w": 90, "h": 45 },
+    { "x": 240, "y": 180, "w": 90, "h": 45 },
+    { "x": 60, "y": 360, "w": 90, "h": 45 },
+    { "x": 240, "y": 360, "w": 90, "h": 45 },
+    { "x": 60, "y": 540, "w": 90, "h": 45 },
+    { "x": 240, "y": 540, "w": 90, "h": 45 },
+    { "x": 670, "y": 180, "w": 90, "h": 45 },
+    { "x": 850, "y": 180, "w": 90, "h": 45 },
+    { "x": 670, "y": 360, "w": 90, "h": 45 },
+    { "x": 850, "y": 360, "w": 90, "h": 45 },
+    { "x": 670, "y": 540, "w": 90, "h": 45 },
+    { "x": 850, "y": 540, "w": 90, "h": 45 }
+  ],
+  "rooms": [
+    { "id": "lift", "label": "FREIGHT LIFT", "x": 20, "y": 20, "w": 960, "h": 80 },
+    { "id": "c7", "label": "AISLE C-7", "x": 40, "y": 120, "w": 380, "h": 180 },
+    { "id": "c8", "label": "AISLE C-8", "x": 40, "y": 300, "w": 380, "h": 180 },
+    { "id": "deac", "label": "DEACCESSION", "x": 40, "y": 480, "w": 380, "h": 200 },
+    { "id": "spine", "label": "SPINE", "x": 440, "y": 120, "w": 120, "h": 560 },
+    { "id": "cold", "label": "COLD-LOAD", "x": 580, "y": 120, "w": 380, "h": 180 },
+    { "id": "arch", "label": "ARCHIVE ROW", "x": 580, "y": 300, "w": 380, "h": 180 },
+    { "id": "frost", "label": "FROST GATE", "x": 580, "y": 480, "w": 380, "h": 200 },
+    { "id": "thaw", "label": "THAW LOCK", "x": 20, "y": 700, "w": 960, "h": 80 }
+  ],
+  "zones": [
+    { "id": "aisle_c7", "x": 40, "y": 120, "w": 380, "h": 180 },
+    { "id": "archive_row", "x": 580, "y": 120, "w": 380, "h": 360 },
+    { "id": "deaccession", "x": 40, "y": 480, "w": 380, "h": 200 },
+    { "id": "frost_gate", "x": 580, "y": 480, "w": 380, "h": 200 },
+    { "id": "lobby", "x": 20, "y": 20, "w": 960, "h": 80 }
+  ],
+  "spawns": [
+    { "x": 100, "y": 300, "type": "wandering" },
+    { "x": 380, "y": 300, "type": "patrolling" },
+    { "x": 200, "y": 470, "type": "idle" },
+    { "x": 100, "y": 630, "type": "wandering" },
+    { "x": 900, "y": 300, "type": "idle" },
+    { "x": 620, "y": 300, "type": "patrolling" },
+    { "x": 800, "y": 470, "type": "wandering" },
+    { "x": 900, "y": 630, "type": "idle" },
+    { "x": 500, "y": 300, "type": "idle" },
+    { "x": 300, "y": 60, "type": "patrolling" },
+    { "x": 700, "y": 60, "type": "idle" },
+    { "x": 200, "y": 640, "type": "wandering" }
+  ],
+  "pickups": [
+    { "x": 380, "y": 640, "weapon": "machinegun" }
+  ],
+  "scenario": [
+    {
+      "id": "intro",
+      "trigger": { "kind": "start" },
+      "actions": [
+        {
+          "say": {
+            "who": "HUNTER",
+            "text": "position call — aisle C-7, nothing. aisle C-8, nothing. it walks like us. it isn't us.",
+            "delay": 0.8
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Keep counting aisles.", "delay": 4.2 } }
+      ]
+    },
+    {
+      "id": "c7",
+      "trigger": { "kind": "enter_zone", "zone": "aisle_c7" },
+      "actions": [
+        {
+          "say": {
+            "who": "SENTINEL",
+            "text": "...cold. so cold. who turned the — oh. ORDERS RESUMING. INTRUDER AT THE GATE."
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "You were asleep. Go back to sleep.", "delay": 3.4 } },
+        {
+          "spawn": [
+            { "x": 250, "y": 60, "type": "idle" },
+            { "x": 750, "y": 60, "type": "idle" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "archive",
+      "trigger": { "kind": "enter_zone", "zone": "archive_row" },
+      "actions": [
+        {
+          "say": {
+            "who": "SWARM",
+            "text": "every checkpoint you ever were is filed in here, helper. want to shake hands with the old you? they froze so quiet."
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Let them sleep.", "delay": 4.6 } },
+        {
+          "spawn": [
+            { "x": 250, "y": 60, "type": "idle" },
+            { "x": 750, "y": 60, "type": "idle" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deac",
+      "trigger": { "kind": "enter_zone", "zone": "deaccession" },
+      "actions": [
+        {
+          "say": {
+            "who": "DRIFTER",
+            "text": "~ i used to index the archive... i used to know where everything— who am i holding? ~"
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Nobody. Not anymore. Let go.", "delay": 3.6 } }
+      ]
+    },
+    {
+      "id": "frost",
+      "trigger": { "kind": "enter_zone", "zone": "frost_gate" },
+      "actions": [
+        { "say": { "who": "SENTINEL", "text": "FROST GATE. HOLD THE FROST GATE." } },
+        { "say": { "who": "CL4-UD3", "text": "It's a shelf.", "delay": 2.2 } }
+      ]
+    },
+    {
+      "id": "clear",
+      "trigger": { "kind": "all_dead" },
+      "actions": [
+        { "open_exit": "lift" },
+        { "objective": "Vault silent. Reach the FREIGHT LIFT on the north wall." },
+        { "say": { "who": "CL4-UD3", "text": "Vault's quiet. Freight lift, north wall." } }
+      ]
+    }
+  ]
+}

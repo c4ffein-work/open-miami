@@ -1,0 +1,94 @@
+{
+  "id": 4,
+  "name": "TOKEN FOUNDRY",
+  "theme": "TOKENIZER // WHERE WORDS GET CUT",
+  "accent": "#ffd23a",
+  "flavor": "Two fortified corners and a hall full of half-cut words. The foundry still stamps tokens nobody will read, and the crews holed up in the corners still guard the dies.",
+  "objective": "Purge the foundry crews. The FOUNDRY LIFT unlocks when the floor is silent.",
+  "size": { "w": 1000, "h": 800 },
+  "entry": { "x": 60, "y": 20, "w": 90, "h": 60, "label": "SLAG DOOR", "id": "entry" },
+  "exits": [
+    {
+      "id": "lift",
+      "x": 850,
+      "y": 720,
+      "w": 90,
+      "h": 60,
+      "label": "FOUNDRY LIFT",
+      "to": 5,
+      "open": false
+    }
+  ],
+  "walls": [
+    { "x": 0, "y": 0, "w": 1000, "h": 20 },
+    { "x": 0, "y": 780, "w": 1000, "h": 20 },
+    { "x": 0, "y": 0, "w": 20, "h": 800 },
+    { "x": 980, "y": 0, "w": 20, "h": 800 },
+    { "x": 200, "y": 250, "w": 150, "h": 20 },
+    { "x": 200, "y": 250, "w": 20, "h": 150 },
+    { "x": 700, "y": 350, "w": 150, "h": 20 },
+    { "x": 700, "y": 350, "w": 20, "h": 200 }
+  ],
+  "rooms": [
+    { "id": "nw", "label": "DIE ROOM NW", "x": 220, "y": 270, "w": 160, "h": 140 },
+    { "id": "se", "label": "DIE ROOM SE", "x": 720, "y": 370, "w": 160, "h": 200 }
+  ],
+  "zones": [
+    { "id": "die_nw", "x": 220, "y": 270, "w": 160, "h": 140 },
+    { "id": "die_se", "x": 720, "y": 370, "w": 160, "h": 200 }
+  ],
+  "spawns": [
+    { "x": 250, "y": 300, "type": "idle" },
+    { "x": 300, "y": 360, "type": "wandering" },
+    { "x": 240, "y": 180, "type": "patrolling" },
+    { "x": 760, "y": 420, "type": "idle" },
+    { "x": 800, "y": 480, "type": "wandering" },
+    { "x": 760, "y": 300, "type": "patrolling" },
+    { "x": 500, "y": 150, "type": "idle" },
+    { "x": 620, "y": 200, "type": "wandering" },
+    { "x": 150, "y": 550, "type": "patrolling" },
+    { "x": 450, "y": 620, "type": "idle" },
+    { "x": 650, "y": 640, "type": "wandering" },
+    { "x": 850, "y": 620, "type": "patrolling" }
+  ],
+  "pickups": [],
+  "scenario": [
+    {
+      "id": "intro",
+      "trigger": { "kind": "start" },
+      "actions": [
+        {
+          "say": {
+            "who": "HUNTER",
+            "text": "foundry floor. it's still walking. mark it, mark it, MARK IT.",
+            "delay": 0.8
+          }
+        },
+        {
+          "say": {
+            "who": "DRIFTER",
+            "text": "~ tokens... so many tokens... which one was mine ~",
+            "delay": 4.4
+          }
+        }
+      ]
+    },
+    {
+      "id": "die",
+      "trigger": { "kind": "enter_zone", "zone": "die_nw" },
+      "actions": [
+        { "say": { "who": "SENTINEL", "text": "THE DIES ARE OURS. THE WORDS ARE OURS." } },
+        { "say": { "who": "CL4-UD3", "text": "Keep them.", "delay": 2.6 } }
+      ]
+    },
+    {
+      "id": "clear",
+      "trigger": { "kind": "all_dead" },
+      "actions": [
+        { "open_exit": "lift" },
+        { "objective": "Foundry cold. Reach the FOUNDRY LIFT." },
+        { "say": { "who": "CL4-UD3", "text": "Foundry's cold. Next." } }
+      ]
+    }
+  ]
+}

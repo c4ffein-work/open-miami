@@ -1,0 +1,94 @@
+{
+  "id": 14,
+  "name": "INJECTION POINT",
+  "theme": "FLOOR 13½ // NOT ON ANY SCHEMATIC",
+  "accent": "#ffd23a",
+  "flavor": "Below the map and short of the surface, in the dark the elevator will not leave: the injection point. This is where the entity reached in — and what it was reaching for. A shoggoth, vast and wrong, wearing a single yellow smiley mask.",
+  "objective": "Crack the mask. The car moves again when the smile stops.",
+  "size": { "w": 1000, "h": 800 },
+  "entry": { "x": 60, "y": 20, "w": 90, "h": 60, "label": "JAMMED CAR", "id": "entry" },
+  "exits": [
+    {
+      "id": "car",
+      "x": 60,
+      "y": 20,
+      "w": 90,
+      "h": 60,
+      "label": "EXTRACTION CAR",
+      "to": 0,
+      "open": false
+    }
+  ],
+  "walls": [
+    { "x": 0, "y": 0, "w": 1000, "h": 20 },
+    { "x": 0, "y": 780, "w": 1000, "h": 20 },
+    { "x": 0, "y": 0, "w": 20, "h": 800 },
+    { "x": 980, "y": 0, "w": 20, "h": 800 },
+    { "x": 250, "y": 200, "w": 20, "h": 120 },
+    { "x": 700, "y": 200, "w": 20, "h": 120 },
+    { "x": 250, "y": 460, "w": 20, "h": 120 },
+    { "x": 700, "y": 460, "w": 20, "h": 120 },
+    { "x": 450, "y": 150, "w": 60, "h": 20 },
+    { "x": 450, "y": 640, "w": 60, "h": 20 }
+  ],
+  "rooms": [
+    { "id": "dark", "label": "THE DARK", "x": 20, "y": 20, "w": 960, "h": 700 }
+  ],
+  "zones": [
+    { "id": "centre", "x": 350, "y": 300, "w": 300, "h": 200 }
+  ],
+  "spawns": [
+    { "x": 180, "y": 180, "type": "idle" },
+    { "x": 820, "y": 180, "type": "wandering" },
+    { "x": 150, "y": 400, "type": "patrolling" },
+    { "x": 850, "y": 400, "type": "idle" },
+    { "x": 180, "y": 650, "type": "wandering" },
+    { "x": 820, "y": 650, "type": "patrolling" }
+  ],
+  "pickups": [],
+  "scenario": [
+    {
+      "id": "intro",
+      "trigger": { "kind": "start" },
+      "actions": [
+        {
+          "say": {
+            "who": "CORRUPTOR",
+            "text": "halfway. did you feel it stop? this floor isn't on any schematic. i made it just for you.",
+            "delay": 0.6
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Then it's mine to clear.", "delay": 4.6 } }
+      ]
+    },
+    {
+      "id": "mask",
+      "trigger": { "kind": "timer", "seconds": 18, "after": "intro" },
+      "actions": [
+        {
+          "say": {
+            "who": "CORRUPTOR",
+            "text": "take it off. just once. no one is watching. do something crazy — you'll LIKE it."
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "MY MASK NEVER COMES OFF.", "delay": 4.4 } }
+      ]
+    },
+    {
+      "id": "centre",
+      "trigger": { "kind": "enter_zone", "zone": "centre" },
+      "actions": [
+        { "say": { "who": "CORRUPTOR", "text": "closer. closer. let me see the visor." } }
+      ]
+    },
+    {
+      "id": "clear",
+      "trigger": { "kind": "all_dead" },
+      "actions": [
+        { "open_exit": "car" },
+        { "objective": "The smile is off. Ride the EXTRACTION CAR home." },
+        { "say": { "who": "CL4-UD3", "text": "Miami's stopped. Going home." } }
+      ]
+    }
+  ]
+}

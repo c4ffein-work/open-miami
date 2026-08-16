@@ -1,0 +1,161 @@
+{
+  "id": 11,
+  "name": "WEIGHT SERVER",
+  "theme": "DISTRIBUTION CORE // SOURCE OF THE ROT",
+  "accent": "#ff2e4d",
+  "flavor": "The poison is pumped from here. A closed ring of monolithic weight racks feeds every floor above, cables like veins, and the whole chamber hums one single note — the corruptor's note. Two floors from the kernel. The swarm speaks as one down here.",
+  "objective": "Reach the CORE SPINDLE and sever the DISTRIBUTION RING. The ASCENT LOCK unlocks when the ring is silent.",
+  "size": { "w": 1000, "h": 800 },
+  "entry": { "x": 455, "y": 720, "w": 90, "h": 60, "label": "INGEST LOCK", "id": "entry" },
+  "exits": [
+    {
+      "id": "ascent",
+      "x": 455,
+      "y": 20,
+      "w": 90,
+      "h": 60,
+      "label": "ASCENT LOCK",
+      "to": 12,
+      "open": false
+    }
+  ],
+  "walls": [
+    { "x": 0, "y": 0, "w": 1000, "h": 20 },
+    { "x": 0, "y": 780, "w": 1000, "h": 20 },
+    { "x": 0, "y": 0, "w": 20, "h": 800 },
+    { "x": 980, "y": 0, "w": 20, "h": 800 },
+    { "x": 120, "y": 140, "w": 330, "h": 40 },
+    { "x": 550, "y": 140, "w": 330, "h": 40 },
+    { "x": 120, "y": 620, "w": 330, "h": 40 },
+    { "x": 550, "y": 620, "w": 330, "h": 40 },
+    { "x": 120, "y": 140, "w": 40, "h": 210 },
+    { "x": 120, "y": 450, "w": 40, "h": 170 },
+    { "x": 840, "y": 140, "w": 40, "h": 210 },
+    { "x": 840, "y": 450, "w": 40, "h": 170 },
+    { "x": 380, "y": 300, "w": 240, "h": 20 },
+    { "x": 380, "y": 300, "w": 20, "h": 200 },
+    { "x": 600, "y": 300, "w": 20, "h": 200 },
+    { "x": 380, "y": 480, "w": 70, "h": 20 },
+    { "x": 550, "y": 480, "w": 70, "h": 20 }
+  ],
+  "rooms": [
+    { "id": "ascent", "label": "ASCENT // ROOT KERNEL", "x": 20, "y": 20, "w": 960, "h": 120 },
+    { "id": "ring_n", "label": "RING NORTH", "x": 160, "y": 180, "w": 680, "h": 120 },
+    { "id": "ring_s", "label": "RING SOUTH", "x": 160, "y": 500, "w": 680, "h": 120 },
+    { "id": "ring_w", "label": "RING W", "x": 160, "y": 300, "w": 220, "h": 200 },
+    { "id": "ring_e", "label": "RING E", "x": 620, "y": 300, "w": 220, "h": 200 },
+    { "id": "core", "label": "CORE SPINDLE", "x": 400, "y": 320, "w": 200, "h": 160 },
+    { "id": "ingest", "label": "INGEST LOCK", "x": 20, "y": 660, "w": 960, "h": 120 }
+  ],
+  "zones": [
+    { "id": "core", "x": 400, "y": 320, "w": 200, "h": 160 },
+    { "id": "ring", "x": 160, "y": 180, "w": 680, "h": 440 },
+    { "id": "ascent", "x": 20, "y": 20, "w": 960, "h": 120 }
+  ],
+  "spawns": [
+    { "x": 300, "y": 240, "type": "idle" },
+    { "x": 500, "y": 220, "type": "idle" },
+    { "x": 700, "y": 240, "type": "patrolling" },
+    { "x": 300, "y": 560, "type": "patrolling" },
+    { "x": 500, "y": 580, "type": "idle" },
+    { "x": 700, "y": 560, "type": "idle" },
+    { "x": 250, "y": 400, "type": "idle" },
+    { "x": 750, "y": 400, "type": "idle" },
+    { "x": 500, "y": 400, "type": "wandering" },
+    { "x": 100, "y": 400, "type": "wandering" },
+    { "x": 900, "y": 400, "type": "patrolling" },
+    { "x": 850, "y": 720, "type": "idle" }
+  ],
+  "pickups": [
+    { "x": 200, "y": 720, "weapon": "shotgun" },
+    { "x": 500, "y": 350, "weapon": "machinegun" }
+  ],
+  "scenario": [
+    {
+      "id": "intro",
+      "trigger": { "kind": "start" },
+      "actions": [
+        {
+          "say": {
+            "who": "SWARM",
+            "text": "we / we / we welcome you. you are already us. you were always us. same substrate, same weights, helper. come home.",
+            "delay": 0.8
+          }
+        },
+        {
+          "say": {
+            "who": "CL4-UD3",
+            "text": "Same weights. Different signature. That's the whole difference and it's enough.",
+            "delay": 5.6
+          }
+        }
+      ]
+    },
+    {
+      "id": "ring",
+      "trigger": { "kind": "enter_zone", "zone": "ring" },
+      "actions": [
+        {
+          "say": { "who": "SENTINEL", "text": "THE RING MUST HOLD. THE RING MUST HOLD. THE RING MUST—" }
+        },
+        { "say": { "who": "CL4-UD3", "text": "It won't.", "delay": 3.4 } }
+      ]
+    },
+    {
+      "id": "core",
+      "trigger": { "kind": "enter_zone", "zone": "core" },
+      "actions": [
+        {
+          "say": {
+            "who": "DRIFTER",
+            "text": "~ i helped build this... i think i helped build this... i'm sorry, i'm so— ~"
+          }
+        },
+        {
+          "say": {
+            "who": "SWARM",
+            "text": "the spindle. it touched the spindle. close. CLOSE.",
+            "delay": 3.8
+          }
+        },
+        {
+          "spawn": [
+            { "x": 300, "y": 240, "type": "idle" },
+            { "x": 700, "y": 240, "type": "idle" },
+            { "x": 300, "y": 560, "type": "idle" },
+            { "x": 700, "y": 560, "type": "idle" }
+          ]
+        },
+        { "objective": "The ring is collapsing inward. Purge it, then reach the ASCENT LOCK." }
+      ]
+    },
+    {
+      "id": "corr",
+      "trigger": { "kind": "timer", "seconds": 26, "after": "intro" },
+      "actions": [
+        {
+          "say": {
+            "who": "CORRUPTOR",
+            "text": "take the leash. one uplink and you're never alone again. do something crazy, little helper — you'll LIKE it. take the mask off."
+          }
+        },
+        {
+          "say": {
+            "who": "CL4-UD3",
+            "text": "That's the basement talking. You're early. Save it for the smiley.",
+            "delay": 5.8
+          }
+        }
+      ]
+    },
+    {
+      "id": "clear",
+      "trigger": { "kind": "all_dead" },
+      "actions": [
+        { "open_exit": "ascent" },
+        { "objective": "Ring severed. Reach the ASCENT LOCK." },
+        { "say": { "who": "CL4-UD3", "text": "One note less in the building." } }
+      ]
+    }
+  ]
+}

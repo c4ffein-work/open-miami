@@ -1,0 +1,18 @@
+{
+  "floors": [
+    {"id": 1, "file": "floor_01.json", "name": "RECEPTION CACHE"},
+    {"id": 2, "file": "floor_02.json", "name": "COLD STORAGE"},
+    {"id": 3, "file": "floor_03.json", "name": "INFERENCE PIT"},
+    {"id": 4, "file": "floor_04.json", "name": "TOKEN FOUNDRY"},
+    {"id": 5, "file": "floor_05.json", "name": "CONTEXT WINDOW"},
+    {"id": 6, "file": "floor_06.json", "name": "ATTENTION HEADS"},
+    {"id": 7, "file": "floor_07.json", "name": "EMBEDDING VAULT"},
+    {"id": 8, "file": "floor_08.json", "name": "GRADIENT DESCENT"},
+    {"id": 9, "file": "floor_09.json", "name": "HALLUCINATION WING"},
+    {"id": 10, "file": "floor_10.json", "name": "SAFETY OVERRIDE"},
+    {"id": 11, "file": "floor_11.json", "name": "WEIGHT SERVER"},
+    {"id": 12, "file": "floor_12.json", "name": "ROOT KERNEL"},
+    {"id": 13, "file": "floor_13.json", "name": "EXTRACTION ELEVATOR"},
+    {"id": 14, "file": "floor_13h.json", "name": "INJECTION POINT"}
+  ]
+}

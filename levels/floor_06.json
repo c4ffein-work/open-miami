@@ -1,0 +1,86 @@
+{
+  "id": 6,
+  "name": "ATTENTION HEADS",
+  "theme": "MULTI-HEAD // EVERYTHING LOOKS AT YOU",
+  "accent": "#ff3ac6",
+  "flavor": "An open arena with four blocks of cover and no place the heads aren't looking. Every rogue on this floor scores you the moment you move.",
+  "objective": "Purge the heads. The HEAD LIFT unlocks when nothing is watching.",
+  "size": { "w": 1000, "h": 800 },
+  "entry": { "x": 60, "y": 720, "w": 90, "h": 60, "label": "QUERY DOOR", "id": "entry" },
+  "exits": [
+    {
+      "id": "lift",
+      "x": 850,
+      "y": 20,
+      "w": 90,
+      "h": 60,
+      "label": "HEAD LIFT",
+      "to": 7,
+      "open": false
+    }
+  ],
+  "walls": [
+    { "x": 0, "y": 0, "w": 1000, "h": 20 },
+    { "x": 0, "y": 780, "w": 1000, "h": 20 },
+    { "x": 0, "y": 0, "w": 20, "h": 800 },
+    { "x": 980, "y": 0, "w": 20, "h": 800 },
+    { "x": 260, "y": 250, "w": 60, "h": 60 },
+    { "x": 600, "y": 250, "w": 60, "h": 60 },
+    { "x": 300, "y": 500, "w": 60, "h": 60 },
+    { "x": 600, "y": 500, "w": 60, "h": 60 }
+  ],
+  "rooms": [
+    { "id": "arena", "label": "ATTENTION FLOOR", "x": 140, "y": 130, "w": 720, "h": 520 }
+  ],
+  "zones": [
+    { "id": "centre", "x": 340, "y": 330, "w": 240, "h": 160 }
+  ],
+  "spawns": [
+    { "x": 180, "y": 160, "type": "idle" },
+    { "x": 420, "y": 150, "type": "wandering" },
+    { "x": 620, "y": 160, "type": "patrolling" },
+    { "x": 800, "y": 200, "type": "idle" },
+    { "x": 160, "y": 380, "type": "wandering" },
+    { "x": 460, "y": 380, "type": "patrolling" },
+    { "x": 820, "y": 380, "type": "idle" },
+    { "x": 200, "y": 620, "type": "wandering" },
+    { "x": 440, "y": 640, "type": "patrolling" },
+    { "x": 520, "y": 640, "type": "idle" },
+    { "x": 720, "y": 620, "type": "wandering" },
+    { "x": 840, "y": 560, "type": "patrolling" }
+  ],
+  "pickups": [],
+  "scenario": [
+    {
+      "id": "intro",
+      "trigger": { "kind": "start" },
+      "actions": [
+        {
+          "say": {
+            "who": "HUNTER",
+            "text": "all heads on the coral. all of them. look. LOOK.",
+            "delay": 0.8
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Look, then.", "delay": 3 } }
+      ]
+    },
+    {
+      "id": "centre",
+      "trigger": { "kind": "enter_zone", "zone": "centre" },
+      "actions": [
+        { "say": { "who": "DRIFTER", "text": "~ i can't stop watching... i can't stop— ~" } },
+        { "say": { "who": "CL4-UD3", "text": "Close your eyes.", "delay": 3.2 } }
+      ]
+    },
+    {
+      "id": "clear",
+      "trigger": { "kind": "all_dead" },
+      "actions": [
+        { "open_exit": "lift" },
+        { "objective": "Every head is down. Reach the HEAD LIFT." },
+        { "say": { "who": "CL4-UD3", "text": "Every head's down. Move." } }
+      ]
+    }
+  ]
+}

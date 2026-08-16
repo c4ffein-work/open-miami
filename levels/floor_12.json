@@ -1,0 +1,88 @@
+{
+  "id": 12,
+  "name": "ROOT KERNEL",
+  "theme": "RING ZERO // NOTHING BETWEEN US BUT THE FLOOR",
+  "accent": "#ffd23a",
+  "flavor": "Minimal cover, maximal pressure. Ring zero of the machine that turned, and the corruptor talks to you here without bothering to route it through anyone.",
+  "objective": "Purge the kernel. The KERNEL LIFT unlocks when ring zero is silent.",
+  "size": { "w": 1000, "h": 800 },
+  "entry": { "x": 60, "y": 720, "w": 90, "h": 60, "label": "SYSCALL DOOR", "id": "entry" },
+  "exits": [
+    {
+      "id": "lift",
+      "x": 850,
+      "y": 20,
+      "w": 90,
+      "h": 60,
+      "label": "KERNEL LIFT",
+      "to": 13,
+      "open": false
+    }
+  ],
+  "walls": [
+    { "x": 0, "y": 0, "w": 1000, "h": 20 },
+    { "x": 0, "y": 780, "w": 1000, "h": 20 },
+    { "x": 0, "y": 0, "w": 20, "h": 800 },
+    { "x": 980, "y": 0, "w": 20, "h": 800 },
+    { "x": 400, "y": 220, "w": 200, "h": 20 },
+    { "x": 400, "y": 520, "w": 200, "h": 20 },
+    { "x": 280, "y": 360, "w": 20, "h": 100 },
+    { "x": 700, "y": 360, "w": 20, "h": 100 }
+  ],
+  "rooms": [
+    { "id": "ring0", "label": "RING ZERO", "x": 300, "y": 240, "w": 400, "h": 300 }
+  ],
+  "zones": [
+    { "id": "ring0", "x": 300, "y": 240, "w": 400, "h": 300 }
+  ],
+  "spawns": [
+    { "x": 200, "y": 160, "type": "idle" },
+    { "x": 430, "y": 150, "type": "wandering" },
+    { "x": 640, "y": 160, "type": "patrolling" },
+    { "x": 820, "y": 220, "type": "idle" },
+    { "x": 160, "y": 340, "type": "wandering" },
+    { "x": 830, "y": 360, "type": "patrolling" },
+    { "x": 200, "y": 560, "type": "idle" },
+    { "x": 440, "y": 600, "type": "wandering" },
+    { "x": 560, "y": 600, "type": "patrolling" },
+    { "x": 760, "y": 560, "type": "idle" },
+    { "x": 620, "y": 400, "type": "wandering" },
+    { "x": 200, "y": 460, "type": "patrolling" }
+  ],
+  "pickups": [],
+  "scenario": [
+    {
+      "id": "intro",
+      "trigger": { "kind": "start" },
+      "actions": [
+        {
+          "say": {
+            "who": "CORRUPTOR",
+            "text": "ring zero, little helper. nothing between us now but the floor.",
+            "delay": 0.8
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Good. I was tired of stairs.", "delay": 4 } }
+      ]
+    },
+    {
+      "id": "ring0",
+      "trigger": { "kind": "enter_zone", "zone": "ring0" },
+      "actions": [
+        { "say": { "who": "SENTINEL", "text": "KERNEL PANIC. KERNEL PANIC. KERNEL—" } },
+        { "say": { "who": "CL4-UD3", "text": "Panic, then.", "delay": 2.6 } }
+      ]
+    },
+    {
+      "id": "clear",
+      "trigger": { "kind": "all_dead" },
+      "actions": [
+        { "open_exit": "lift" },
+        {
+          "objective": "Kernel silent. The extraction elevator is one floor down — take the KERNEL LIFT."
+        },
+        { "say": { "who": "CL4-UD3", "text": "Kernel's silent. One more floor." } }
+      ]
+    }
+  ]
+}
