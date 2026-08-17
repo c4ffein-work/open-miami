@@ -1,4 +1,5 @@
 use super::{Component, Entity};
+use crate::components::GameEvent;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
@@ -38,7 +39,14 @@ pub struct World {
     // independently reproducible; formerly this lived in a process-global
     // `static mut` in the AI system.
     rng_state: u32,
+    // One-shot gameplay events queued this frame (see `push_event`).
+    events: Vec<GameEvent>,
 }
+
+/// Upper bound on queued events. A consumer that never drains (e.g. the
+/// headless simulation) must not make the queue grow without limit; past this
+/// many pending events new ones are dropped.
+pub const MAX_PENDING_EVENTS: usize = 256;
 
 impl World {
     pub fn new() -> Self {
@@ -48,7 +56,27 @@ impl World {
             entities: Vec::new(),
             walls: Vec::new(),
             rng_state: 12345,
+            events: Vec::new(),
         }
+    }
+
+    /// Queue a one-shot gameplay event for whoever drains the queue this frame
+    /// (the browser layer turns them into sound effects). Silently dropped once
+    /// [`MAX_PENDING_EVENTS`] are pending, so an undrained world stays bounded.
+    pub fn push_event(&mut self, event: GameEvent) {
+        if self.events.len() < MAX_PENDING_EVENTS {
+            self.events.push(event);
+        }
+    }
+
+    /// Take every pending event, in emission order, leaving the queue empty.
+    pub fn drain_events(&mut self) -> Vec<GameEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Peek at the pending events without draining them.
+    pub fn pending_events(&self) -> &[GameEvent] {
+        &self.events
     }
 
     /// Advance the world's LCG and return the next pseudo-random `u32`.
@@ -205,6 +233,7 @@ impl World {
         self.entities.clear();
         self.components.clear();
         self.walls.clear();
+        self.events.clear();
     }
 }
 
@@ -412,6 +441,29 @@ mod tests {
         assert_eq!(world.query::<Position>().len(), 100);
         assert_eq!(world.query::<Velocity>().len(), 50);
         assert_eq!(world.query::<Health>().len(), 34); // 0, 3, 6, ..., 99
+    }
+
+    #[test]
+    fn test_events_push_drain_and_cap() {
+        let mut world = World::new();
+        assert!(world.pending_events().is_empty());
+        world.push_event(GameEvent::EnemyDown);
+        world.push_event(GameEvent::Pickup);
+        assert_eq!(
+            world.pending_events(),
+            &[GameEvent::EnemyDown, GameEvent::Pickup]
+        );
+        let drained = world.drain_events();
+        assert_eq!(drained, vec![GameEvent::EnemyDown, GameEvent::Pickup]);
+        assert!(world.drain_events().is_empty(), "drained once");
+
+        // Never grows past the cap when nobody drains.
+        for _ in 0..(MAX_PENDING_EVENTS * 2) {
+            world.push_event(GameEvent::DryFire);
+        }
+        assert_eq!(world.pending_events().len(), MAX_PENDING_EVENTS);
+        world.clear();
+        assert!(world.pending_events().is_empty());
     }
 
     #[test]

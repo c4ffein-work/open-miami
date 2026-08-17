@@ -26,8 +26,9 @@ OUT_PATH = os.path.join(ROOT, "src", "levels_data.rs")
 
 ENEMY_TYPES = {"idle": "Idle", "wandering": "Wandering", "patrolling": "Patrolling"}
 WEAPONS = {"pistol": "Pistol", "shotgun": "Shotgun", "machinegun": "MachineGun", "melee": "Melee"}
-SPEAKERS = {"CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR"}
-TRIGGERS = {"start", "enter_zone", "kills", "all_dead", "timer", "exit_open", "step_done"}
+SPEAKERS = {"CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR", "UPLINK"}
+TRIGGERS = {"start", "enter_zone", "kills", "all_dead", "timer", "exit_open", "step_done",
+            "boss_dead", "extracted"}
 ACTIONS = {"say", "spawn", "open_exit", "close_exit", "objective", "sfx"}
 SFX = {"elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"}
 
@@ -245,6 +246,10 @@ def gen_floor(f, out):
         elif k == "exit_open":
             ex = f"Some({rstr(trig['exit'])})" if "exit" in trig else "None"
             t = f"Trigger::ExitOpen({ex})"
+        elif k == "boss_dead":
+            t = "Trigger::BossDead"
+        elif k == "extracted":
+            t = "Trigger::Extracted"
         else:
             t = f"Trigger::StepDone({rstr(trig['step'])})"
         out.append(f"    StepDef {{ id: {rstr(sid)}, trigger: {t}, actions: &{name}_ACTIONS_{ident(sid)} }},")

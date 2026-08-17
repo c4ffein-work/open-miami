@@ -13,7 +13,10 @@ jobs:
   e2e-test:
     name: End-to-End Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
       - name: Checkout repository
@@ -32,7 +35,12 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-wasm-
 
       - name: Install wasm-bindgen-cli
-        run: cargo install wasm-bindgen-cli
+        run: |
+          # Pin wasm-bindgen-cli to the wasm-bindgen crate version in Cargo.lock:
+          # the CLI and the crate must match exactly or glue generation fails.
+          WASM_BINDGEN_VERSION=$(grep -A 2 'name = "wasm-bindgen"' Cargo.lock | grep '^version = ' | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Installing wasm-bindgen-cli v$WASM_BINDGEN_VERSION to match Cargo.lock"
+          cargo install wasm-bindgen-cli --version $WASM_BINDGEN_VERSION
 
       - name: Build WASM
         run: |
@@ -56,12 +64,14 @@ jobs:
           bun install
           bunx playwright install --with-deps chromium
 
+      # No continue-on-error: a failing spec fails the job. The artifacts below
+      # still upload via `if: always()`.
       - name: Run E2E tests
+        id: e2e
         working-directory: tests/e2e
         run: |
           mkdir -p test-results
           bunx playwright test
-        continue-on-error: true
 
       - name: Upload test results
         if: always()
@@ -72,6 +82,7 @@ jobs:
             tests/e2e/test-results/
             tests/e2e/playwright-report/
           retention-days: 30
+          if-no-files-found: warn
 
       - name: Upload screenshots
         if: always()
@@ -82,65 +93,49 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+      # The PR comment reflects the real outcome of the test step (pass/fail),
+      # not a count of PNG files. Skipped for PRs from forks (read-only token).
       - name: Comment test results on PR
-        if: github.event_name == 'pull_request' && always()
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
+        env:
+          E2E_OUTCOME: ${{ steps.e2e.outcome }}
         with:
           script: |
-            const fs = require('fs');
-            const path = require('path');
+            const outcome = process.env.E2E_OUTCOME; // success | failure | cancelled | skipped
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const verdict = {
+              success: 'PASSED',
+              failure: 'FAILED',
+              cancelled: 'CANCELLED',
+              skipped: 'SKIPPED (an earlier step failed)',
+            }[outcome] || outcome;
 
-            let testSummary = '## 🎮 E2E Test Results\n\n';
-
-            // Check if screenshots exist
-            const screenshotsDir = 'tests/e2e/test-results';
-            try {
-              if (fs.existsSync(screenshotsDir)) {
-                const files = fs.readdirSync(screenshotsDir).filter(f => f.endsWith('.png'));
-                if (files.length > 0) {
-                  testSummary += `✅ E2E tests completed - ${files.length} screenshots captured\n\n`;
-                  testSummary += `Screenshots:\n`;
-                  files.forEach(f => {
-                    testSummary += `- ${f}\n`;
-                  });
-                  testSummary += `\n📥 [Download artifacts](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})\n`;
-                } else {
-                  testSummary += `⚠️ No screenshots found - tests may have failed\n`;
-                }
-              }
-            } catch (err) {
-              testSummary += `⚠️ Could not read test results\n`;
-              console.error(err);
-            }
-
-            testSummary += `\n🔗 [View full test report](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+            let body = '## E2E Test Results\n\n';
+            body += `**${verdict}** (\`${context.sha.slice(0, 7)}\`)\n\n`;
+            body += `Screenshots and the Playwright HTML report are attached as artifacts of the [workflow run](${runUrl}).\n`;
 
             const prNumber = context.payload.pull_request.number;
-
-            // Find existing comment
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: prNumber
+              issue_number: prNumber,
             });
-
-            const botComment = comments.find(comment =>
-              comment.user.type === 'Bot' &&
-              comment.body.includes('🎮 E2E Test Results')
+            const botComment = comments.find((c) =>
+              c.user.type === 'Bot' && c.body.includes('## E2E Test Results')
             );
-
             if (botComment) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 comment_id: botComment.id,
-                body: testSummary
+                body,
               });
             } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: testSummary
+                body,
               });
             }

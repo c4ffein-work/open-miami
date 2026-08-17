@@ -385,3 +385,207 @@ fn test_player_blocked_by_wall() {
         pos.x
     );
 }
+
+// --- Hotline Miami weapon rules: one weapon in hand, the ammo lives on it ---
+
+/// A downed rogue's weapon hits the floor with a partial magazine; the player
+/// swaps their worn pistol for it in place; the pistol keeps its rounds.
+#[test]
+fn test_ammo_travels_with_the_weapon_through_drop_and_swap() {
+    let mut world = World::new();
+    let player = spawn_player(&mut world, Vec2::new(100.0, 100.0));
+    world.get_component_mut::<Weapon>(player).unwrap().ammo = 4;
+    let rogue = spawn_enemy_with_type(&mut world, Vec2::new(105.0, 100.0), EnemyType::Patrolling);
+    assert_eq!(
+        world.get_component::<Weapon>(rogue).unwrap().weapon_type,
+        WeaponType::Shotgun
+    );
+    world
+        .get_component_mut::<Health>(rogue)
+        .unwrap()
+        .take_damage(999);
+
+    let mut pickup = PickupSystem;
+    pickup.run(&mut world, 1.0 / 60.0);
+    let events = world.drain_events();
+    assert_eq!(events, vec![GameEvent::EnemyDown]);
+
+    let dropped = world.query::<WeaponPickup>();
+    assert_eq!(dropped.len(), 1);
+    let drop = *world.get_component::<WeaponPickup>(dropped[0]).unwrap();
+    assert_eq!(drop.weapon_type, WeaponType::Shotgun);
+    assert!(drop.ammo >= 1 && drop.ammo <= WeaponType::Shotgun.magazine());
+
+    // E: take the shotgun with exactly its rounds; leave the 4-round pistol.
+    assert_eq!(
+        PickupSystem::swap_for_player(&mut world),
+        Some(WeaponType::Shotgun)
+    );
+    let held = *world.get_component::<Weapon>(player).unwrap();
+    assert_eq!(
+        (held.weapon_type, held.ammo),
+        (WeaponType::Shotgun, drop.ammo)
+    );
+    let floor = *world.get_component::<WeaponPickup>(dropped[0]).unwrap();
+    assert_eq!((floor.weapon_type, floor.ammo), (WeaponType::Pistol, 4));
+    assert_eq!(world.drain_events(), vec![GameEvent::Pickup]);
+    // Nothing granted a second pickup or a refill.
+    assert_eq!(world.query::<WeaponPickup>().len(), 1);
+}
+
+/// Throwing carries the ammo along: the weapon lands as a pickup with the same
+/// rounds, and picking it back up restores exactly that weapon.
+#[test]
+fn test_thrown_weapon_keeps_its_ammo_and_can_be_retrieved() {
+    let mut world = World::new();
+    let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+    // Fire twice, resetting the cooldown in between: 12 -> 10.
+    fire_player_weapon(&mut world, Vec2::new(500.0, 0.0));
+    world
+        .get_component_mut::<Weapon>(player)
+        .unwrap()
+        .fire_timer = 0.0;
+    fire_player_weapon(&mut world, Vec2::new(500.0, 0.0));
+    assert_eq!(world.get_component::<Weapon>(player).unwrap().ammo, 10);
+    assert_eq!(
+        world.drain_events(),
+        vec![
+            GameEvent::PlayerFired(WeaponType::Pistol),
+            GameEvent::PlayerFired(WeaponType::Pistol)
+        ]
+    );
+
+    assert!(ThrownWeaponSystem::throw_from_player(
+        &mut world,
+        Vec2::new(1.0, 0.0)
+    ));
+    assert!(world.get_component::<Weapon>(player).is_none()); // unarmed
+    assert_eq!(get_player_weapon(&world), None);
+    // Unarmed: the trigger does nothing at all (no event either).
+    assert!(!fire_player_weapon(&mut world, Vec2::new(500.0, 0.0)));
+    assert_eq!(world.drain_events(), vec![GameEvent::Throw]);
+
+    let mut thrown = ThrownWeaponSystem;
+    for _ in 0..300 {
+        thrown.run(&mut world, 1.0 / 60.0);
+        if world.query::<ThrownWeapon>().is_empty() {
+            break;
+        }
+    }
+    let pickups = world.query::<WeaponPickup>();
+    assert_eq!(pickups.len(), 1);
+    let landed = *world.get_component::<WeaponPickup>(pickups[0]).unwrap();
+    assert_eq!((landed.weapon_type, landed.ammo), (WeaponType::Pistol, 10));
+
+    // Walk over it and pick it up: same pistol, still 10 rounds.
+    let where_it_lies = *world.get_component::<Position>(pickups[0]).unwrap();
+    *world.get_component_mut::<Position>(player).unwrap() = where_it_lies;
+    assert_eq!(
+        PickupSystem::swap_for_player(&mut world),
+        Some(WeaponType::Pistol)
+    );
+    let held = *world.get_component::<Weapon>(player).unwrap();
+    assert_eq!((held.weapon_type, held.ammo), (WeaponType::Pistol, 10));
+    assert!(world.query::<WeaponPickup>().is_empty()); // consumed (was unarmed)
+}
+
+/// Empty gun: dry-fires, never refills; the intended loop is throw + take.
+#[test]
+fn test_empty_gun_dry_fires_until_swapped() {
+    let mut world = World::new();
+    let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+    *world.get_component_mut::<Weapon>(player).unwrap() = Weapon::with_ammo(WeaponType::Pistol, 1);
+    fire_player_weapon(&mut world, Vec2::new(100.0, 0.0));
+    world
+        .get_component_mut::<Weapon>(player)
+        .unwrap()
+        .fire_timer = 0.0;
+    assert!(!fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
+    assert_eq!(
+        world.drain_events(),
+        vec![
+            GameEvent::PlayerFired(WeaponType::Pistol),
+            GameEvent::DryFire
+        ]
+    );
+    assert_eq!(world.query::<Bullet>().len(), 1);
+
+    // A machine gun lies here: swap and we're firing again.
+    spawn_pickup_with_ammo(&mut world, Vec2::new(0.0, 0.0), WeaponType::MachineGun, 9);
+    assert_eq!(
+        PickupSystem::swap_for_player(&mut world),
+        Some(WeaponType::MachineGun)
+    );
+    world.drain_events();
+    fire_player_weapon(&mut world, Vec2::new(100.0, 0.0));
+    assert_eq!(
+        world.drain_events(),
+        vec![GameEvent::PlayerFired(WeaponType::MachineGun)]
+    );
+    assert_eq!(world.get_component::<Weapon>(player).unwrap().ammo, 8);
+    // The empty pistol lies where the MG was, still empty.
+    let floor = world.query::<WeaponPickup>();
+    assert_eq!(floor.len(), 1);
+    let p = world.get_component::<WeaponPickup>(floor[0]).unwrap();
+    assert_eq!((p.weapon_type, p.ammo), (WeaponType::Pistol, 0));
+}
+
+/// The full event flow through the headless simulation: fire -> bullet hit ->
+/// enemy down, each announced once, in order, with the right weapon.
+#[test]
+fn test_sim_events_fire_hit_down() {
+    use open_miami::sim::Simulation;
+    let mut world = World::new();
+    spawn_player(&mut world, Vec2::new(0.0, 0.0));
+    let enemy = spawn_enemy(&mut world, Vec2::new(0.0, -80.0));
+    world.get_component_mut::<Health>(enemy).unwrap().current = 50;
+    let mut sim = Simulation::from_world(world);
+
+    let mut seen: Vec<GameEvent> = Vec::new();
+    for _ in 0..120 {
+        if sim.enemies_alive() == 0 {
+            break;
+        }
+        sim.player_fire(Vec2::new(0.0, -80.0));
+        sim.step(1.0 / 60.0);
+        seen.extend(sim.world.drain_events());
+    }
+    assert_eq!(sim.enemies_alive(), 0);
+    let fired = seen
+        .iter()
+        .filter(|e| matches!(e, GameEvent::PlayerFired(WeaponType::Pistol)))
+        .count();
+    let hits = seen
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                GameEvent::EnemyHit {
+                    by: WeaponType::Pistol
+                }
+            )
+        })
+        .count();
+    let downs = seen
+        .iter()
+        .filter(|e| matches!(e, GameEvent::EnemyDown))
+        .count();
+    assert!(fired >= 1, "{seen:?}");
+    assert_eq!(hits, 1, "50 hp / 50 dmg = one hit: {seen:?}");
+    assert_eq!(downs, 1, "one kill announced once: {seen:?}");
+    // The hit is announced before the down.
+    let hit_at = seen
+        .iter()
+        .position(|e| matches!(e, GameEvent::EnemyHit { .. }))
+        .unwrap();
+    let down_at = seen
+        .iter()
+        .position(|e| matches!(e, GameEvent::EnemyDown))
+        .unwrap();
+    assert!(hit_at < down_at);
+    // Nothing else leaked (no pickup/throw/hurt from a static enemy).
+    assert!(seen.iter().all(|e| !matches!(
+        e,
+        GameEvent::Pickup | GameEvent::Throw | GameEvent::PlayerHurt
+    )));
+}

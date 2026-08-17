@@ -134,6 +134,13 @@ pub fn is_key_pressed(key: &str) -> bool {
     })
 }
 
+/// Whether any key or mouse button is currently held — a user gesture, which
+/// is what browsers require before audio may start (`?floor=N` sessions have
+/// no menu keypress to piggyback on).
+pub fn any_pressed() -> bool {
+    PRESSED_KEYS.with(|k| !k.borrow().is_empty()) || MOUSE_BUTTONS.with(|b| !b.borrow().is_empty())
+}
+
 pub fn mouse_position() -> Vec2 {
     MOUSE_POSITION.with(|pos| *pos.borrow())
 }

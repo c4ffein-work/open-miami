@@ -1,5 +1,7 @@
 use crate::collision;
-use crate::components::{Bullet, Enemy, Health, Position, ProjectileTrail, Radius, Velocity};
+use crate::components::{
+    Bullet, Enemy, GameEvent, Health, Position, ProjectileTrail, Radius, Velocity,
+};
 use crate::ecs::{Entity, System, World};
 
 /// System that updates and removes projectile trails
@@ -111,6 +113,9 @@ impl System for BulletSystem {
                     if let Some(health) = world.get_component_mut::<Health>(enemy_entity) {
                         health.take_damage(bullet.damage);
                     }
+                    world.push_event(GameEvent::EnemyHit {
+                        by: bullet.weapon_type,
+                    });
                     // Shove the enemy along the bullet's travel direction — the
                     // live combat knockback (process_shoot is test-only; real
                     // bullet damage resolves here in BulletSystem).
@@ -185,6 +190,58 @@ mod tests {
 
         // Trail should be removed
         assert!(world.get_component::<ProjectileTrail>(entity).is_none());
+    }
+
+    #[test]
+    fn test_bullet_hit_damages_and_announces_weapon() {
+        use crate::components::WeaponType;
+        let mut world = World::new();
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, Position::new(50.0, 0.0));
+        world.add_component(enemy, Radius::new(12.0));
+        world.add_component(enemy, Health::new(100));
+
+        let bullet = world.spawn();
+        world.add_component(bullet, Bullet::new(WeaponType::Shotgun, 30));
+        world.add_component(bullet, Position::new(0.0, 0.0));
+        world.add_component(bullet, Velocity::new(800.0, 0.0));
+        world.add_component(bullet, Radius::new(2.0));
+
+        let mut system = BulletSystem;
+        for _ in 0..10 {
+            system.run(&mut world, 0.016);
+            if world.query::<Bullet>().is_empty() {
+                break;
+            }
+        }
+        assert!(world.query::<Bullet>().is_empty(), "bullet consumed on hit");
+        assert_eq!(world.get_component::<Health>(enemy).unwrap().current, 70);
+        assert_eq!(
+            world.drain_events(),
+            vec![GameEvent::EnemyHit {
+                by: WeaponType::Shotgun
+            }]
+        );
+    }
+
+    #[test]
+    fn test_bullet_into_wall_is_silent() {
+        use crate::components::WeaponType;
+        let mut world = World::new();
+        world.add_wall(40.0, -50.0, 20.0, 100.0);
+        let bullet = world.spawn();
+        world.add_component(bullet, Bullet::new(WeaponType::Pistol, 30));
+        world.add_component(bullet, Position::new(0.0, 0.0));
+        world.add_component(bullet, Velocity::new(800.0, 0.0));
+        world.add_component(bullet, Radius::new(2.0));
+
+        let mut system = BulletSystem;
+        for _ in 0..10 {
+            system.run(&mut world, 0.016);
+        }
+        assert!(world.query::<Bullet>().is_empty());
+        assert!(world.drain_events().is_empty());
     }
 
     #[test]

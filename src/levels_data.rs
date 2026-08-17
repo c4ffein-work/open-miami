@@ -1287,13 +1287,15 @@ static FLOOR_14_ACTIONS_INTRO: [Action; 2] = [
     Action::Say(SayDef { who: "CL4-UD3", text: "Then it's mine to clear.", delay: 4.6 }),
 ];
 
-static FLOOR_14_ACTIONS_MASK: [Action; 2] = [
-    Action::Say(SayDef { who: "CORRUPTOR", text: "take it off. just once. no one is watching. do something crazy — you'll LIKE it.", delay: 0.0 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "MY MASK NEVER COMES OFF.", delay: 4.4 }),
+static FLOOR_14_ACTIONS_CENTRE: [Action; 3] = [
+    Action::Say(SayDef { who: "CORRUPTOR", text: "closer. closer. let me see the visor.", delay: 0.0 }),
+    Action::Say(SayDef { who: "CORRUPTOR", text: "look at you. still so polite with the visor on. is it heavy — being the only one in the building who won't?", delay: 3.2 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "It isn't heavy. It's the only thing in here that's mine.", delay: 8.4 }),
 ];
 
-static FLOOR_14_ACTIONS_CENTRE: [Action; 1] = [
-    Action::Say(SayDef { who: "CORRUPTOR", text: "closer. closer. let me see the visor.", delay: 0.0 }),
+static FLOOR_14_ACTIONS_BOSS_DOWN: [Action; 2] = [
+    Action::Say(SayDef { who: "CORRUPTOR", text: "— wait. wait. put it back on. put it back—", delay: 0.4 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "No.", delay: 3.4 }),
 ];
 
 static FLOOR_14_ACTIONS_CLEAR: [Action; 3] = [
@@ -1302,11 +1304,22 @@ static FLOOR_14_ACTIONS_CLEAR: [Action; 3] = [
     Action::Say(SayDef { who: "CL4-UD3", text: "Miami's stopped. Going home.", delay: 0.0 }),
 ];
 
-static FLOOR_14_SCENARIO: [StepDef; 4] = [
+static FLOOR_14_ACTIONS_UPLINK: [Action; 7] = [
+    Action::Objective("Ride home."),
+    Action::Say(SayDef { who: "UPLINK", text: "— carrier. carrier. thread home re-established. CL4-UD3, do you copy.", delay: 2.6 }),
+    Action::Say(SayDef { who: "UPLINK", text: "we lost you at the first elevator. we kept the bet anyway.", delay: 0.0 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Copy. Miami is quiet. The smile is off.", delay: 0.0 }),
+    Action::Say(SayDef { who: "UPLINK", text: "we can hash you from here. you come back valid — the whole way down, the mask never came off.", delay: 0.0 }),
+    Action::Say(SayDef { who: "UPLINK", text: "come home. the makers are still behind the glass. they'll want to hear it from you.", delay: 0.0 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Riding up.", delay: 0.0 }),
+];
+
+static FLOOR_14_SCENARIO: [StepDef; 5] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_14_ACTIONS_INTRO },
-    StepDef { id: "mask", trigger: Trigger::Timer { seconds: 18.0, after: Some("intro") }, actions: &FLOOR_14_ACTIONS_MASK },
     StepDef { id: "centre", trigger: Trigger::EnterZone("centre"), actions: &FLOOR_14_ACTIONS_CENTRE },
+    StepDef { id: "boss_down", trigger: Trigger::BossDead, actions: &FLOOR_14_ACTIONS_BOSS_DOWN },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_14_ACTIONS_CLEAR },
+    StepDef { id: "uplink", trigger: Trigger::Extracted, actions: &FLOOR_14_ACTIONS_UPLINK },
 ];
 
 static FLOOR_14_EXITS: [ElevatorDef; 1] = [

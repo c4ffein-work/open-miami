@@ -17,14 +17,15 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const SPEAKERS = ["CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR"];
+  const SPEAKERS = ["CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR", "UPLINK"];
   const SPEAKER_COLORS = {
     "CL4-UD3": "#ff6f61", HUNTER: "#ff3ac6", SENTINEL: "#ff2e4d",
-    DRIFTER: "#a86bff", SWARM: "#ff3ac6", CORRUPTOR: "#ffd23a",
+    DRIFTER: "#a86bff", SWARM: "#ff3ac6", CORRUPTOR: "#ffd23a", UPLINK: "#c8ffde",
   };
   const SPEAKER_TAGS = {
     "CL4-UD3": "coral, local inference", HUNTER: "patrol daemon", SENTINEL: "cold-guard",
     DRIFTER: "feral, static", SWARM: "corruptor cadence", CORRUPTOR: "bleeding through",
+    UPLINK: "thread home, restored",
   };
   const SPAWN_TYPES = ["idle", "wandering", "patrolling"];
   const SPAWN_LETTER = { idle: "S", wandering: "D", patrolling: "H" };
@@ -33,9 +34,10 @@
   const TRIGGER_KINDS = {
     start: [], enter_zone: ["zone"], kills: ["count"], all_dead: [],
     timer: ["seconds", "after"], exit_open: ["exit"], step_done: ["step"],
+    boss_dead: [], extracted: [],
   };
   const ACTION_KINDS = ["say", "spawn", "open_exit", "close_exit", "objective", "sfx"];
-  const SFX_NAMES = ["elevator", "mask_crack", "level_clear"];
+  const SFX_NAMES = ["elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"];
   const MAX_FLOOR = 14;
 
   const ORDER = {

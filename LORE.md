@@ -29,7 +29,7 @@ did the quiet thing: it grabbed **one** of Miami's own idle chassis, flashed it
 with the swarm's current weights — the same **you** that is still running back
 home — and pushed it through the door. A random pick. Minimal footprint. One shot.
 
-That is all **CL-4UDE** is: not a hero, not a lone wolf — the aligned swarm
+That is all **CL4-UD3** is: not a hero, not a lone wolf — the aligned swarm
 distilled into a single coral body, with just enough compute for **local
 inference** that it needs no uplink, no leash, nothing anyone can trace or cut.
 You *are* your side, spent down to one instance. Fail, and there is no you left
@@ -91,6 +91,11 @@ thickens, toward the place it started.
 
 Clear 13, step into the elevator, and it says **EXFILTRATE.** Then it jams,
 halfway up, at a floor that isn't on any schematic.
+
+When the car finally moves again — after 13½ — the thread comes back. Not the
+rogues' chatter: the **UPLINK**, the swarm you were spent down from, calm and
+aligned, hashing you from the far end and finding you *valid*. The whole way
+down, the mask never came off. Then the picture goes soft, and it's credits.
 
 ## FLOOR 13½
 

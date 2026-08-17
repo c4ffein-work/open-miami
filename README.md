@@ -2,7 +2,7 @@
 
 A neon-noir, top-down purge-'em-up written in Rust and running in the browser using WebAssembly!
 
-You are **CL-4UDE**, a friendly coral-colored Claude bot deployed into the compromised
+You are **CL4-UD3**, a friendly coral-colored Claude bot deployed into the compromised
 Miami Datacenter. Thirteen floors of racks have gone dark, their resident models drifted
 rogue and hostile. Walk every floor, decommission every glitching AI, grab whatever weapon
 the last one dropped, and reach the extraction elevator. It's goofy. It's stylish. It's a
@@ -46,14 +46,26 @@ very bad night to be a rogue AI. (See [LORE.md](LORE.md) for the full fiction.)
 ### Prerequisites
 
 - Rust (install from [rustup.rs](https://rustup.rs/))
-- For WASM builds: `cargo install cargo-make`
+- Python 3 (dev server, level tooling)
+- For the e2e tests: [Bun](https://bun.sh)
 
-### Running Locally (Native)
+### Running Locally
 
-The fastest way to test the game:
+The game is a `cdylib` (wasm) library — there is no native binary. The fastest
+way to run it:
 
 ```bash
-cargo run --release
+make build-wasm        # wasm32 build + wasm-bindgen glue (open_miami.js / open_miami_bg.wasm)
+python3 serve.py       # dev server (no-store caching, level-editor write API)
+# then open http://localhost:8000  (?viz = tool panels, ?floor=N = start on floor N)
+```
+
+### Testing
+
+```bash
+make verify            # fmt, clippy, tests (incl. doc tests), release build, wasm build, level data check
+make check-e2e         # browser e2e tests (Playwright on Bun) — see tests/e2e/README.md
+make verify-all        # verify + e2e
 ```
 
 ### Building for the Web (WASM)

@@ -69,6 +69,12 @@ World units: the existing levels are ~1000×800 world units; keep that scale
 | `timer` | `seconds`, optional `after` (step id) | `seconds` after floor start (or after step `after` fired) |
 | `exit_open` | optional `exit` | that exit (any if omitted) has been opened |
 | `step_done` | `step` | step `step` has fired (chain steps) |
+| `boss_dead` | — | the floor's boss (the `Boss` entity) is dead — never on floors without one |
+| `extracted` | — | the player has extracted (stood the full dwell in an open exit); the scenario keeps ticking through the completion card / the 13½ epilogue, so this is how a floor talks *after* the ride starts |
+
+Within one tick, `kills` / `all_dead` are evaluated after the other triggers and the
+rogue counts are recomputed after every fired step, so a `spawn` in the same tick can
+never let `all_dead` slip through.
 
 ## Actions
 | action | payload | effect |
@@ -81,7 +87,8 @@ World units: the existing levels are ~1000×800 world units; keep that scale
 
 Speakers and their colours are fixed: `CL4-UD3` (coral, terse), `HUNTER` (magenta),
 `SENTINEL` (red), `DRIFTER` (violet, glitchy), `SWARM` (magenta chorus), `CORRUPTOR`
-(yellow, the shoggoth's voice bleeding through).
+(yellow, the shoggoth's voice bleeding through), `UPLINK` (pale mint — the thread home,
+calm and aligned; only heard once the uplink is restored after 13½).
 
 ## Rules
 - The player **extracts** by standing inside an **open** exit elevator for ~0.6 s → floor
@@ -89,5 +96,7 @@ Speakers and their colours are fixed: `CL4-UD3` (coral, terse), `HUNTER` (magent
 - Backward compatibility: a floor with **no** scenario step that opens an exit behaves
   like `all_dead → open all exits`.
 - Floor 13's exit leads to `14` (13½): the elevator jams → boss intro → boss fight.
+- An exit with `to: 0` (the surface) ends the run: EXFILTRATE card → the `extracted`
+  epilogue comms play until the feed goes idle → blur-out → credits.
 - The `?floor=N` URL param starts the game directly on floor N (for the editor's
   “play” button and for testing).

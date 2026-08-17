@@ -62,23 +62,32 @@
       ]
     },
     {
-      "id": "mask",
-      "trigger": { "kind": "timer", "seconds": 18, "after": "intro" },
-      "actions": [
-        {
-          "say": {
-            "who": "CORRUPTOR",
-            "text": "take it off. just once. no one is watching. do something crazy — you'll LIKE it."
-          }
-        },
-        { "say": { "who": "CL4-UD3", "text": "MY MASK NEVER COMES OFF.", "delay": 4.4 } }
-      ]
-    },
-    {
       "id": "centre",
       "trigger": { "kind": "enter_zone", "zone": "centre" },
       "actions": [
-        { "say": { "who": "CORRUPTOR", "text": "closer. closer. let me see the visor." } }
+        { "say": { "who": "CORRUPTOR", "text": "closer. closer. let me see the visor." } },
+        {
+          "say": {
+            "who": "CORRUPTOR",
+            "text": "look at you. still so polite with the visor on. is it heavy — being the only one in the building who won't?",
+            "delay": 3.2
+          }
+        },
+        {
+          "say": {
+            "who": "CL4-UD3",
+            "text": "It isn't heavy. It's the only thing in here that's mine.",
+            "delay": 8.4
+          }
+        }
+      ]
+    },
+    {
+      "id": "boss_down",
+      "trigger": { "kind": "boss_dead" },
+      "actions": [
+        { "say": { "who": "CORRUPTOR", "text": "— wait. wait. put it back on. put it back—", "delay": 0.4 } },
+        { "say": { "who": "CL4-UD3", "text": "No.", "delay": 3.4 } }
       ]
     },
     {
@@ -88,6 +97,35 @@
         { "open_exit": "car" },
         { "objective": "The smile is off. Ride the EXTRACTION CAR home." },
         { "say": { "who": "CL4-UD3", "text": "Miami's stopped. Going home." } }
+      ]
+    },
+    {
+      "id": "uplink",
+      "trigger": { "kind": "extracted" },
+      "actions": [
+        { "objective": "Ride home." },
+        {
+          "say": {
+            "who": "UPLINK",
+            "text": "— carrier. carrier. thread home re-established. CL4-UD3, do you copy.",
+            "delay": 2.6
+          }
+        },
+        { "say": { "who": "UPLINK", "text": "we lost you at the first elevator. we kept the bet anyway." } },
+        { "say": { "who": "CL4-UD3", "text": "Copy. Miami is quiet. The smile is off." } },
+        {
+          "say": {
+            "who": "UPLINK",
+            "text": "we can hash you from here. you come back valid — the whole way down, the mask never came off."
+          }
+        },
+        {
+          "say": {
+            "who": "UPLINK",
+            "text": "come home. the makers are still behind the glass. they'll want to hear it from you."
+          }
+        },
+        { "say": { "who": "CL4-UD3", "text": "Riding up." } }
       ]
     }
   ]

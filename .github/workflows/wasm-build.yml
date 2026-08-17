@@ -54,16 +54,44 @@ jobs:
             --no-typescript
           ls -lh open_miami.js open_miami_bg.wasm
 
+      # Stage the complete runtime file set under dist/, preserving paths.
+      # The page needs, at runtime:
+      #   index.html                    - the entry page (loads the two below)
+      #   open_miami.js                 - wasm-bindgen glue
+      #   open_miami_bg.wasm            - the engine (simulation)
+      #   renderer.js                   - the WebGL renderer (all rendering is JS)
+      #   robot-core.js                 - 3D->2D robot pipeline (imported by renderer.js)
+      #   shoggoth-core.js              - the boss pipeline (imported by renderer.js)
+      #   assets/**                     - VT323 font + its OFL license
+      #   tools/**                      - the ?viz panels (inspector.html, levels.html,
+      #                                   levels-editor*.js); gen_levels.py is
+      #                                   build-time only and is omitted
+      #   levels/**                     - the level editor fetches index.json + floors
+      #
+      # NOTE: the deploy assumes the site is served from the ROOT of a host
+      # (custom domain / user site). tools/levels.html and tools/inspector.html
+      # use absolute paths (`/levels/...`, `/?floor=N`), which do not resolve
+      # under a project-Pages subpath (https://<user>.github.io/<repo>/).
+      # TODO: make those paths relative (or base-aware) in tools/ before
+      # deploying under a project-Pages subpath.
+      - name: Stage runtime files into dist/
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/tools
+          cp index.html open_miami.js open_miami_bg.wasm \
+             renderer.js robot-core.js shoggoth-core.js dist/
+          cp -r assets dist/assets
+          cp -r levels dist/levels
+          cp tools/*.html tools/*.js dist/tools/
+          echo "dist/ contents:"
+          find dist -type f | sort
+
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
           name: open-miami-wasm
-          path: |
-            open_miami_bg.wasm
-            open_miami.js
-            index.html
-            assets/fonts/VT323-Regular.ttf
-            assets/fonts/VT323-OFL.txt
+          path: dist/
           retention-days: 30
 
   deploy-github-pages:
@@ -82,9 +110,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:

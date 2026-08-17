@@ -1,4 +1,4 @@
-use crate::components::{Player, Position, Rotation, Speed, Velocity, Weapon, WeaponType};
+use crate::components::{Player, Position, Rotation, Speed, Velocity};
 use crate::ecs::{Entity, World};
 use crate::game::fire_player_weapon;
 use crate::input;
@@ -76,37 +76,15 @@ impl InputSystem {
 
     /// Handle shooting input: fire on left mouse button, delegating to the
     /// input-independent [`fire_player_weapon`].
+    ///
+    /// There is deliberately no weapon-select key: Hotline Miami rules — the
+    /// player holds the one weapon in hand, and only the floor (E to pick up,
+    /// right-click to throw) changes it.
     pub fn handle_shoot_input(world: &mut World, mouse_world_pos: Vec2) -> bool {
         if !input::is_mouse_button_down(input::mouse_buttons::LEFT) {
             return false;
         }
         fire_player_weapon(world, mouse_world_pos)
-    }
-
-    /// Handle weapon switching (1-4 keys)
-    pub fn handle_weapon_switch(world: &mut World) {
-        let player = match Self::find_player(world) {
-            Some(e) => e,
-            None => return,
-        };
-
-        let new_weapon_type = if input::is_key_down("1") {
-            Some(WeaponType::Pistol)
-        } else if input::is_key_down("2") {
-            Some(WeaponType::Shotgun)
-        } else if input::is_key_down("3") {
-            Some(WeaponType::MachineGun)
-        } else if input::is_key_down("4") {
-            Some(WeaponType::Melee)
-        } else {
-            None
-        };
-
-        if let Some(weapon_type) = new_weapon_type {
-            if let Some(weapon) = world.get_component_mut::<Weapon>(player) {
-                *weapon = Weapon::new(weapon_type);
-            }
-        }
     }
 }
 

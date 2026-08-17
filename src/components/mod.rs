@@ -245,16 +245,52 @@ pub enum WeaponType {
     Melee,
 }
 
-/// A weapon dropped in the world (e.g. by a downed enemy). The player collects
-/// it by walking over it, swapping their current weapon for a full one.
+impl WeaponType {
+    /// Rounds in a full magazine. Melee has no magazine (see
+    /// [`WeaponType::is_melee`]); its value here is only a nominal cap.
+    pub const fn magazine(self) -> i32 {
+        match self {
+            WeaponType::Pistol => 12,
+            WeaponType::Shotgun => 6,
+            WeaponType::MachineGun => 30,
+            WeaponType::Melee => 999,
+        }
+    }
+
+    /// Melee weapons never run dry.
+    pub const fn is_melee(self) -> bool {
+        matches!(self, WeaponType::Melee)
+    }
+}
+
+/// A weapon lying on the floor (placed by the level, dropped by a downed rogue,
+/// left behind by a swap, or landed after a throw). Hotline Miami rules: the
+/// player holds exactly one weapon, and the ammo lives ON the weapon — this
+/// pickup carries the rounds still in it, and picking it up (E) hands the player
+/// that weapon with exactly that ammo, while their previous weapon is dropped in
+/// its place with *its* remaining ammo.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WeaponPickup {
     pub weapon_type: WeaponType,
+    /// Rounds left in the weapon (ignored for melee).
+    pub ammo: i32,
 }
 
 impl WeaponPickup {
+    /// A pickup holding a full magazine (level-placed weapons).
     pub fn new(weapon_type: WeaponType) -> Self {
-        WeaponPickup { weapon_type }
+        WeaponPickup {
+            weapon_type,
+            ammo: weapon_type.magazine(),
+        }
+    }
+
+    /// A pickup holding a specific amount of ammo (drops, swaps, landed throws).
+    pub fn with_ammo(weapon_type: WeaponType, ammo: i32) -> Self {
+        WeaponPickup {
+            weapon_type,
+            ammo: ammo.clamp(0, weapon_type.magazine()),
+        }
     }
 }
 
@@ -265,6 +301,8 @@ impl WeaponPickup {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThrownWeapon {
     pub weapon_type: WeaponType,
+    /// Rounds still in the weapon; carried through to the pickup it lands as.
+    pub ammo: i32,
     pub damage: i32,
     pub vx: f32,
     pub vy: f32,
@@ -275,10 +313,18 @@ pub struct ThrownWeapon {
 }
 
 impl ThrownWeapon {
-    pub fn new(weapon_type: WeaponType, damage: i32, dir: Vec2, speed: f32, range: f32) -> Self {
+    pub fn new(
+        weapon_type: WeaponType,
+        ammo: i32,
+        damage: i32,
+        dir: Vec2,
+        speed: f32,
+        range: f32,
+    ) -> Self {
         let d = dir.normalize();
         ThrownWeapon {
             weapon_type,
+            ammo,
             damage,
             vx: d.x * speed,
             vy: d.y * speed,
@@ -359,7 +405,10 @@ impl Knockback {
     }
 }
 
-/// Weapon component
+/// The one weapon an entity holds. The ammo is a property of the weapon
+/// itself: it travels with it when dropped, swapped, thrown, or picked up
+/// (see [`WeaponPickup`], [`ThrownWeapon`]). Nothing ever refills a weapon;
+/// an empty gun can only be thrown. Melee never runs dry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Weapon {
     pub weapon_type: WeaponType,
@@ -401,6 +450,8 @@ impl ProjectileTrail {
 /// Physical bullet projectile
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bullet {
+    /// The weapon that fired it (drives the per-weapon hit sound).
+    pub weapon_type: WeaponType,
     pub damage: i32,
     pub speed: f32,
     pub lifetime: f32,
@@ -408,8 +459,9 @@ pub struct Bullet {
 }
 
 impl Bullet {
-    pub fn new(damage: i32) -> Self {
+    pub fn new(weapon_type: WeaponType, damage: i32) -> Self {
         Bullet {
+            weapon_type,
             damage,
             speed: 800.0,  // pixels per second
             lifetime: 3.0, // 3 seconds max lifetime
@@ -423,31 +475,52 @@ impl Bullet {
 }
 
 impl Weapon {
+    /// A weapon with a full magazine.
     pub fn new(weapon_type: WeaponType) -> Self {
-        let (damage, max_ammo, fire_rate) = match weapon_type {
-            WeaponType::Pistol => (50, 12, 0.5),
-            WeaponType::Shotgun => (80, 6, 1.0),
-            WeaponType::MachineGun => (30, 30, 0.1),
-            WeaponType::Melee => (100, 999, 0.5),
+        Self::with_ammo(weapon_type, weapon_type.magazine())
+    }
+
+    /// A weapon holding `ammo` rounds (clamped to its magazine).
+    pub fn with_ammo(weapon_type: WeaponType, ammo: i32) -> Self {
+        let (damage, fire_rate) = match weapon_type {
+            WeaponType::Pistol => (50, 0.5),
+            WeaponType::Shotgun => (80, 1.0),
+            WeaponType::MachineGun => (30, 0.1),
+            WeaponType::Melee => (100, 0.5),
         };
+        let max_ammo = weapon_type.magazine();
 
         Weapon {
             weapon_type,
             damage,
-            ammo: max_ammo,
+            ammo: ammo.clamp(0, max_ammo),
             max_ammo,
             fire_rate,
             fire_timer: 0.0,
         }
     }
 
-    pub fn can_fire(&self) -> bool {
-        self.fire_timer <= 0.0 && self.ammo > 0
+    /// Melee never runs out; guns need at least one round.
+    pub fn has_ammo(&self) -> bool {
+        self.weapon_type.is_melee() || self.ammo > 0
     }
 
+    /// Off cooldown and has something to fire.
+    pub fn can_fire(&self) -> bool {
+        self.fire_timer <= 0.0 && self.has_ammo()
+    }
+
+    /// Off cooldown but empty: pulling the trigger only clicks.
+    pub fn is_dry(&self) -> bool {
+        self.fire_timer <= 0.0 && !self.has_ammo()
+    }
+
+    /// Spend a round (none for melee) and start the cooldown.
     pub fn fire(&mut self) {
         if self.can_fire() {
-            self.ammo -= 1;
+            if !self.weapon_type.is_melee() {
+                self.ammo -= 1;
+            }
             self.fire_timer = self.fire_rate;
         }
     }
@@ -457,6 +530,37 @@ impl Weapon {
             self.fire_timer -= dt;
         }
     }
+}
+
+/// Bookkeeping tag: this enemy's death has already been noticed (its
+/// [`GameEvent::EnemyDown`] was emitted). Added by the pickup/downed pass the
+/// first frame the enemy's health is zero, whatever caused it (bullets, melee,
+/// a thrown weapon, a feral burning out, a scenario purge...).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Downed;
+
+/// One-shot gameplay events, pushed by the systems where the truth happens
+/// (a shot fired, a hit landed, a rogue downed...) and drained once per frame
+/// by the browser layer to trigger sound effects. See
+/// [`crate::ecs::World::push_event`] / [`crate::ecs::World::drain_events`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GameEvent {
+    /// The player fired (or swung) their weapon; one per round.
+    PlayerFired(WeaponType),
+    /// The player pulled the trigger on an empty gun.
+    DryFire,
+    /// A player attack connected with an enemy.
+    EnemyHit { by: WeaponType },
+    /// An enemy's health just reached zero.
+    EnemyDown,
+    /// The player took damage (and survived the frame or not).
+    PlayerHurt,
+    /// The player picked a weapon up off the floor.
+    Pickup,
+    /// The player threw their weapon.
+    Throw,
+    /// A thrown weapon struck an enemy (knockdown).
+    ThrownImpact,
 }
 
 /// Debug component to store pathfinding waypoints for visualization
@@ -698,6 +802,37 @@ mod tests {
         weapon.update(0.3);
         assert!((weapon.fire_timer - (-0.1)).abs() < 0.001);
         assert!(weapon.can_fire()); // Can fire again after cooldown
+    }
+
+    #[test]
+    fn test_weapon_melee_never_runs_dry() {
+        let mut weapon = Weapon::new(WeaponType::Melee);
+        let before = weapon.ammo;
+        weapon.fire();
+        assert_eq!(weapon.ammo, before); // no round spent
+        weapon.fire_timer = 0.0;
+        assert!(weapon.can_fire());
+        assert!(!Weapon::with_ammo(WeaponType::Melee, 0).is_dry());
+    }
+
+    #[test]
+    fn test_weapon_with_ammo_clamps_to_magazine() {
+        assert_eq!(Weapon::with_ammo(WeaponType::Pistol, 5).ammo, 5);
+        assert_eq!(Weapon::with_ammo(WeaponType::Pistol, 99).ammo, 12);
+        assert_eq!(Weapon::with_ammo(WeaponType::Shotgun, -3).ammo, 0);
+        assert_eq!(WeaponPickup::with_ammo(WeaponType::MachineGun, 7).ammo, 7);
+        assert_eq!(WeaponPickup::new(WeaponType::Shotgun).ammo, 6);
+    }
+
+    #[test]
+    fn test_weapon_is_dry() {
+        let mut weapon = Weapon::with_ammo(WeaponType::Pistol, 1);
+        assert!(!weapon.is_dry());
+        weapon.fire();
+        assert!(!weapon.is_dry()); // still on cooldown
+        weapon.fire_timer = 0.0;
+        assert!(weapon.is_dry());
+        assert!(!weapon.can_fire());
     }
 
     #[test]

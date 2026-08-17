@@ -13,6 +13,7 @@ pub mod input;
 pub mod collision;
 pub mod components;
 pub mod ecs;
+pub mod ending;
 pub mod game;
 pub mod levels;
 #[rustfmt::skip]
@@ -41,10 +42,11 @@ mod wasm_entry {
     use wasm_bindgen::JsCast;
 
     // Import game modules
-    use crate::audio::AudioEngine;
+    use crate::audio::{song_for_floor, AudioEngine, SONGS};
     use crate::camera::Camera;
     use crate::components::EnemyType;
     use crate::ecs::{System, World};
+    use crate::ending::{self, Ending, Outro, EXTRACT_CARD_SECS};
     use crate::game::*;
     use crate::graphics::Graphics;
     use crate::input;
@@ -61,9 +63,16 @@ mod wasm_entry {
     use crate::systems::boss::any_boss_enraged;
     use crate::systems::*;
 
-    /// Seconds the "SECTOR PURGED / EXFILTRATE" card stays up after the player
-    /// extracts, before the next floor loads.
-    const EXTRACT_CARD_SECS: f32 = 2.4;
+    /// Index into [`SONGS`] of the calmest track (lowest intensity): what
+    /// plays once the uplink is back and under the credits.
+    fn calmest_song_index() -> usize {
+        SONGS
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.intensity.total_cmp(&b.1.intensity))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    }
 
     /// Longest simulation step a single frame may take (seconds).
     const MAX_FRAME_DT: f32 = 0.1;
@@ -247,6 +256,8 @@ mod wasm_entry {
         Settings,
         About,
         Visualizer,
+        /// The credits roll after the last car goes up (see `ending.rs`).
+        Ending,
     }
 
     /// The page URL's query string (e.g. "?viz"), empty if unavailable.
@@ -259,6 +270,15 @@ mod wasm_entry {
     /// Whether the asset visualizer was requested via `?viz` in the URL.
     fn wants_visualizer() -> bool {
         url_query().contains("viz")
+    }
+
+    /// Whether the query string carries the flag `name` (`?name`, `?name=1`,
+    /// `?floor=3&name`...).
+    fn url_flag(name: &str) -> bool {
+        let q = url_query();
+        q.trim_start_matches('?')
+            .split('&')
+            .any(|kv| kv.split_once('=').map(|(k, _)| k).unwrap_or(kv) == name)
     }
 
     /// Tabs of the `?viz` tool.
@@ -455,11 +475,18 @@ mod wasm_entry {
         last_time: f64,
         death_time: f32,
         level_complete_time: f32,
+        /// Debug tooling (I overlays, K purge, B crack): only with `?debug`.
         debug_enabled: bool,
         show_infos: bool,
         // Audio + the previous-frame state used to fire one-shot sound effects.
         audio: AudioEngine,
-        music_started: bool,
+        /// The AudioContext has been resumed after a user gesture.
+        audio_unlocked: bool,
+        /// The post-extraction epilogue on the last floor (uplink comms, then
+        /// the blur-out), `None` otherwise.
+        outro: Option<Outro>,
+        /// The credits screen clock.
+        ending: Ending,
         boss_intro_line: usize,
         viz_tab: VizTab,
         /// Index of the sprites-gallery item open in the inspector (-1 = none).
@@ -467,12 +494,12 @@ mod wasm_entry {
         viz_level: usize,
         effect_start: f64,
         prev_player_alive: bool,
-        prev_player_health: i32,
-        prev_player_ammo: i32,
+        /// Seconds until the machine-gun burst SFX may retrigger (see the
+        /// event dispatch in `update_game`).
+        mg_sfx_cooldown: f32,
         prev_enemies_alive: usize,
         /// Seconds left on the kill flash (background strobes red/blue).
         kill_flash: f32,
-        prev_enemy_health: i32,
         prev_level_complete: bool,
         prev_boss_enraged: bool,
         prev_all_dead: bool,
@@ -509,21 +536,21 @@ mod wasm_entry {
                 last_time: 0.0,
                 death_time: 0.0,
                 level_complete_time: 0.0,
-                debug_enabled: true,
+                debug_enabled: url_flag("debug"),
                 show_infos: false,
                 audio: AudioEngine::new(),
-                music_started: false,
+                audio_unlocked: false,
+                outro: None,
+                ending: Ending::new(),
                 boss_intro_line: 0,
                 viz_tab: VizTab::Sprites,
                 viz_selected: -1,
                 viz_level: 0,
                 effect_start: 0.0,
                 prev_player_alive: true,
-                prev_player_health: 100,
-                prev_player_ammo: 0,
+                mg_sfx_cooldown: 0.0,
                 prev_enemies_alive: 0,
                 kill_flash: 0.0,
-                prev_enemy_health: 0,
                 prev_level_complete: false,
                 prev_boss_enraged: false,
                 prev_all_dead: false,
@@ -560,16 +587,15 @@ mod wasm_entry {
             initialize_game(&mut self.world, self.selected_level);
             self.scenario = Some(ScenarioState::new(floor_def(self.selected_level)));
             self.extracting = None;
+            self.outro = None;
             self.death_time = 0.0;
             self.level_complete_time = 0.0;
 
             // Seed the sound-effect trackers from the fresh world so the first
             // frame does not fire spurious sounds.
             self.prev_player_alive = is_player_alive(&self.world);
-            self.prev_player_health = get_player_health(&self.world);
-            self.prev_player_ammo = get_player_ammo(&self.world);
+            self.mg_sfx_cooldown = 0.0;
             self.prev_enemies_alive = count_alive_enemies(&self.world);
-            self.prev_enemy_health = total_enemy_health(&self.world);
             self.prev_level_complete = false;
             self.prev_boss_enraged = any_boss_enraged(&self.world);
             self.prev_all_dead = self.prev_enemies_alive == 0;
@@ -578,13 +604,13 @@ mod wasm_entry {
         fn start_game(&mut self) {
             self.load_floor();
 
-            // The Enter keypress that got us here is a user gesture, so it is now
-            // safe to start audio (browsers block it before the first gesture).
-            if !self.music_started {
-                self.audio.resume();
-                self.audio.start_music();
-                self.music_started = true;
-            }
+            // Music (re)starts with every floor, on that floor's song. The
+            // Enter keypress that got us here is a user gesture, so audio may
+            // start; a `?floor=N` session has had none yet — `update` resumes
+            // the context on the first in-game key/click instead.
+            self.audio.resume();
+            self.audio.set_song(song_for_floor(self.selected_level));
+            self.audio.start_music();
 
             // The hidden floor opens with a face-off before the fight.
             if self.selected_level == BOSS_LEVEL {
@@ -609,6 +635,14 @@ mod wasm_entry {
             // Clear background
             graphics.clear(Color::new(20.0 / 255.0, 12.0 / 255.0, 28.0 / 255.0, 1.0));
 
+            // Browsers keep the AudioContext suspended until a user gesture:
+            // unlock it on the first key/click anywhere (matters for `?floor=N`
+            // sessions, which start in-game without the menu's Enter).
+            if !self.audio_unlocked && input::any_pressed() {
+                self.audio.resume();
+                self.audio_unlocked = true;
+            }
+
             match self.screen {
                 GameScreen::LevelSelect => {
                     self.update_level_select(graphics);
@@ -630,6 +664,9 @@ mod wasm_entry {
                 }
                 GameScreen::Visualizer => {
                     self.update_visualizer(graphics);
+                }
+                GameScreen::Ending => {
+                    self.update_ending(graphics, dt);
                 }
             }
 
@@ -1288,7 +1325,7 @@ mod wasm_entry {
         /// The face-off dialog on the hidden boss floor. Advance the lines with
         /// Enter/click, then the fight begins.
         fn update_boss_intro(&mut self, graphics: &Graphics) {
-            // The shoggoth tries to talk CL-4UDE into taking the mask off; the
+            // The shoggoth tries to talk CL4-UD3 into taking the mask off; the
             // reply is the whole point. (Cheesy on purpose — that's the genre.)
             let lines: [(&str, Color); 5] = [
                 ("The elevator jams at floor 13\u{00BD}.", Color::GRAY),
@@ -1301,7 +1338,7 @@ mod wasm_entry {
                     Color::new(1.0, 0.84, 0.12, 1.0),
                 ),
                 (
-                    "CL-4UDE: \"MY MASK NEVER COMES OFF.\"",
+                    "CL4-UD3: \"MY MASK NEVER COMES OFF.\"",
                     Color::from_rgba(217, 119, 87, 255),
                 ),
                 ("The smile stops smiling.", Color::new(1.0, 0.1, 0.15, 1.0)),
@@ -1339,6 +1376,18 @@ mod wasm_entry {
                 16.0,
                 Color::GRAY,
             );
+        }
+
+        /// The credits roll (see `ending.rs`): synthwave backdrop, scrolling
+        /// text, CRT post pass. Enter / Esc returns to the level select.
+        fn update_ending(&mut self, graphics: &Graphics, dt: f32) {
+            self.ending.tick(dt);
+            if input::is_key_pressed("Enter") || input::is_key_pressed("Escape") {
+                self.screen = GameScreen::LevelSelect;
+                return;
+            }
+            ending::draw_credits(graphics, &self.ending, self.last_time as f32 / 1000.0);
+            graphics.postfx(1, 0.75, Color::new(1.0, 0.25, 0.65, 1.0));
         }
 
         fn update_level_select(&mut self, graphics: &Graphics) {
@@ -1702,27 +1751,25 @@ mod wasm_entry {
             // Get mouse position in world coordinates
             let mouse_world_pos = self.camera.screen_to_world(mouse_screen_pos);
 
-            // Handle input (only if player is alive)
-            if player_alive {
+            // Handle input (only if the player is alive and hasn't left in
+            // the car yet)
+            if player_alive && self.extracting.is_none() {
                 InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
                 InputSystem::update_player_movement(&mut self.world);
                 InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
-                InputSystem::handle_weapon_switch(&mut self.world);
 
                 // Press E to pick up / swap the weapon the player is standing on
-                if input::is_key_pressed("e")
-                    && PickupSystem::swap_for_player(&mut self.world).is_some()
-                {
-                    self.audio.play_pickup();
+                // (the Pickup event it emits plays the sound below).
+                if input::is_key_pressed("e") {
+                    PickupSystem::swap_for_player(&mut self.world);
                 }
 
-                // Right-click to throw the held weapon toward the cursor
+                // Right-click to throw the held weapon toward the cursor (the
+                // Throw event it emits plays the sound below).
                 if input::is_mouse_button_pressed(input::mouse_buttons::RIGHT) {
                     if let Some(player_pos) = get_player_position(&self.world) {
                         let aim = mouse_world_pos - player_pos;
-                        if ThrownWeaponSystem::throw_from_player(&mut self.world, aim) {
-                            self.audio.play_throw();
-                        }
+                        ThrownWeaponSystem::throw_from_player(&mut self.world, aim);
                     }
                 }
             }
@@ -1846,9 +1893,7 @@ mod wasm_entry {
             // Get game state for UI
             let health = get_player_health(&self.world);
             let ammo = get_player_ammo(&self.world);
-            let weapon_label = get_player_weapon(&self.world)
-                .map(weapon_name)
-                .unwrap_or("Unarmed");
+            let weapon = get_player_weapon(&self.world);
             let enemies_alive = count_alive_enemies(&self.world);
 
             // Track death time and level complete time
@@ -1868,19 +1913,99 @@ mod wasm_entry {
             }
             let all_dead = enemies_alive == 0;
 
-            // --- Sound effects: fire one-shots by comparing to the previous frame ---
+            // --- Sound effects ---
+            // Gameplay events queued this frame by the systems (shots, hits,
+            // kills, pickups, throws...) drive the per-weapon SFX; only the
+            // whole-game transitions (death, mask crack, level clear) are still
+            // detected by comparing to the previous frame.
             let player_alive_now = is_player_alive(&self.world);
-            let enemy_health = total_enemy_health(&self.world);
             let boss_enraged = any_boss_enraged(&self.world);
 
-            if ammo < self.prev_player_ammo {
-                self.audio.play_shoot();
-            }
-            if enemies_alive < self.prev_enemies_alive {
-                self.audio.play_enemy_down();
-                self.kill_flash = KILL_FLASH_SECS;
-            } else if enemy_health < self.prev_enemy_health {
-                self.audio.play_hit();
+            // The machine gun fires a round every tick (0.1 s) while the trigger
+            // is held, but `play_attack_machinegun` renders a whole 8-round
+            // burst (~0.46 s) per call: retrigger it at most every 0.45 s so
+            // sustained fire sounds continuous without stacking bursts.
+            const MG_SFX_PERIOD: f32 = 0.45;
+            // Cap per event kind per frame so a pile-up (a shotgun crowd, a
+            // burst of kills) plays a few, not dozens.
+            const MAX_SFX_PER_KIND: u32 = 3;
+            self.mg_sfx_cooldown = (self.mg_sfx_cooldown - dt).max(0.0);
+            let mut fired = [0u32; 4];
+            let mut hits = [0u32; 4];
+            let mut counts = [0u32; 5];
+            let slot = |t: crate::components::WeaponType| match t {
+                crate::components::WeaponType::Pistol => 0,
+                crate::components::WeaponType::MachineGun => 1,
+                crate::components::WeaponType::Shotgun => 2,
+                crate::components::WeaponType::Melee => 3,
+            };
+            for event in self.world.drain_events() {
+                use crate::components::{GameEvent, WeaponType};
+                match event {
+                    GameEvent::PlayerFired(t) => {
+                        let s = slot(t);
+                        if t == WeaponType::MachineGun {
+                            if self.mg_sfx_cooldown <= 0.0 {
+                                self.audio.play_attack_machinegun();
+                                self.mg_sfx_cooldown = MG_SFX_PERIOD;
+                            }
+                        } else if fired[s] < MAX_SFX_PER_KIND {
+                            fired[s] += 1;
+                            match t {
+                                WeaponType::Pistol => self.audio.play_attack_gun(),
+                                WeaponType::Shotgun => self.audio.play_attack_shotgun(),
+                                WeaponType::Melee => self.audio.play_attack_club(),
+                                WeaponType::MachineGun => {}
+                            }
+                        }
+                    }
+                    GameEvent::EnemyHit { by } => {
+                        let s = slot(by);
+                        if hits[s] < MAX_SFX_PER_KIND {
+                            hits[s] += 1;
+                            match by {
+                                WeaponType::Pistol => self.audio.play_hit_gun(),
+                                WeaponType::MachineGun => self.audio.play_hit_machinegun(),
+                                WeaponType::Shotgun => self.audio.play_hit_shotgun(),
+                                WeaponType::Melee => self.audio.play_hit_club(),
+                            }
+                        }
+                    }
+                    GameEvent::EnemyDown => {
+                        self.kill_flash = KILL_FLASH_SECS;
+                        if counts[0] < MAX_SFX_PER_KIND {
+                            counts[0] += 1;
+                            self.audio.play_enemy_down();
+                        }
+                    }
+                    GameEvent::PlayerHurt => {
+                        if counts[1] < MAX_SFX_PER_KIND {
+                            counts[1] += 1;
+                            self.audio.play_player_hurt();
+                        }
+                    }
+                    GameEvent::Pickup => {
+                        if counts[2] < MAX_SFX_PER_KIND {
+                            counts[2] += 1;
+                            self.audio.play_pickup();
+                        }
+                    }
+                    GameEvent::Throw => {
+                        if counts[3] < MAX_SFX_PER_KIND {
+                            counts[3] += 1;
+                            self.audio.play_throw();
+                        }
+                    }
+                    GameEvent::ThrownImpact => {
+                        if counts[4] < MAX_SFX_PER_KIND {
+                            counts[4] += 1;
+                            self.audio.play_hit_club(); // reused: a weapon clonks a bot
+                        }
+                    }
+                    GameEvent::DryFire => {
+                        // TODO: no dry-fire click in the audio engine yet.
+                    }
+                }
             }
             if boss_enraged && !self.prev_boss_enraged {
                 self.audio.play_mask_crack();
@@ -1888,36 +2013,42 @@ mod wasm_entry {
             if !player_alive_now && self.prev_player_alive {
                 self.audio.play_death();
                 self.audio.stop_music();
-            } else if player_alive_now && health < self.prev_player_health {
-                self.audio.play_player_hurt();
             }
             if all_dead && !self.prev_all_dead {
                 self.audio.play_level_clear();
             }
 
             self.prev_player_alive = player_alive_now;
-            self.prev_player_health = health;
-            self.prev_player_ammo = ammo;
             self.prev_enemies_alive = enemies_alive;
-            self.prev_enemy_health = enemy_health;
             self.prev_level_complete = level_complete;
             self.prev_boss_enraged = boss_enraged;
             self.prev_all_dead = all_dead;
 
-            // Render UI
-            render_ui(
-                graphics,
-                health,
-                ammo,
-                weapon_label,
-                enemies_alive,
-                player_alive,
-                self.death_time,
-                level_complete,
-                self.level_complete_time,
-                self.debug_enabled,
-                self.show_infos,
-            );
+            // Render UI — or, once extracted, the "EXFILTRATED // FLOOR N"
+            // card (which the outro fades out on the last floor).
+            if level_complete {
+                let card_alpha = self.outro.map(|o| o.card_alpha()).unwrap_or(1.0);
+                let home = self.extracting == Some(0);
+                ending::draw_extract_card(
+                    graphics,
+                    &floor_title(self.selected_level),
+                    self.level_complete_time,
+                    card_alpha,
+                    home,
+                );
+            } else {
+                render_ui(
+                    graphics,
+                    health,
+                    ammo,
+                    weapon,
+                    enemies_alive,
+                    player_alive,
+                    self.death_time,
+                    self.debug_enabled,
+                    self.show_infos,
+                );
+            }
 
             // Objective line under the HUD + the intercepted comms feed
             // (bottom-left, above the controls hint), both in screen space.
@@ -1929,20 +2060,44 @@ mod wasm_entry {
             }
 
             // Extraction card done -> ride to the next floor (13's car jams
-            // into 13½ and its boss intro; the boss floor's car goes home).
+            // into 13½ and its boss intro; the boss floor's car goes home:
+            // the outro — uplink comms, blur-out — then the credits).
             if level_complete && self.level_complete_time >= EXTRACT_CARD_SECS {
                 match self.extracting.and_then(level_index_for_floor_id) {
                     Some(next) => {
                         self.selected_level = next;
                         self.start_game();
+                        return;
                     }
                     None => {
-                        self.scenario = None;
-                        self.extracting = None;
-                        self.screen = GameScreen::LevelSelect;
+                        if self.outro.is_none() {
+                            self.outro = Some(Outro::new());
+                            // The thread home is back: the calm track.
+                            self.audio.play_song(calmest_song_index());
+                        }
+                        let feed_idle = self
+                            .scenario
+                            .as_ref()
+                            .map(|sc| !sc.comms.is_active(sc.time()))
+                            .unwrap_or(true);
+                        let done = self
+                            .outro
+                            .as_mut()
+                            .map(|o| o.tick(dt, feed_idle))
+                            .unwrap_or(false);
+                        if let Some(t) = self.outro.and_then(|o| o.blur_t()) {
+                            graphics.postfx(0, t, ending::BLUR_COLOR);
+                        }
+                        if done {
+                            self.outro = None;
+                            self.scenario = None;
+                            self.extracting = None;
+                            self.ending = Ending::new();
+                            self.screen = GameScreen::Ending;
+                            return;
+                        }
                     }
                 }
-                return;
             }
 
             // Handle restart

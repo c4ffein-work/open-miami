@@ -82,10 +82,22 @@ pub fn spawn_enemy(world: &mut World, position: Vec2) -> Entity {
     spawn_enemy_with_type(world, position, EnemyType::Idle)
 }
 
-/// Spawn a weapon lying on the floor (collected with the pick-up key).
+/// Spawn a weapon lying on the floor with a full magazine (level-placed
+/// pickups; collected with the pick-up key).
 pub fn spawn_pickup(world: &mut World, position: Vec2, weapon_type: WeaponType) -> Entity {
+    spawn_pickup_with_ammo(world, position, weapon_type, weapon_type.magazine())
+}
+
+/// Spawn a weapon lying on the floor holding `ammo` rounds (drops, swaps and
+/// landed throws — the ammo travels with the weapon).
+pub fn spawn_pickup_with_ammo(
+    world: &mut World,
+    position: Vec2,
+    weapon_type: WeaponType,
+    ammo: i32,
+) -> Entity {
     let entity = world.spawn();
-    world.add_component(entity, WeaponPickup::new(weapon_type));
+    world.add_component(entity, WeaponPickup::with_ammo(weapon_type, ammo));
     world.add_component(entity, Position::from_vec2(position));
     world.add_component(entity, Radius::new(14.0));
     entity
@@ -165,7 +177,10 @@ pub fn get_player_ammo(world: &World) -> i32 {
 /// Fire the player's currently held weapon toward a world position. Melee hits
 /// instantly (returns whether it connected); ranged weapons spawn a bullet
 /// entity (returns `false`, since bullets resolve asynchronously). Does nothing
-/// if the weapon is on cooldown or out of ammo.
+/// if the weapon is on cooldown; an empty gun only clicks (a
+/// [`GameEvent::DryFire`] once per would-be shot — the cooldown is restarted so
+/// a held trigger does not spam it) — nothing ever refills it: throw it and
+/// take another. Emits [`GameEvent::PlayerFired`] for every round that leaves.
 ///
 /// This is the input-independent core of shooting so it can be driven both by
 /// the browser input layer and by the headless [`crate::sim::Simulation`].
@@ -178,11 +193,20 @@ pub fn fire_player_weapon(world: &mut World, target_world_pos: Vec2) -> bool {
         Some(p) => *p,
         None => return false,
     };
-    let (damage, is_melee, can_fire) = match world.get_component::<Weapon>(player) {
-        Some(w) => (w.damage, w.weapon_type == WeaponType::Melee, w.can_fire()),
+    let (weapon_type, damage, can_fire, is_dry) = match world.get_component::<Weapon>(player) {
+        Some(w) => (w.weapon_type, w.damage, w.can_fire(), w.is_dry()),
         None => return false, // unarmed
     };
 
+    if is_dry {
+        // Click. Restart the cooldown so a held trigger clicks at the weapon's
+        // fire cadence rather than every frame.
+        if let Some(weapon) = world.get_component_mut::<Weapon>(player) {
+            weapon.fire_timer = weapon.fire_rate;
+        }
+        world.push_event(GameEvent::DryFire);
+        return false;
+    }
     if !can_fire {
         return false;
     }
@@ -190,17 +214,18 @@ pub fn fire_player_weapon(world: &mut World, target_world_pos: Vec2) -> bool {
     if let Some(weapon) = world.get_component_mut::<Weapon>(player) {
         weapon.fire();
     }
+    world.push_event(GameEvent::PlayerFired(weapon_type));
 
     let target_pos = Position::from_vec2(target_world_pos);
 
-    if is_melee {
+    if weapon_type.is_melee() {
         CombatSystem::process_melee(world, player_pos, target_pos, damage, 50.0)
     } else {
         let dx = target_pos.x - player_pos.x;
         let dy = target_pos.y - player_pos.y;
         let length = (dx * dx + dy * dy).sqrt();
 
-        let bullet = Bullet::new(damage);
+        let bullet = Bullet::new(weapon_type, damage);
         let bullet_speed = bullet.speed;
         let (vel_x, vel_y) = if length > 0.0 {
             (dx / length * bullet_speed, dy / length * bullet_speed)
@@ -218,7 +243,7 @@ pub fn fire_player_weapon(world: &mut World, target_world_pos: Vec2) -> bool {
     }
 }
 
-/// Get the player's current weapon type (for the HUD)
+/// Get the player's current weapon type (for the HUD); `None` when unarmed.
 pub fn get_player_weapon(world: &World) -> Option<WeaponType> {
     let players: Vec<Entity> = world.query::<Player>();
     players
@@ -234,6 +259,21 @@ pub fn weapon_name(weapon_type: WeaponType) -> &'static str {
         WeaponType::Shotgun => "Shotgun",
         WeaponType::MachineGun => "Machine Gun",
         WeaponType::Melee => "Melee",
+    }
+}
+
+/// HUD label for the held weapon: `SHOTGUN 3/6`, `MELEE` (infinite), or
+/// `UNARMED` when the player holds nothing.
+pub fn weapon_hud_label(weapon: Option<WeaponType>, ammo: i32) -> String {
+    match weapon {
+        None => "UNARMED".to_string(),
+        Some(t) if t.is_melee() => weapon_name(t).to_uppercase(),
+        Some(t) => format!(
+            "{} {}/{}",
+            weapon_name(t).to_uppercase(),
+            ammo,
+            t.magazine()
+        ),
     }
 }
 
@@ -368,6 +408,86 @@ mod tests {
             .take_damage(100);
 
         assert_eq!(count_alive_enemies(&world), 3);
+    }
+
+    #[test]
+    fn test_fire_emits_player_fired_and_spends_a_round() {
+        let mut world = World::new();
+        let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+        assert!(!fire_player_weapon(&mut world, Vec2::new(100.0, 0.0))); // bullet spawned
+        assert_eq!(world.get_component::<Weapon>(player).unwrap().ammo, 11);
+        assert_eq!(world.query::<Bullet>().len(), 1);
+        let bullet = world.query::<Bullet>()[0];
+        assert_eq!(
+            world.get_component::<Bullet>(bullet).unwrap().weapon_type,
+            WeaponType::Pistol
+        );
+        assert_eq!(
+            world.drain_events(),
+            vec![GameEvent::PlayerFired(WeaponType::Pistol)]
+        );
+        // On cooldown: nothing, and no event.
+        assert!(!fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
+        assert!(world.drain_events().is_empty());
+    }
+
+    #[test]
+    fn test_empty_gun_dry_fires_and_never_refills() {
+        let mut world = World::new();
+        let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+        *world.get_component_mut::<Weapon>(player).unwrap() =
+            Weapon::with_ammo(WeaponType::Pistol, 0);
+
+        assert!(!fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
+        assert!(world.query::<Bullet>().is_empty());
+        assert_eq!(world.drain_events(), vec![GameEvent::DryFire]);
+        // The click restarts the cooldown: holding the trigger doesn't spam.
+        assert!(!fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
+        assert!(world.drain_events().is_empty());
+        assert_eq!(world.get_component::<Weapon>(player).unwrap().ammo, 0);
+    }
+
+    #[test]
+    fn test_melee_fires_forever() {
+        let mut world = World::new();
+        let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+        *world.get_component_mut::<Weapon>(player).unwrap() =
+            Weapon::with_ammo(WeaponType::Melee, 0);
+        for _ in 0..5 {
+            fire_player_weapon(&mut world, Vec2::new(100.0, 0.0));
+            world
+                .get_component_mut::<Weapon>(player)
+                .unwrap()
+                .fire_timer = 0.0;
+        }
+        let events = world.drain_events();
+        assert_eq!(events.len(), 5);
+        assert!(events
+            .iter()
+            .all(|e| *e == GameEvent::PlayerFired(WeaponType::Melee)));
+    }
+
+    #[test]
+    fn test_weapon_hud_label() {
+        assert_eq!(weapon_hud_label(None, 0), "UNARMED");
+        assert_eq!(
+            weapon_hud_label(Some(WeaponType::Shotgun), 3),
+            "SHOTGUN 3/6"
+        );
+        assert_eq!(
+            weapon_hud_label(Some(WeaponType::MachineGun), 30),
+            "MACHINE GUN 30/30"
+        );
+        assert_eq!(weapon_hud_label(Some(WeaponType::Melee), 999), "MELEE");
+    }
+
+    #[test]
+    fn test_level_pickups_spawn_with_full_magazine() {
+        let mut world = World::new();
+        let p = spawn_pickup(&mut world, Vec2::new(0.0, 0.0), WeaponType::Shotgun);
+        assert_eq!(world.get_component::<WeaponPickup>(p).unwrap().ammo, 6);
+        let q = spawn_pickup_with_ammo(&mut world, Vec2::new(0.0, 0.0), WeaponType::Pistol, 4);
+        assert_eq!(world.get_component::<WeaponPickup>(q).unwrap().ammo, 4);
     }
 
     #[test]

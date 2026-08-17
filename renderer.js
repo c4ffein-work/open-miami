@@ -22,6 +22,7 @@
     11 ROBOT      colorIdx poseIdx weaponIdx x y angle sizePx time
     12 SCALE      sx sy
     13 SHOGGOTH   x y sizePx heading reveal time
+    14 POSTFX     kind t r g b                        (full-screen post pass)
 
    Everything is drawn as vertex-colored, textured triangles in one
    interleaved dynamic buffer (a 1x1 white texture stands in for solid
@@ -46,6 +47,14 @@
    render of the mass / mask / tentacles at (heading, reveal, time); the tile is
    drawn as an axis-aligned quad through the transform stack (its facing is
    baked into the render itself, not a quad rotation).
+
+   POSTFX: when a frame's stream contains opcode 14 (found by a cheap pre-scan
+   over the opcode table), the whole frame is rendered into an offscreen scene
+   framebuffer instead of the canvas, then drawn through a full-screen post
+   shader — kind 0 = BLUR-OUT (growing multi-tap blur + dissolve toward the
+   colour, scanlines, grain; the ending), kind 1 = SYNTHWAVE CRT (scanlines,
+   chromatic split, vignette, grain; under the credits). Only the last POSTFX
+   of a frame applies.
    ========================================================================= */
 
 import { createRobotPipeline } from "./robot-core.js";
@@ -92,6 +101,77 @@ varying vec4 vColor;
 uniform sampler2D uTex;
 void main(){
   gl_FragColor = texture2D(uTex, vUv) * vColor;
+}
+`;
+
+/* ---- opcode argument counts (mirror of the table above); used by the POSTFX
+   pre-scan, which has to walk the stream without executing it ---- */
+const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5];
+const OP_POSTFX = 14;
+
+const POST_VS = `
+attribute vec2 aPos;
+varying vec2 vUv;
+void main(){
+  vUv = aPos * 0.5 + 0.5;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+
+// Full-screen post pass. Kept deliberately small and dependency-free.
+const POST_FS = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uScene;
+uniform vec2 uRes;
+uniform float uKind;
+uniform float uT;
+uniform vec3 uColor;
+uniform float uTime;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main(){
+  vec2 uv = vUv;
+  vec3 c;
+  float t = clamp(uT, 0.0, 1.0);
+  // Coarse, time-jittered noise cell (grain / dissolve dither).
+  float n = hash(floor(uv * uRes / 3.0) + floor(uTime * 24.0) * 0.371);
+  float scan = 0.5 + 0.5 * sin(uv.y * uRes.y * 3.14159);
+  if (uKind < 0.5) {
+    // ---- BLUR-OUT: two rings of taps whose radius grows with t ----
+    float radPx = t * t * 34.0 + t * 2.0;
+    vec2 px = radPx / uRes;
+    vec3 acc = texture2D(uScene, uv).rgb * 2.0;
+    float wsum = 2.0;
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * 0.785398 + uTime * 0.7;
+      vec2 d = vec2(cos(a), sin(a));
+      acc += texture2D(uScene, uv + d * px).rgb;
+      acc += texture2D(uScene, uv + d * px * 0.5).rgb * 1.5;
+      wsum += 2.5;
+    }
+    c = acc / wsum;
+    // Dissolve toward the colour, dithered by the grain so it eats in patches.
+    float k = smoothstep(0.12, 1.0, t + (n - 0.5) * 0.35 * t);
+    c = mix(c, uColor, k);
+    c *= 1.0 - 0.22 * t * scan;
+    c += (n - 0.5) * 0.12 * t;
+  } else {
+    // ---- SYNTHWAVE CRT: chromatic split, scanlines, vignette, grain ----
+    vec2 split = vec2(1.6 * t / uRes.x, 0.0);
+    c.r = texture2D(uScene, uv + split).r;
+    c.g = texture2D(uScene, uv).g;
+    c.b = texture2D(uScene, uv - split).b;
+    c *= 1.0 - 0.28 * t * scan;
+    vec2 q = uv * (1.0 - uv);
+    float vig = pow(clamp(q.x * q.y * 18.0, 0.0, 1.0), 0.28 * t);
+    c = c * vig + uColor * 0.10 * t * (1.0 - vig);
+    c += (n - 0.5) * 0.06 * t;
+  }
+  gl_FragColor = vec4(c, 1.0);
 }
 `;
 
@@ -224,11 +304,110 @@ export function initRenderer(canvas) {
   };
   const shogTarget = { fbo: shogFbo, x: 0, y: 0, w: SHOG_TILE, h: SHOG_TILE };
 
+  /* ---- POSTFX: offscreen scene target + the full-screen post program ---- */
+  const postProg = gl.createProgram();
+  gl.attachShader(postProg, compile(gl.VERTEX_SHADER, POST_VS));
+  gl.attachShader(postProg, compile(gl.FRAGMENT_SHADER, POST_FS));
+  gl.linkProgram(postProg);
+  if (!gl.getProgramParameter(postProg, gl.LINK_STATUS)) {
+    throw new Error("Post program link failed: " + gl.getProgramInfoLog(postProg));
+  }
+  const postLoc = {
+    aPos: gl.getAttribLocation(postProg, "aPos"),
+    uScene: gl.getUniformLocation(postProg, "uScene"),
+    uRes: gl.getUniformLocation(postProg, "uRes"),
+    uKind: gl.getUniformLocation(postProg, "uKind"),
+    uT: gl.getUniformLocation(postProg, "uT"),
+    uColor: gl.getUniformLocation(postProg, "uColor"),
+    uTime: gl.getUniformLocation(postProg, "uTime"),
+  };
+  const postVbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, postVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]), gl.STATIC_DRAW);
+  const sceneTex = makeTexture();
+  const sceneFbo = gl.createFramebuffer();
+  let sceneW = 0, sceneH = 0;
+  // (Re)allocate the scene target to the canvas size (lazily, on first use /
+  // resize) — the FBO is only touched on frames that carry a POSTFX.
+  function ensureSceneTarget(w, h) {
+    if (sceneW === w && sceneH === h) return;
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error("Scene framebuffer is incomplete; the post pass cannot render.");
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    sceneW = w;
+    sceneH = h;
+  }
+  // The framebuffer the batch draws into: null (the canvas) normally, the
+  // scene FBO on frames that end in a post pass.
+  let batchFbo = null;
+  // The POSTFX request of the current frame (kind, t, r, g, b) or null.
+  const postfx = { kind: 0, t: 0, r: 0, g: 0, b: 0 };
+  let postfxActive = false;
+
+  // Walk the stream by the opcode table (no execution) and pick up the LAST
+  // POSTFX, if any — it must be known before the first draw so the whole
+  // frame lands in the scene target.
+  function scanPostfx(cmds) {
+    let i = 0;
+    const n = cmds.length;
+    let found = false;
+    while (i < n) {
+      const op = cmds[i++];
+      const args = OP_ARGS[op];
+      if (args === undefined) break; // corrupt stream: frameRender reports it
+      if (op === OP_POSTFX) {
+        postfx.kind = cmds[i] | 0;
+        postfx.t = cmds[i + 1];
+        postfx.r = cmds[i + 2];
+        postfx.g = cmds[i + 3];
+        postfx.b = cmds[i + 4];
+        found = true;
+      }
+      i += args;
+    }
+    return found;
+  }
+
+  // Draw the scene target to the canvas through the post shader, then hand
+  // the GL state back to the batch pipeline.
+  function runPostPass(w, h) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.BLEND);
+    gl.useProgram(postProg);
+    gl.disableVertexAttribArray(loc.aUv);
+    gl.disableVertexAttribArray(loc.aColor);
+    gl.bindBuffer(gl.ARRAY_BUFFER, postVbo);
+    gl.enableVertexAttribArray(postLoc.aPos);
+    gl.vertexAttribPointer(postLoc.aPos, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    gl.uniform1i(postLoc.uScene, 0);
+    gl.uniform2f(postLoc.uRes, w, h);
+    gl.uniform1f(postLoc.uKind, postfx.kind);
+    gl.uniform1f(postLoc.uT, postfx.t);
+    gl.uniform3f(postLoc.uColor, postfx.r, postfx.g, postfx.b);
+    gl.uniform1f(postLoc.uTime, (performance.now() % 100000) / 1000);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    if (postLoc.aPos !== loc.aPos) gl.disableVertexAttribArray(postLoc.aPos);
+    batchFbo = null;
+    bindBatchState();
+    gl.uniform2f(loc.uRes, w, h);
+    gl.uniform1i(loc.uTex, 0);
+  }
+
   // Re-establish everything the batched pipeline relies on. The robot passes
   // rebind program/buffers/attribs/framebuffer/viewport/blend/depth, so this
   // runs after them (and it is cheap enough to be defensive about it).
   function bindBatchState() {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, batchFbo);
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.useProgram(prog);
     gl.disable(gl.DEPTH_TEST);
@@ -557,6 +736,12 @@ export function initRenderer(canvas) {
   /* ---- frame execution ---- */
   function frameRender(cmds, textArena) {
     const w = canvas.width, h = canvas.height;
+    // A POSTFX anywhere in the frame routes the whole frame through the
+    // offscreen scene target (decided up front, before the first draw).
+    postfxActive = scanPostfx(cmds);
+    if (postfxActive) ensureSceneTarget(w, h);
+    batchFbo = postfxActive ? sceneFbo : null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, batchFbo);
     gl.viewport(0, 0, w, h);
     gl.useProgram(prog);
     gl.uniform2f(loc.uRes, w, h);
@@ -643,6 +828,9 @@ export function initRenderer(canvas) {
             cmds[i + 5]);
           i += 6;
           break;
+        case 14: // POSTFX (already picked up by the pre-scan)
+          i += 5;
+          break;
         default:
           // Unknown opcode: the stream is corrupt; stop rather than
           // misinterpret the remaining floats.
@@ -652,6 +840,7 @@ export function initRenderer(canvas) {
       }
     }
     flush();
+    if (postfxActive) runPostPass(w, h);
   }
 
   return frameRender;

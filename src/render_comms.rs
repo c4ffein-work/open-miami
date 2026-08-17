@@ -412,6 +412,26 @@ pub fn draw_portrait(graphics: &Graphics, pos: Vec2, size: f32, who: &str, alpha
                 Color::new(col.r, col.g, col.b, 0.6 * alpha),
             );
         }
+        "UPLINK" => {
+            // The thread home: a clean visor like CL4-UD3's, plus the
+            // carrier — signal arcs radiating from the antenna.
+            graphics.draw_line(
+                Vec2::new(c.x - hw * 0.66, vy),
+                Vec2::new(c.x + hw * 0.66, vy),
+                s * 0.05,
+                col,
+            );
+            for k in 1..=2 {
+                let r = s * (0.10 + 0.07 * k as f32);
+                graphics.draw_arc(
+                    Vec2::new(c.x, c.y - hh - s * 0.12),
+                    r,
+                    1.15 * std::f32::consts::PI,
+                    1.85 * std::f32::consts::PI,
+                    Color::new(col.r, col.g, col.b, (0.55 - 0.15 * k as f32) * alpha),
+                );
+            }
+        }
         _ => {
             // SWARM / CORRUPTOR: hive of eyes + the hint of a smile.
             for dx in [-hw * 0.5, 0.0, hw * 0.5] {
@@ -492,11 +512,23 @@ pub fn render_comms(
         total,
         rgb(accent, 0.8 * panel_alpha),
     );
+    // Once the uplink talks, the panel is no longer an intercept.
+    let uplink = rows.iter().any(|r| r.who == "UPLINK");
+    let header = if uplink {
+        "UPLINK // THREAD HOME"
+    } else {
+        "INTERCEPTED COMMS // LOCAL RX"
+    };
+    let header_col = if uplink {
+        rgb(speaker_rgb("UPLINK"), 0.85 * panel_alpha)
+    } else {
+        rgb(accent, 0.75 * panel_alpha)
+    };
     graphics.draw_text(
-        "INTERCEPTED COMMS // LOCAL RX",
+        header,
         Vec2::new(panel_x + 12.0, panel_y + 15.0),
         12.0,
-        rgb(accent, 0.75 * panel_alpha),
+        header_col,
     );
     graphics.draw_line(
         Vec2::new(panel_x + 12.0, panel_y + 21.0),

@@ -17,8 +17,13 @@
 - shoggoth-core.js extends robot-core's exported `SpritePipeline` (shared
   pass-1 target + inked post pass + `M4`); the 2D-primitive
   `Graphics::draw_shoggoth` is only the `?viz` gallery / level-map thumbnail
-- The command opcode tables in src/graphics.rs (`mod op`) and renderer.js must
-  stay in sync
+- Opcode 14 = `POSTFX kind t r g b`: when present anywhere in a frame,
+  renderer.js renders the whole frame into an offscreen scene FBO and draws it
+  through a full-screen post shader (kind 0 = blur-out/dissolve toward the
+  colour, kind 1 = synthwave CRT). Only the last POSTFX of a frame applies
+- The command opcode tables in src/graphics.rs (`mod op`) and renderer.js
+  (incl. its `OP_ARGS` arity table used by the POSTFX pre-scan) must stay in
+  sync
 
 ## Repo layout (post-`proto/`)
 - Root: `index.html`, `renderer.js`, `robot-core.js` (the 3D->2D robot pipeline, imported by renderer.js at runtime), `shoggoth-core.js` (the boss pipeline, built on robot-core), `serve.py` (dev server, no-store + level-editor write API)
@@ -28,7 +33,8 @@
 
 ## `?viz` toolbox (one entry point)
 - `/?viz` tabs: SPRITES (click a character → 3D/2D inspector iframe), MUSICS (tracker + SFX), LEVELS (the level + scenario editor iframe, full pane), EFFECTS
-- `/?floor=N` starts the game directly on floor N (14 = 13½). With debug overlays on (I), **K** purges all rogues (incl. the boss; debug/e2e helper) and **B** cracks the boss's mask (drops it to the enrage threshold so the live mask-off / raw form can be previewed)
+- `/?floor=N` starts the game directly on floor N (14 = 13½); music starts on the first key/click. Add `&debug` (`/?floor=14&debug`) to enable the debug tooling: with debug overlays on (I), **K** purges all rogues (incl. the boss; debug/e2e helper) and **B** cracks the boss's mask (drops it to the enrage threshold so the live mask-off / raw form can be previewed)
+- The ending (`src/ending.rs`): extracting through a `to: 0` exit (13½'s car) → EXFILTRATED card → the `extracted` scenario step's UPLINK comms until the feed idles → 2.5 s blur-out (POSTFX 0) → `GameScreen::Ending` credits (the `CREDITS` const list) with POSTFX 1; Enter/Esc → level select
 - Level editor SAVE = `PUT /levels/<file>.json` to serve.py, guarded by the `X-Editor-Token` header (token from `$EDITOR_TOKEN` or the gitignored `.editor-token`, printed at server start). COPY DIFF gives a `patch -p1` unified diff.
 
 ## Verification Requirements
@@ -55,7 +61,7 @@
 
 ## Debug Mode
 - The game has a built-in debug mode that can be toggled by pressing **I** during gameplay
-- Debug mode is enabled by default (`debug_enabled: true` in GameState)
+- Debug mode is OFF by default; it is enabled only when the URL carries `?debug` (`debug_enabled` in GameState, e.g. `/?floor=14&debug`). Without it, I/K/B and the debug HUD line do nothing
 - When debug mode is active, pressing **I** toggles the display of debug information
 
 ### Debug Visualizations

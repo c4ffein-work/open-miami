@@ -1,5 +1,6 @@
 use crate::components::{
-    AIState, Boss, Enemy, Health, Knockback, Player, Position, Radius, Stunned, AI,
+    AIState, Boss, Enemy, GameEvent, Health, Knockback, Player, Position, Radius, Stunned,
+    WeaponType, AI,
 };
 use crate::ecs::{Entity, System, World};
 
@@ -132,7 +133,8 @@ impl CombatSystem {
         false // No hit
     }
 
-    /// Process melee attack in a cone
+    /// Process melee attack in a cone. Emits one [`GameEvent::EnemyHit`] (by
+    /// melee) per enemy struck.
     pub fn process_melee(
         world: &mut World,
         attacker_pos: Position,
@@ -185,6 +187,9 @@ impl CombatSystem {
                 if let Some(health) = world.get_component_mut::<Health>(enemy) {
                     health.take_damage(damage);
                     hit_any = true;
+                    world.push_event(GameEvent::EnemyHit {
+                        by: WeaponType::Melee,
+                    });
                 }
                 // Shove the enemy away from the attacker (attacker -> enemy).
                 let dir_x = enemy_pos.x - attacker_pos.x;
@@ -208,6 +213,14 @@ impl CombatSystem {
             Some(pos) => *pos,
             None => return,
         };
+
+        // A downed player is not a target: no more hits, knockback or hurt sounds.
+        if world
+            .get_component::<Health>(player_entity)
+            .is_some_and(|h| h.is_dead())
+        {
+            return;
+        }
 
         // Check all enemies in attack state
         let enemies: Vec<Entity> = world.query::<Enemy>();
@@ -247,6 +260,7 @@ impl CombatSystem {
                     if let Some(health) = world.get_component_mut::<Health>(player_entity) {
                         health.take_damage(damage);
                     }
+                    world.push_event(GameEvent::PlayerHurt);
 
                     // Shove the player directly away from the attacking enemy.
                     let dir_x = player_pos.x - enemy_pos.x;
@@ -394,6 +408,56 @@ mod tests {
         assert!(hit);
         let health = world.get_component::<Health>(enemy).unwrap();
         assert_eq!(health.current, 50);
+    }
+
+    #[test]
+    fn test_process_melee_announces_each_hit() {
+        let mut world = World::new();
+        for x in [30.0, 40.0] {
+            let enemy = world.spawn();
+            world.add_component(enemy, Enemy);
+            world.add_component(enemy, Position::new(x, 0.0));
+            world.add_component(enemy, Health::new(100));
+        }
+        CombatSystem::process_melee(
+            &mut world,
+            Position::new(0.0, 0.0),
+            Position::new(100.0, 0.0),
+            50,
+            50.0,
+        );
+        assert_eq!(
+            world.drain_events(),
+            vec![
+                GameEvent::EnemyHit {
+                    by: WeaponType::Melee
+                };
+                2
+            ]
+        );
+    }
+
+    #[test]
+    fn test_enemy_attack_announces_player_hurt() {
+        let mut world = World::new();
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, Position::new(0.0, 0.0));
+        world.add_component(player, Health::new(100));
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, Position::new(30.0, 0.0));
+        world.add_component(enemy, Health::new(100));
+        let mut ai = AI::new();
+        ai.state = AIState::SurePlayerSeen;
+        world.add_component(enemy, ai);
+
+        let mut system = CombatSystem;
+        system.run(&mut world, 0.016);
+        assert_eq!(world.drain_events(), vec![GameEvent::PlayerHurt]);
+        // Cooldown: no second hit, no second event.
+        system.run(&mut world, 0.016);
+        assert!(world.drain_events().is_empty());
     }
 
     #[test]

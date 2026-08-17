@@ -1,7 +1,6 @@
 use crate::collision;
 use crate::components::{
-    Enemy, Health, Player, Position, Radius, Stunned, ThrownWeapon, Weapon, WeaponPickup,
-    WeaponType,
+    Enemy, GameEvent, Health, Player, Position, Radius, Stunned, ThrownWeapon, Weapon, WeaponPickup,
 };
 use crate::ecs::{Entity, System, World};
 use crate::math::Vec2;
@@ -23,15 +22,17 @@ pub struct ThrownWeaponSystem;
 
 impl ThrownWeaponSystem {
     /// Throw the player's currently held weapon in `aim_dir`. The player is left
-    /// unarmed (their `Weapon` is removed) until they pick another one up.
-    /// Returns `true` if a weapon was actually thrown.
+    /// unarmed (their `Weapon` is removed) until they pick another one up. The
+    /// weapon flies with whatever ammo it had left and lands as a pickup still
+    /// holding it. Returns `true` if a weapon was actually thrown (and emits
+    /// [`GameEvent::Throw`]).
     pub fn throw_from_player(world: &mut World, aim_dir: Vec2) -> bool {
         let player = match world.query::<Player>().into_iter().next() {
             Some(p) => p,
             None => return false,
         };
-        let weapon_type = match world.get_component::<Weapon>(player) {
-            Some(w) => w.weapon_type,
+        let (weapon_type, ammo) = match world.get_component::<Weapon>(player) {
+            Some(w) => (w.weapon_type, w.ammo),
             None => return false, // nothing in hand to throw
         };
         let pos = match world.get_component::<Position>(player) {
@@ -49,19 +50,27 @@ impl ThrownWeaponSystem {
         let thrown = world.spawn();
         world.add_component(
             thrown,
-            ThrownWeapon::new(weapon_type, THROW_DAMAGE, aim_dir, THROW_SPEED, THROW_RANGE),
+            ThrownWeapon::new(
+                weapon_type,
+                ammo,
+                THROW_DAMAGE,
+                aim_dir,
+                THROW_SPEED,
+                THROW_RANGE,
+            ),
         );
         world.add_component(thrown, pos);
         world.add_component(thrown, Radius::new(THROWN_RADIUS));
+        world.push_event(GameEvent::Throw);
 
         true
     }
 
-    /// Drop a thrown weapon to the floor as a pickup at `pos`.
-    fn land(world: &mut World, thrown: Entity, pos: Position, weapon_type: WeaponType) {
+    /// Drop a thrown weapon to the floor as a pickup at `pos`, keeping its ammo.
+    fn land(world: &mut World, thrown: Entity, pos: Position, tw: &ThrownWeapon) {
         world.despawn(thrown);
         let pickup = world.spawn();
-        world.add_component(pickup, WeaponPickup::new(weapon_type));
+        world.add_component(pickup, WeaponPickup::with_ammo(tw.weapon_type, tw.ammo));
         world.add_component(pickup, pos);
         world.add_component(pickup, Radius::new(14.0));
     }
@@ -116,7 +125,7 @@ impl System for ThrownWeaponSystem {
                 )
             });
             if hit_wall {
-                Self::land(world, thrown, pos, tw.weapon_type);
+                Self::land(world, thrown, pos, &tw);
                 continue;
             }
 
@@ -126,13 +135,14 @@ impl System for ThrownWeaponSystem {
                     health.take_damage(tw.damage);
                 }
                 world.add_component(enemy, Stunned::new(STUN_DURATION));
-                Self::land(world, thrown, new_pos, tw.weapon_type);
+                world.push_event(GameEvent::ThrownImpact);
+                Self::land(world, thrown, new_pos, &tw);
                 continue;
             }
 
             // Out of range? It falls to the ground.
             if tw.distance_remaining - step <= 0.0 {
-                Self::land(world, thrown, new_pos, tw.weapon_type);
+                Self::land(world, thrown, new_pos, &tw);
                 continue;
             }
 
@@ -152,6 +162,7 @@ impl System for ThrownWeaponSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::WeaponType;
 
     fn player_with_weapon(world: &mut World, pos: Vec2, weapon: WeaponType) -> Entity {
         let p = world.spawn();
@@ -166,6 +177,7 @@ mod tests {
     fn test_throw_disarms_player_and_spawns_projectile() {
         let mut world = World::new();
         let player = player_with_weapon(&mut world, Vec2::new(100.0, 100.0), WeaponType::Shotgun);
+        world.get_component_mut::<Weapon>(player).unwrap().ammo = 3;
 
         let thrown = ThrownWeaponSystem::throw_from_player(&mut world, Vec2::new(1.0, 0.0));
 
@@ -173,13 +185,33 @@ mod tests {
         assert!(!world.has_component::<Weapon>(player)); // disarmed
         let projectiles = world.query::<ThrownWeapon>();
         assert_eq!(projectiles.len(), 1);
-        assert_eq!(
-            world
-                .get_component::<ThrownWeapon>(projectiles[0])
-                .unwrap()
-                .weapon_type,
-            WeaponType::Shotgun
-        );
+        let tw = world.get_component::<ThrownWeapon>(projectiles[0]).unwrap();
+        assert_eq!(tw.weapon_type, WeaponType::Shotgun);
+        assert_eq!(tw.ammo, 3); // the rounds fly with it
+        assert_eq!(world.drain_events(), vec![GameEvent::Throw]);
+    }
+
+    #[test]
+    fn test_thrown_weapon_lands_with_its_ammo() {
+        let mut world = World::new();
+        let player = player_with_weapon(&mut world, Vec2::new(0.0, 0.0), WeaponType::Pistol);
+        world.get_component_mut::<Weapon>(player).unwrap().ammo = 5;
+        ThrownWeaponSystem::throw_from_player(&mut world, Vec2::new(1.0, 0.0));
+        world.drain_events();
+
+        let mut system = ThrownWeaponSystem;
+        for _ in 0..200 {
+            system.run(&mut world, 0.016);
+            if world.query::<ThrownWeapon>().is_empty() {
+                break;
+            }
+        }
+        let pickups = world.query::<WeaponPickup>();
+        assert_eq!(pickups.len(), 1);
+        let p = world.get_component::<WeaponPickup>(pickups[0]).unwrap();
+        assert_eq!((p.weapon_type, p.ammo), (WeaponType::Pistol, 5));
+        // Flying and landing (no enemy hit) emit nothing.
+        assert!(world.drain_events().is_empty());
     }
 
     #[test]
@@ -231,6 +263,11 @@ mod tests {
         assert_eq!(
             world.get_component::<Health>(enemy).unwrap().current,
             50 - THROW_DAMAGE
+        );
+        // The throw and the impact were announced.
+        assert_eq!(
+            world.drain_events(),
+            vec![GameEvent::Throw, GameEvent::ThrownImpact]
         );
     }
 

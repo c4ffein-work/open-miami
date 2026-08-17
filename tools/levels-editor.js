@@ -419,7 +419,7 @@
   }
 
   /* ---------------- scenario steps editor ---------------- */
-  const TRIGGER_LABEL = { start: "on floor start", enter_zone: "player enters zone", kills: "kills ≥ count", all_dead: "all rogues dead", timer: "timer (s)", exit_open: "an exit opened", step_done: "after step" };
+  const TRIGGER_LABEL = { start: "on floor start", enter_zone: "player enters zone", kills: "kills ≥ count", all_dead: "all rogues dead", timer: "timer (s)", exit_open: "an exit opened", step_done: "after step", boss_dead: "the boss is dead", extracted: "player extracted" };
   function idOptions(sel, ids, current, allowEmpty, emptyLabel) {
     if (allowEmpty) sel.appendChild(opt("", emptyLabel || "(any)", !current));
     let found = false;
@@ -578,7 +578,7 @@
   }
 
   /* ---------------- comms preview (mockup look) ---------------- */
-  const FACTION = { "CL4-UD3": "clyde", HUNTER: "hunter", SENTINEL: "sentinel", DRIFTER: "drifter", SWARM: "swarm", CORRUPTOR: "corrupt" };
+  const FACTION = { "CL4-UD3": "clyde", HUNTER: "hunter", SENTINEL: "sentinel", DRIFTER: "drifter", SWARM: "swarm", CORRUPTOR: "corrupt", UPLINK: "clyde" };
   const portraitCache = new Map();
   function portrait(who) {
     const key = who + "@44";

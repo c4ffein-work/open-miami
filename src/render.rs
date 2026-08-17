@@ -430,25 +430,24 @@ fn render_player(world: &World, graphics: &Graphics) {
     }
 }
 
-/// Render UI (health, ammo, etc.)
+/// Render UI (health, the held weapon and its ammo, etc.). `weapon` is the
+/// held weapon type (`None` = unarmed) and `ammo` the rounds left in it.
 #[allow(clippy::too_many_arguments)]
 pub fn render_ui(
     graphics: &Graphics,
     health: i32,
     ammo: i32,
-    weapon_name: &str,
+    weapon: Option<WeaponType>,
     enemies_alive: usize,
     player_alive: bool,
     death_time: f32,
-    level_complete: bool,
-    level_complete_time: f32,
     debug_enabled: bool,
     show_infos: bool,
 ) {
     let screen_width = graphics.width();
     let screen_height = graphics.height();
 
-    if player_alive && !level_complete {
+    if player_alive {
         graphics.draw_text("Health:", Vec2::new(10.0, 30.0), 20.0, Color::WHITE);
         graphics.draw_text(
             &format!("{}", health),
@@ -457,16 +456,22 @@ pub fn render_ui(
             Color::WHITE,
         );
 
-        graphics.draw_text("Ammo:", Vec2::new(10.0, 60.0), 20.0, Color::WHITE);
-        graphics.draw_text(
-            &format!("{}", ammo),
-            Vec2::new(100.0, 60.0),
-            20.0,
-            Color::WHITE,
-        );
-
-        graphics.draw_text("Weapon:", Vec2::new(10.0, 90.0), 20.0, Color::WHITE);
-        graphics.draw_text(weapon_name, Vec2::new(110.0, 90.0), 20.0, Color::WHITE);
+        // The one weapon in hand and what's left in it: `WEAPON: SHOTGUN 3/6`
+        // (`MELEE` never runs dry; `UNARMED` after a throw). An empty gun is
+        // flagged red — throw it, take another.
+        graphics.draw_text("Weapon:", Vec2::new(10.0, 60.0), 20.0, Color::WHITE);
+        let label = crate::game::weapon_hud_label(weapon, ammo);
+        let label_color = match weapon {
+            Some(t) if !t.is_melee() && ammo <= 0 => Color::RED,
+            Some(t) => weapon_color(t),
+            None => Color::GRAY,
+        };
+        graphics.draw_text(&label, Vec2::new(100.0, 60.0), 20.0, label_color);
+        if let Some(t) = weapon {
+            if !t.is_melee() && ammo <= 0 {
+                graphics.draw_text("EMPTY - throw it", Vec2::new(10.0, 82.0), 14.0, Color::RED);
+            }
+        }
 
         graphics.draw_text("Rogues:", Vec2::new(10.0, 120.0), 20.0, Color::WHITE);
         graphics.draw_text(
@@ -512,42 +517,6 @@ pub fn render_ui(
                 Color::WHITE,
             );
         }
-    } else if level_complete {
-        // Level complete screen with animations
-
-        // "SECTOR PURGED" - reveal left to right
-        let message = "SECTOR PURGED";
-        let reveal_duration = 1.0;
-        let reveal_progress = (level_complete_time / reveal_duration).min(1.0);
-        let chars_to_show = (message.len() as f32 * reveal_progress) as usize;
-        let revealed_text = &message[0..chars_to_show.min(message.len())];
-
-        graphics.draw_text(
-            revealed_text,
-            Vec2::new(screen_width / 2.0 - 140.0, screen_height / 2.0),
-            60.0,
-            Color::new(0.0, 1.0, 0.0, 1.0), // Green
-        );
-
-        // "EXFILTRATE" - wobbling animation
-        if level_complete_time > reveal_duration {
-            let anim_time = level_complete_time - reveal_duration;
-
-            // Wobble position
-            let y_amplitude = 5.0;
-            let y_speed = 1.5;
-            let y_offset = y_amplitude * (anim_time * y_speed * 2.0 * std::f32::consts::PI).sin();
-
-            graphics.draw_text(
-                "EXFILTRATING",
-                Vec2::new(
-                    screen_width / 2.0 - 100.0,
-                    screen_height / 2.0 + 80.0 + y_offset,
-                ),
-                30.0,
-                Color::WHITE,
-            );
-        }
     }
 
     // Info display indicator
@@ -578,9 +547,9 @@ pub fn render_ui(
         }
     }
 
-    // Controls info
+    // Controls info (no weapon-select keys: one weapon in hand, swap on the floor)
     graphics.draw_text(
-        "WASD: Move | Aim: Mouse | Shoot: LClick | Throw: RClick | Pick up: E | 1-4: Weapons",
+        "WASD move · Mouse aim · LClick fire · RClick throw · E pick up · Shift look · Esc menu",
         Vec2::new(10.0, screen_height - 20.0),
         16.0,
         Color::GRAY,

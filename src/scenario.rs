@@ -8,10 +8,11 @@
 
 use std::collections::VecDeque;
 
-use crate::components::{Elevator, EnemyType, Health, Player, Position, WeaponType, Zone};
+use crate::components::{Boss, Elevator, EnemyType, Health, Player, Position, WeaponType, Zone};
 use crate::ecs::World;
 use crate::game::spawn_enemy_with_type;
 use crate::math::Vec2;
+use crate::systems::elevator::ElevatorSystem;
 
 // ---------------------------------------------------------------------------
 // Static definitions
@@ -103,6 +104,22 @@ pub enum Trigger {
     ExitOpen(Option<&'static str>),
     /// Step `step` has fired.
     StepDone(&'static str),
+    /// The floor's boss (the `Boss` entity) is dead. Never fires on floors
+    /// without a boss.
+    BossDead,
+    /// The player has extracted (stood the full dwell inside an open exit).
+    /// The scenario keeps ticking through the completion card, so this is
+    /// how a floor talks *after* the ride starts (13½'s uplink epilogue).
+    Extracted,
+}
+
+impl Trigger {
+    /// Whether the trigger reads the rogue counts (`kills` / `all_dead`).
+    /// These are evaluated after the other triggers of a tick so same-tick
+    /// spawns are counted first.
+    pub fn is_count_based(&self) -> bool {
+        matches!(self, Trigger::Kills(_) | Trigger::AllDead)
+    }
 }
 
 /// One intercepted-comms line.
@@ -204,6 +221,7 @@ pub const SPEAKERS: &[(&str, (u8, u8, u8))] = &[
     ("DRIFTER", (168, 107, 255)),  // violet
     ("SWARM", (255, 58, 198)),     // magenta chorus
     ("CORRUPTOR", (255, 210, 58)), // yellow
+    ("UPLINK", (200, 255, 222)),   // pale mint: the thread home, restored
 ];
 
 /// Colour for a speaker name (unknown speakers are white).
@@ -340,6 +358,15 @@ impl CommsFeed {
     }
 }
 
+/// The per-tick world facts a trigger is evaluated against.
+struct TriggerCtx {
+    player_pos: Option<Vec2>,
+    kills: usize,
+    alive: usize,
+    boss_dead: bool,
+    extracted: bool,
+}
+
 /// Live state of a floor's scenario.
 #[derive(Debug, Clone)]
 pub struct ScenarioState {
@@ -403,6 +430,11 @@ impl ScenarioState {
 
     /// Advance the scenario by `dt`: fire due steps (each once), run their
     /// actions on the world, and advance the comms feed.
+    ///
+    /// Within one tick, steps whose triggers depend on the rogue counts
+    /// (`kills`, `all_dead`) are evaluated *after* the other steps of the
+    /// same pass, and the counts are recomputed after every fired step, so a
+    /// `spawn` in the same tick can never let `all_dead` slip through.
     pub fn tick(&mut self, world: &mut World, dt: f32) {
         self.time += dt;
 
@@ -411,29 +443,39 @@ impl ScenarioState {
             .first()
             .and_then(|&p| world.get_component::<Position>(p))
             .map(|p| p.to_vec2());
-        let (kills, alive) = count_rogues(world);
-
-        // Legacy floors: all rogues dead opens every exit.
-        if self.auto_open_on_all_dead && !self.auto_opened && alive == 0 {
-            self.auto_opened = true;
-            for exit in self.floor.exits {
-                self.set_exit_open(world, exit.id, true);
-            }
-        }
+        let mut counts = count_rogues(world);
+        let boss_dead = any_boss_dead(world);
+        let extracted = ElevatorSystem::extraction(world).is_some();
 
         // Fire steps until nothing new fires this tick (chained `step_done`
         // triggers resolve within the same frame).
         loop {
             let mut fired_any = false;
-            for i in 0..self.floor.scenario.len() {
-                if self.fired_at[i].is_some() {
-                    continue;
-                }
-                let step = &self.floor.scenario[i];
-                if self.trigger_holds(step.trigger, player_pos, kills, alive) {
-                    self.fired_at[i] = Some(self.time);
-                    self.run_actions(world, step.actions);
-                    fired_any = true;
+            // Pass 0: everything but the count-based triggers (may spawn);
+            // pass 1: `kills` / `all_dead` against the fresh counts.
+            for count_pass in [false, true] {
+                for i in 0..self.floor.scenario.len() {
+                    if self.fired_at[i].is_some() {
+                        continue;
+                    }
+                    let step = &self.floor.scenario[i];
+                    if step.trigger.is_count_based() != count_pass {
+                        continue;
+                    }
+                    let (kills, alive) = counts;
+                    let ctx = TriggerCtx {
+                        player_pos,
+                        kills,
+                        alive,
+                        boss_dead,
+                        extracted,
+                    };
+                    if self.trigger_holds(step.trigger, &ctx) {
+                        self.fired_at[i] = Some(self.time);
+                        self.run_actions(world, step.actions);
+                        counts = count_rogues(world);
+                        fired_any = true;
+                    }
                 }
             }
             if !fired_any {
@@ -441,24 +483,27 @@ impl ScenarioState {
             }
         }
 
+        // Legacy floors: all rogues dead opens every exit (checked against the
+        // counts *after* this tick's spawns).
+        if self.auto_open_on_all_dead && !self.auto_opened && counts.1 == 0 {
+            self.auto_opened = true;
+            for exit in self.floor.exits {
+                self.set_exit_open(world, exit.id, true);
+            }
+        }
+
         self.comms.update(self.time, dt);
     }
 
-    fn trigger_holds(
-        &self,
-        trigger: Trigger,
-        player_pos: Option<Vec2>,
-        kills: usize,
-        alive: usize,
-    ) -> bool {
+    fn trigger_holds(&self, trigger: Trigger, ctx: &TriggerCtx) -> bool {
         match trigger {
             Trigger::Start => true,
-            Trigger::EnterZone(zone) => match (player_pos, self.floor.zone(zone)) {
+            Trigger::EnterZone(zone) => match (ctx.player_pos, self.floor.zone(zone)) {
                 (Some(p), Some(z)) => z.rect.contains(p),
                 _ => false,
             },
-            Trigger::Kills(n) => kills >= n,
-            Trigger::AllDead => alive == 0,
+            Trigger::Kills(n) => ctx.kills >= n,
+            Trigger::AllDead => ctx.alive == 0,
             Trigger::Timer { seconds, after } => {
                 let base = match after {
                     None => Some(0.0),
@@ -472,6 +517,8 @@ impl ScenarioState {
             Trigger::ExitOpen(None) => !self.opened_exits.is_empty(),
             Trigger::ExitOpen(Some(id)) => self.opened_exits.contains(&id),
             Trigger::StepDone(id) => self.fired_time(id).is_some(),
+            Trigger::BossDead => ctx.boss_dead,
+            Trigger::Extracted => ctx.extracted,
         }
     }
 
@@ -533,6 +580,16 @@ pub fn count_rogues(world: &World) -> (usize, usize) {
         }
     }
     (dead, alive)
+}
+
+/// Whether the floor has a boss and it is dead (`boss_dead` trigger).
+pub fn any_boss_dead(world: &World) -> bool {
+    world.query::<Boss>().iter().any(|&e| {
+        world
+            .get_component::<Health>(e)
+            .map(|h| h.is_dead())
+            .unwrap_or(false)
+    })
 }
 
 /// Spawn the entry + exit elevators and the trigger zones of a floor into the
@@ -836,6 +893,159 @@ mod tests {
         sc.tick(&mut world, 0.016);
         assert!(exit_open(&world, "a") && exit_open(&world, "b"));
         assert_eq!(sc.opened_exits().len(), 2);
+    }
+
+    // A floor with NO initial rogues: `start` spawns the wave and `all_dead`
+    // is listed BEFORE it, so a naive single-pass evaluation would fire
+    // `all_dead` (0 alive) on the very first tick, before the spawn lands.
+    const WAVE_FIRST_STEPS: [StepDef; 3] = [
+        StepDef {
+            id: "clear",
+            trigger: Trigger::AllDead,
+            actions: &[Action::OpenExit("a")],
+        },
+        StepDef {
+            id: "intro",
+            trigger: Trigger::Start,
+            actions: &[Action::Spawn(&T_WAVE)],
+        },
+        StepDef {
+            id: "first_blood",
+            trigger: Trigger::Kills(1),
+            actions: &[Action::Objective("one down")],
+        },
+    ];
+    const WAVE_FIRST_FLOOR: FloorDef = FloorDef {
+        spawns: &[],
+        scenario: &WAVE_FIRST_STEPS,
+        ..T_FLOOR
+    };
+
+    #[test]
+    fn same_tick_spawn_is_counted_before_all_dead_and_kills() {
+        let mut world = world_for(&WAVE_FIRST_FLOOR);
+        let mut sc = ScenarioState::new(&WAVE_FIRST_FLOOR);
+        assert_eq!(count_rogues(&world), (0, 0));
+        sc.tick(&mut world, 0.016);
+        assert!(sc.step_fired("intro"));
+        assert_eq!(count_rogues(&world), (0, 2), "the wave spawned");
+        assert!(
+            !sc.step_fired("clear"),
+            "all_dead must not fire in the tick that spawned the wave"
+        );
+        assert!(!sc.step_fired("first_blood"));
+        assert!(!exit_open(&world, "a"));
+        for _ in 0..10 {
+            sc.tick(&mut world, 0.1);
+        }
+        assert!(!sc.step_fired("clear"));
+        // Kill one -> kills(1); kill all -> all_dead, in later ticks.
+        let first = world.query::<Enemy>()[0];
+        world
+            .get_component_mut::<Health>(first)
+            .unwrap()
+            .take_damage(9999);
+        sc.tick(&mut world, 0.016);
+        assert!(sc.step_fired("first_blood"));
+        assert!(!sc.step_fired("clear"));
+        kill_all(&mut world);
+        sc.tick(&mut world, 0.016);
+        assert!(sc.step_fired("clear"));
+        assert!(exit_open(&world, "a"));
+    }
+
+    // Legacy floor (no exit opener) with no initial rogues and a start wave:
+    // the auto-open must also see the spawn first.
+    const LEGACY_WAVE_FLOOR: FloorDef = FloorDef {
+        spawns: &[],
+        scenario: &[StepDef {
+            id: "intro",
+            trigger: Trigger::Start,
+            actions: &[Action::Spawn(&T_WAVE)],
+        }],
+        ..T_FLOOR
+    };
+
+    #[test]
+    fn legacy_auto_open_waits_for_same_tick_spawns() {
+        let mut world = world_for(&LEGACY_WAVE_FLOOR);
+        let mut sc = ScenarioState::new(&LEGACY_WAVE_FLOOR);
+        sc.tick(&mut world, 0.016);
+        assert_eq!(count_rogues(&world), (0, 2));
+        assert!(!exit_open(&world, "a") && !exit_open(&world, "b"));
+        kill_all(&mut world);
+        sc.tick(&mut world, 0.016);
+        assert!(exit_open(&world, "a") && exit_open(&world, "b"));
+    }
+
+    const ENDING_STEPS: [StepDef; 3] = [
+        StepDef {
+            id: "boss_down",
+            trigger: Trigger::BossDead,
+            actions: &[Action::OpenExit("a"), Action::Objective("ride")],
+        },
+        StepDef {
+            id: "uplink",
+            trigger: Trigger::Extracted,
+            actions: &[Action::Say(SayDef {
+                who: "UPLINK",
+                text: "carrier",
+                delay: 0.0,
+            })],
+        },
+        StepDef {
+            id: "never",
+            trigger: Trigger::AllDead,
+            actions: &[Action::Objective("all dead")],
+        },
+    ];
+    const ENDING_FLOOR: FloorDef = FloorDef {
+        spawns: &[],
+        scenario: &ENDING_STEPS,
+        ..T_FLOOR
+    };
+
+    #[test]
+    fn boss_dead_and_extracted_triggers() {
+        use crate::components::{Boss, Enemy, Radius};
+        use crate::ecs::System;
+        let mut world = world_for(&ENDING_FLOOR);
+        // A boss (an Enemy that carries the Boss marker) plus one plain rogue,
+        // so `all_dead` stays false once the boss alone is down.
+        let boss = world.spawn();
+        world.add_component(boss, Enemy);
+        world.add_component(boss, Boss::new());
+        world.add_component(boss, Position::new(500.0, 400.0));
+        world.add_component(boss, Health::new(100));
+        world.add_component(boss, Radius::new(40.0));
+        spawn_enemy_with_type(&mut world, Vec2::new(300.0, 300.0), EnemyType::Idle);
+        let mut sc = ScenarioState::new(&ENDING_FLOOR);
+        sc.tick(&mut world, 0.016);
+        assert!(!sc.step_fired("boss_down"));
+        assert!(!sc.step_fired("never"));
+        world
+            .get_component_mut::<Health>(boss)
+            .unwrap()
+            .take_damage(9999);
+        sc.tick(&mut world, 0.016);
+        assert!(
+            sc.step_fired("boss_down"),
+            "boss_dead fires once the boss dies"
+        );
+        assert!(!sc.step_fired("never"), "a plain rogue is still alive");
+        assert!(exit_open(&world, "a"));
+        assert_eq!(sc.objective, "ride");
+        // Standing in the open exit for the dwell time = extraction -> uplink.
+        assert!(!sc.step_fired("uplink"));
+        move_player(&mut world, Vec2::new(500.0, 50.0));
+        let mut lift = ElevatorSystem;
+        for _ in 0..40 {
+            lift.run(&mut world, 1.0 / 60.0);
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(sc.step_fired("uplink"));
+        assert_eq!(sc.comms.visible()[0].who, "UPLINK");
+        assert_eq!(speaker_rgb("UPLINK"), (200, 255, 222));
     }
 
     #[test]
