@@ -70,6 +70,25 @@
     { "x": 200, "y": 720, "weapon": "shotgun" },
     { "x": 500, "y": 350, "weapon": "machinegun" }
   ],
+  "props": [
+    { "kind": "rack_closed", "x": 200, "y": 212, "rot": 0, "size": 60 },
+    { "kind": "rack_open", "x": 400, "y": 212, "rot": 0, "size": 60 },
+    { "kind": "rack_closed", "x": 600, "y": 212, "rot": 0, "size": 60 },
+    { "kind": "rack_burnt", "x": 800, "y": 212, "rot": 0, "size": 60 },
+    { "kind": "rack_closed", "x": 200, "y": 590, "rot": 180, "size": 60 },
+    { "kind": "rack_closed", "x": 400, "y": 590, "rot": 180, "size": 60 },
+    { "kind": "rack_open", "x": 600, "y": 590, "rot": 180, "size": 60 },
+    { "kind": "rack_closed", "x": 800, "y": 590, "rot": 180, "size": 60 },
+    { "kind": "cable_junction", "x": 200, "y": 320, "rot": 90, "size": 60 },
+    { "kind": "coolant_tank", "x": 200, "y": 480, "rot": 90, "size": 60 },
+    { "kind": "crac_cooler", "x": 800, "y": 320, "rot": 270, "size": 60 },
+    { "kind": "ups_cabinet", "x": 800, "y": 480, "rot": 270, "size": 60 },
+    { "kind": "uplink_obelisk", "x": 500, "y": 450, "rot": 45, "size": 60 },
+    { "kind": "control_console", "x": 150, "y": 80, "rot": 0, "size": 70 },
+    { "kind": "hazard_pad", "x": 500, "y": 110, "rot": 0, "size": 70 },
+    { "kind": "supply_crate", "x": 700, "y": 720, "rot": 30, "size": 50 },
+    { "kind": "cable_coil", "x": 320, "y": 740, "rot": 0, "size": 50 }
+  ],
   "scenario": [
     {
       "id": "intro",

@@ -11,30 +11,78 @@ Usage:
                                            # file is up to date (exit 1 if not)
 
 The JSON contract is documented in docs/SCENARIO_FORMAT.md. This script also
-validates it: every `exit.to` must be an existing floor id (or 0 = surface),
+validates it: every `exit.to` must be an existing floor id (or "surface" =
+the end of the run),
 every zone / exit / step id referenced by a scenario must exist, speakers,
-enemy types and weapons must be from the fixed sets, and no two floors may
-share an id.
+enemy types, weapons and prop kinds (`props[].kind`, the snake_case ids of
+`PROP_NAMES` in src/props.rs) must be from the fixed sets, and no two floors
+may share an id.
 """
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LEVELS_DIR = os.path.join(ROOT, "levels")
 OUT_PATH = os.path.join(ROOT, "src", "levels_data.rs")
+PROPS_RS = os.path.join(ROOT, "src", "props.rs")
 
 ENEMY_TYPES = {"idle": "Idle", "wandering": "Wandering", "patrolling": "Patrolling"}
 WEAPONS = {"pistol": "Pistol", "shotgun": "Shotgun", "machinegun": "MachineGun", "melee": "Melee"}
 SPEAKERS = {"CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR", "UPLINK"}
 TRIGGERS = {"start", "enter_zone", "kills", "all_dead", "timer", "exit_open", "step_done",
             "boss_dead", "extracted"}
-ACTIONS = {"say", "spawn", "open_exit", "close_exit", "objective", "sfx"}
+ACTIONS = {"say", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at"}
 SFX = {"elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"}
+# Portal (entry / exit) rendering kinds and floor ground surfaces.
+PORTAL_KINDS = {"lift": "Lift", "door": "Door", "gate": "Gate"}
+SURFACES = {"checker": "Checker", "asphalt": "Asphalt", "marble": "Marble", "concrete": "Concrete",
+            "grating": "Grating"}
+# `exit.to` value that ends the run (the surface); emitted as `SURFACE_EXIT`.
+SURFACE = "surface"
+# `hold.until_comms_idle` is capped at this many seconds (mirrors scenario.rs).
+HOLD_COMMS_IDLE_CAP = 20.0
 
 
 class Invalid(Exception):
     pass
+
+
+def prop_kind_id(display_name):
+    """Mirror of `props::prop_kind_id` (and tools/gen_props.py): lower-case,
+    runs of non-alphanumerics collapsed to one `_`, trimmed."""
+    out = []
+    for ch in display_name:
+        if ch.isascii() and ch.isalnum():
+            out.append(ch.lower())
+        elif out and out[-1] != "_":
+            out.append("_")
+    return "".join(out).rstrip("_")
+
+
+def load_prop_kinds():
+    """`{snake_case id: index}` of the prop library, from `PROP_NAMES` in
+    src/props.rs (its order is the prop index the engine draws by)."""
+    with open(PROPS_RS, encoding="utf-8") as fh:
+        src = fh.read()
+    m = re.search(r"pub const PROP_NAMES: \[&str; (\d+)\] = \[(.*?)\];", src, re.S)
+    if not m:
+        raise Invalid("cannot find PROP_NAMES in src/props.rs")
+    names = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2))
+    if len(names) != int(m.group(1)):
+        raise Invalid("PROP_NAMES length mismatch in src/props.rs")
+    return {prop_kind_id(n): i for i, n in enumerate(names)}
+
+
+PROP_KINDS = None
+
+
+def prop_kinds():
+    global PROP_KINDS
+    if PROP_KINDS is None:
+        PROP_KINDS = load_prop_kinds()
+    return PROP_KINDS
 
 
 def f32(v):
@@ -88,8 +136,8 @@ def validate(floors):
     ids = [f["id"] for f in floors]
     if len(set(ids)) != len(ids):
         raise Invalid(f"duplicate floor ids: {ids}")
-    if not all(isinstance(i, int) and i >= 1 for i in ids):
-        raise Invalid(f"floor ids must be positive integers: {ids}")
+    if not all(isinstance(i, int) and i >= 0 for i in ids):
+        raise Invalid(f"floor ids must be non-negative integers: {ids}")
     id_set = set(ids)
     for f in floors:
         tag = f["_file"]
@@ -109,8 +157,15 @@ def validate(floors):
             raise Invalid(f"{tag}: duplicate exit ids {exit_ids}")
         for e in exits:
             to = e.get("to", f["id"] + 1)
-            if to != 0 and to not in id_set:
-                raise Invalid(f"{tag}: exit '{e['id']}' leads to unknown floor {to}")
+            if to != SURFACE and to not in id_set:
+                raise Invalid(f"{tag}: exit '{e['id']}' leads to unknown floor {to!r}"
+                              f" (use \"{SURFACE}\" for the end of the run)")
+            if e.get("kind", "lift") not in PORTAL_KINDS:
+                raise Invalid(f"{tag}: exit '{e['id']}' has bad kind {e.get('kind')!r}")
+        if f["entry"].get("kind", "lift") not in PORTAL_KINDS:
+            raise Invalid(f"{tag}: entry has bad kind {f['entry'].get('kind')!r}")
+        if f.get("surface", "checker") not in SURFACES:
+            raise Invalid(f"{tag}: bad surface {f.get('surface')!r}")
         zone_ids = [z["id"] for z in f.get("zones", [])]
         if len(set(zone_ids)) != len(zone_ids):
             raise Invalid(f"{tag}: duplicate zone ids {zone_ids}")
@@ -118,11 +173,20 @@ def validate(floors):
         if len(set(room_ids)) != len(room_ids):
             raise Invalid(f"{tag}: duplicate room ids {room_ids}")
         for s in f["spawns"]:
-            if s.get("type", "idle") not in ENEMY_TYPES:
-                raise Invalid(f"{tag}: bad spawn type {s.get('type')!r}")
+            validate_spawn(s, zone_ids, f"{tag}: spawn")
         for p in f.get("pickups", []):
             if p.get("weapon") not in WEAPONS:
                 raise Invalid(f"{tag}: bad pickup weapon {p.get('weapon')!r}")
+        for i, p in enumerate(f.get("props", [])):
+            if not isinstance(p, dict) or p.get("kind") not in prop_kinds():
+                raise Invalid(f"{tag}: props[{i}]: unknown prop kind {p.get('kind') if isinstance(p, dict) else p!r}")
+            for k in ("x", "y"):
+                if not isinstance(p.get(k), (int, float)):
+                    raise Invalid(f"{tag}: props[{i}]: missing / non-numeric '{k}'")
+            if not isinstance(p.get("rot", 0), (int, float)):
+                raise Invalid(f"{tag}: props[{i}]: rot must be a number (degrees)")
+            if not isinstance(p.get("size", 100), (int, float)) or p.get("size", 100) <= 0:
+                raise Invalid(f"{tag}: props[{i}]: size must be > 0")
         step_ids = []
         for i, st in enumerate(f["scenario"]):
             sid = st.get("id", f"step_{i}")
@@ -161,8 +225,7 @@ def validate(floors):
                         raise Invalid(f"{tag}/{sid}: say.delay must be >= 0")
                 elif name == "spawn":
                     for s in payload:
-                        if s.get("type", "idle") not in ENEMY_TYPES:
-                            raise Invalid(f"{tag}/{sid}: bad wave spawn type {s.get('type')!r}")
+                        validate_spawn(s, zone_ids, f"{tag}/{sid}: wave spawn")
                 elif name in ("open_exit", "close_exit"):
                     if payload not in exit_ids:
                         raise Invalid(f"{tag}/{sid}: {name} references unknown exit {payload!r}")
@@ -172,17 +235,120 @@ def validate(floors):
                 elif name == "sfx":
                     if payload not in SFX:
                         raise Invalid(f"{tag}/{sid}: unknown sfx {payload!r}")
+                elif name == "alert":
+                    validate_alert(payload, zone_ids, f"{tag}/{sid}")
+                elif name == "hold":
+                    validate_hold(payload, f"{tag}/{sid}")
+                elif name == "look_at":
+                    validate_look_at(payload, f"{tag}/{sid}")
+
+
+def validate_spawn(s, zone_ids, what):
+    """A placement: a hostile rogue (`type` idle|wandering|patrolling) or a
+    passive civilian (`type: "passive"` + optional walk_to/face/look/group)."""
+    t = s.get("type", "idle")
+    if t == "passive":
+        look = s.get("look", "wandering")
+        if look not in ENEMY_TYPES:
+            raise Invalid(f"{what}: bad passive look {look!r}")
+        if "walk_to" in s and s["walk_to"] not in zone_ids:
+            raise Invalid(f"{what}: walk_to references unknown zone {s['walk_to']!r}")
+        if "face" in s and not isinstance(s["face"], (int, float)):
+            raise Invalid(f"{what}: face must be a number (degrees)")
+        if "group" in s and (not isinstance(s["group"], str) or not s["group"]):
+            raise Invalid(f"{what}: group must be a non-empty string")
+    elif t not in ENEMY_TYPES:
+        raise Invalid(f"{what}: bad spawn type {t!r}")
+    else:
+        for k in ("walk_to", "face", "look", "group"):
+            if k in s and k != "group":
+                raise Invalid(f"{what}: {k!r} is only valid on a passive spawn")
+
+
+def validate_alert(payload, zone_ids, what):
+    if payload == "all":
+        return
+    if isinstance(payload, dict) and len(payload) == 1:
+        (k, v), = payload.items()
+        if k == "zone":
+            if v not in zone_ids:
+                raise Invalid(f"{what}: alert references unknown zone {v!r}")
+            return
+        if k == "group":
+            if isinstance(v, str) and v:
+                return
+    raise Invalid(f"{what}: alert must be \"all\", {{\"zone\": id}} or {{\"group\": id}}, got {payload!r}")
+
+
+def validate_hold(payload, what):
+    if not isinstance(payload, dict):
+        raise Invalid(f"{what}: hold must be an object")
+    secs = payload.get("seconds")
+    idle = payload.get("until_comms_idle", False)
+    if not isinstance(idle, bool):
+        raise Invalid(f"{what}: hold.until_comms_idle must be a boolean")
+    if secs is None:
+        if not idle:
+            raise Invalid(f"{what}: hold needs seconds and/or until_comms_idle")
+    elif not isinstance(secs, (int, float)) or secs <= 0:
+        raise Invalid(f"{what}: hold.seconds must be > 0")
+    if "text" in payload and not isinstance(payload["text"], str):
+        raise Invalid(f"{what}: hold.text must be a string")
+
+
+def validate_look_at(payload, what):
+    if not isinstance(payload, dict):
+        raise Invalid(f"{what}: look_at must be an object")
+    for k in ("x", "y"):
+        if not isinstance(payload.get(k), (int, float)):
+            raise Invalid(f"{what}: look_at needs numeric {k}")
+    if not isinstance(payload.get("seconds"), (int, float)) or payload["seconds"] <= 0:
+        raise Invalid(f"{what}: look_at.seconds must be > 0")
 
 
 def elevator(e, floor_id, what):
     to = e.get("to", floor_id + 1)
+    to = "SURFACE_EXIT" if to == SURFACE else str(int(to))
+    kind = PORTAL_KINDS[e.get("kind", "lift")]
     return (f"ElevatorDef {{ id: {rstr(e['id'])}, rect: {rect(e, what)}, "
-            f"label: {rstr(e.get('label', e['id']))}, to: {int(to)}, "
-            f"open: {'true' if e.get('open', False) else 'false'} }}")
+            f"label: {rstr(e.get('label', e['id']))}, to: {to}, "
+            f"open: {'true' if e.get('open', False) else 'false'}, kind: ElevatorKind::{kind} }}")
+
+
+def opt_str(v):
+    return f"Some({rstr(v)})" if v is not None else "None"
 
 
 def spawn(s):
-    return f"SpawnDef {{ x: {f32(s['x'])}, y: {f32(s['y'])}, kind: EnemyType::{ENEMY_TYPES[s.get('type', 'idle')]} }}"
+    t = s.get("type", "idle")
+    if t == "passive":
+        look = ENEMY_TYPES[s.get("look", "wandering")]
+        face = f"Some({f32(s['face'])})" if "face" in s else "None"
+        return (f"SpawnDef {{ x: {f32(s['x'])}, y: {f32(s['y'])}, kind: EnemyType::{look}, passive: true, "
+                f"walk_to: {opt_str(s.get('walk_to'))}, face: {face}, group: {opt_str(s.get('group'))} }}")
+    base = f"SpawnDef::hostile({f32(s['x'])}, {f32(s['y'])}, EnemyType::{ENEMY_TYPES[t]})"
+    if s.get("group") is not None:
+        return f"SpawnDef {{ group: {opt_str(s['group'])}, ..{base} }}"
+    return base
+
+
+def alert(payload):
+    if payload == "all":
+        return "AlertTarget::All"
+    (k, v), = payload.items()
+    return f"AlertTarget::Zone({rstr(v)})" if k == "zone" else f"AlertTarget::Group({rstr(v)})"
+
+
+def hold(payload):
+    idle = bool(payload.get("until_comms_idle", False))
+    secs = payload.get("seconds", HOLD_COMMS_IDLE_CAP if idle else 0)
+    text = opt_str(payload.get("text"))
+    return (f"HoldDef {{ seconds: {f32(secs)}, text: {text}, "
+            f"until_comms_idle: {'true' if idle else 'false'} }}")
+
+
+def look_at(payload):
+    return f"LookAtDef {{ x: {f32(payload['x'])}, y: {f32(payload['y'])}, seconds: {f32(payload['seconds'])} }}"
 
 
 def gen_floor(f, out):
@@ -224,6 +390,12 @@ def gen_floor(f, out):
                 out.append(f"    Action::Objective({rstr(payload)}),")
             elif kind == "sfx":
                 out.append(f"    Action::Sfx({rstr(payload)}),")
+            elif kind == "alert":
+                out.append(f"    Action::Alert({alert(payload)}),")
+            elif kind == "hold":
+                out.append(f"    Action::Hold({hold(payload)}),")
+            elif kind == "look_at":
+                out.append(f"    Action::LookAt({look_at(payload)}),")
         out.append("];")
         out.append("")
     # Steps.
@@ -289,6 +461,14 @@ def gen_floor(f, out):
         out.append(f"    PickupDef {{ x: {f32(p['x'])}, y: {f32(p['y'])}, weapon: WeaponType::{WEAPONS[p['weapon']]} }},")
     out.append("];")
     out.append("")
+    props = f.get("props", [])
+    out.append(f"static {name}_PROPS: [PropPlacement; {len(props)}] = [")
+    for p in props:
+        kind = p["kind"]
+        out.append(f"    PropPlacement {{ kind: {prop_kinds()[kind]}, x: {f32(p['x'])}, y: {f32(p['y'])}, "
+                   f"rot: {f32(p.get('rot', 0))}, size: {f32(p.get('size', 100))} }}, // {kind}")
+    out.append("];")
+    out.append("")
     size = f["size"]
     out.append(f"pub static {name}: FloorDef = FloorDef {{")
     out.append(f"    id: {fid},")
@@ -299,14 +479,16 @@ def gen_floor(f, out):
     out.append(f"    objective: {rstr(f['objective'])},")
     out.append(f"    width: {f32(size['w'])},")
     out.append(f"    height: {f32(size['h'])},")
-    out.append(f"    entry: {elevator(dict(f['entry'], to=0), fid, tag + ' entry')},")
+    out.append(f"    entry: {elevator(dict(f['entry'], to=SURFACE), fid, tag + ' entry')},")
     out.append(f"    exits: &{name}_EXITS,")
     out.append(f"    walls: &{name}_WALLS,")
     out.append(f"    rooms: &{name}_ROOMS,")
     out.append(f"    zones: &{name}_ZONES,")
     out.append(f"    spawns: &{name}_SPAWNS,")
     out.append(f"    pickups: &{name}_PICKUPS,")
+    out.append(f"    props: &{name}_PROPS,")
     out.append(f"    scenario: &{name}_SCENARIO,")
+    out.append(f"    surface: Surface::{SURFACES[f.get('surface', 'checker')]},")
     out.append("};")
     out.append("")
     return name
@@ -321,21 +503,24 @@ def generate(floors):
         "// src/scenario.rs for the types.",
         "#![allow(clippy::all)]",
         "#![allow(clippy::excessive_precision)]",
+        "// Not every floor set uses every action / kind the types offer.",
+        "#![allow(unused_imports)]",
         "",
         "use crate::components::{EnemyType, WeaponType};",
         "use crate::scenario::{",
-        "    Action, ElevatorDef, FloorDef, PickupDef, Rect, RoomDef, SayDef, SpawnDef, StepDef, Trigger,",
-        "    ZoneDef,",
+        "    Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, HoldDef, LookAtDef, PickupDef,",
+        "    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, Trigger, ZoneDef,",
+        "    SURFACE_EXIT,",
         "};",
         "",
     ]
     names = []
     for f in sorted(floors, key=lambda f: f["id"]):
         names.append(gen_floor(f, out))
-    out.append("/// Number of floors (13 + the hidden 13½).")
+    out.append("/// Number of floors (the ground-level cold open, 13 floors, the hidden 13½).")
     out.append(f"pub const FLOOR_COUNT: usize = {len(names)};")
     out.append("")
-    out.append("/// Every floor, in play order (index = floor id - 1).")
+    out.append("/// Every floor, in play order (sorted by id; index 0 = floor 0, the parking lot).")
     out.append("pub static FLOORS: [&FloorDef; FLOOR_COUNT] = [")
     for n in names:
         out.append(f"    &{n},")

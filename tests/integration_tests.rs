@@ -26,8 +26,9 @@ fn test_enemy_spawning() {
 
 #[test]
 fn test_full_game_initialization() {
+    // Level index 1 = FLOOR 1 (4 rogues); index 0 is the passive cold open.
     let mut world = World::new();
-    initialize_game(&mut world, 0);
+    initialize_game(&mut world, 1);
 
     assert_eq!(world.query::<Player>().len(), 1);
     assert_eq!(world.query::<Enemy>().len(), 4);
@@ -184,7 +185,7 @@ fn test_enemy_attacks_player() {
 #[test]
 fn test_complete_game_scenario_player_clears_room() {
     let mut world = World::new();
-    initialize_game(&mut world, 0);
+    initialize_game(&mut world, 1);
 
     assert_eq!(count_alive_enemies(&world), 4);
 
@@ -265,7 +266,7 @@ fn test_multiple_systems_integration() {
 #[test]
 fn test_world_clear_and_reinitialize() {
     let mut world = World::new();
-    initialize_game(&mut world, 0);
+    initialize_game(&mut world, 1);
 
     assert_eq!(world.query::<Player>().len(), 1);
     assert_eq!(world.query::<Enemy>().len(), 4);
@@ -275,7 +276,7 @@ fn test_world_clear_and_reinitialize() {
     assert_eq!(world.query::<Player>().len(), 0);
     assert_eq!(world.query::<Enemy>().len(), 0);
 
-    initialize_game(&mut world, 0);
+    initialize_game(&mut world, 1);
 
     assert_eq!(world.query::<Player>().len(), 1);
     assert_eq!(world.query::<Enemy>().len(), 4);

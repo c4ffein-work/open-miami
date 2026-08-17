@@ -109,22 +109,27 @@ pub fn render_walls(world: &World, graphics: &Graphics, show_infos: bool) {
             );
         }
 
-        // Draw wall with dark purple color
-        graphics.draw_rectangle(
-            Vec2::new(wall.x, wall.y),
-            wall.width,
-            wall.height,
-            Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
-        );
-        // Border for visual depth
-        graphics.draw_rectangle_lines(
-            Vec2::new(wall.x, wall.y),
-            wall.width,
-            wall.height,
-            2.0,
-            Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
-        );
+        draw_wall(graphics, wall.x, wall.y, wall.width, wall.height);
     }
+}
+
+/// Draw one wall rectangle the way the game does (dark purple slab with a
+/// lighter border) — shared with the native level editor.
+pub fn draw_wall(graphics: &Graphics, x: f32, y: f32, w: f32, h: f32) {
+    graphics.draw_rectangle(
+        Vec2::new(x, y),
+        w,
+        h,
+        Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
+    );
+    // Border for visual depth
+    graphics.draw_rectangle_lines(
+        Vec2::new(x, y),
+        w,
+        h,
+        2.0,
+        Color::new(100.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 1.0),
+    );
 }
 
 /// Render debug pathfinding visualization
@@ -231,8 +236,9 @@ fn render_enemy_vision_cones(world: &World, graphics: &Graphics) {
             _ => continue,
         };
 
-        // Only draw vision cone for alive enemies
-        if health.is_dead() {
+        // Only draw vision cone for alive enemies — and passive civilians
+        // have no vision at all.
+        if health.is_dead() || ai.state == AIState::Passive {
             continue;
         }
 

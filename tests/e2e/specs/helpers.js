@@ -51,7 +51,7 @@ function collectErrors(page) {
 
 // Per-opcode argument counts of the frame command stream (must mirror
 // `mod op` in src/graphics.rs and OP_ARGS in renderer.js).
-const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5];
+const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2];
 const OP_ROBOT = 11; // colorIdx poseIdx weaponIdx x y angle sizePx time
 const ROBOT_COLOR_PLAYER = 0; // CL4-UD3, coral (src/lib.rs ROBOT_COLOR_CORAL)
 
@@ -207,12 +207,16 @@ async function purgeRogues(page) {
 }
 
 /**
- * Floor 1 (RECEPTION CACHE): the entry lift is SE (895,750), the SERVICE LIFT
- * exit is the NW car x 60..150, y 20..80. Walk west along the bottom until
- * under the car, then north into it; the caller then waits for the dwell
- * (0.6 s), the extraction card and floor 2 to load.
+ * Floor 1 (RECEPTION CACHE, the welcome hall): the MAIN DOORS entry is bottom
+ * centre (500,750), a partition wall at y 500..520 splits the foyer from the
+ * hall with the turnstile gap at x 430..570, and the SERVICE LIFT exit is the
+ * NW car x 60..150, y 20..80. Walk north through the arch and the turnstiles
+ * into the hall, west until under the car, then north into it; the caller
+ * then waits for the dwell (0.6 s), the extraction card and floor 2 to load.
  */
 async function walkFloor1ToServiceLift(page) {
+  await page.mouse.move(640, 100);
+  await walkUntil(page, 'w', (p) => p.y <= 440, { what: 'walking north through the turnstiles' });
   await page.mouse.move(300, 400);
   await walkUntil(page, 'a', (p) => p.x <= 108, { what: 'walking west to the SERVICE LIFT column' });
   await page.mouse.move(640, 100);

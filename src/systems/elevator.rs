@@ -42,7 +42,7 @@ impl System for ElevatorSystem {
 
 impl ElevatorSystem {
     /// The exit the player has fully extracted through, if any: returns its
-    /// `to` floor id (`0` = surface).
+    /// `to` floor id ([`crate::scenario::SURFACE_EXIT`] = surface).
     pub fn extraction(world: &World) -> Option<usize> {
         world
             .query::<Elevator>()
@@ -95,6 +95,7 @@ mod tests {
                 open,
                 to: 2,
                 dwell: 0.0,
+                kind: crate::scenario::ElevatorKind::Lift,
             },
         );
         e

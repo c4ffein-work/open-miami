@@ -195,6 +195,9 @@ impl System for AISystem {
         // Query all enemies
         let enemies: Vec<Entity> = world.query::<Enemy>();
 
+        // Set when a passive bot took damage this tick: the crowd turns.
+        let mut passive_hurt = false;
+
         for entity in enemies {
             let (enemy_pos, speed, health) = match (
                 world.get_component::<Position>(entity),
@@ -204,6 +207,22 @@ impl System for AISystem {
                 (Some(pos), Some(spd), Some(hp)) => (*pos, *spd, *hp),
                 _ => continue,
             };
+
+            // Passive (civilian) bots have their own brain: no vision, no
+            // aggro. Being hurt — or downed outright — flips the whole crowd
+            // (after the loop, once the borrows are released), so this runs
+            // before the dead / stunned skips.
+            if world
+                .get_component::<AI>(entity)
+                .is_some_and(|ai| ai.state == AIState::Passive)
+            {
+                if crate::systems::passive::update_passive(
+                    world, entity, &mut rng, nav_grid, &walls, dt,
+                ) {
+                    passive_hurt = true;
+                }
+                continue;
+            }
 
             // Skip dead enemies
             if health.is_dead() {
@@ -611,6 +630,10 @@ impl System for AISystem {
         // Persist the advanced RNG state back into the world so the next tick
         // continues the same deterministic sequence.
         world.set_rng_state(rng);
+
+        if passive_hurt {
+            crate::systems::passive::alert_passives(world, crate::scenario::AlertTarget::All);
+        }
     }
 }
 

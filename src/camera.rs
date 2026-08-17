@@ -26,6 +26,9 @@ pub struct Camera {
     pub target: Vec2,
     /// Current smoothed look-ahead offset, in WORLD units, added to `target`.
     pub look: Vec2,
+    /// Scenario `look_at` offset (world units): pulls the focus toward a
+    /// point of interest by its weight (see `set_cinematic`).
+    pub cine: Vec2,
     /// World-units -> screen-px scale.
     pub zoom: f32,
     /// Current sway (set by `update_sway`): screen-space drift + roll.
@@ -41,6 +44,7 @@ impl Default for Camera {
         Self {
             target: Vec2::zero(),
             look: Vec2::zero(),
+            cine: Vec2::zero(),
             zoom: DEFAULT_ZOOM,
             sway_dx: 0.0,
             sway_dy: 0.0,
@@ -91,9 +95,25 @@ impl Camera {
         self.look.y += (goal.y - self.look.y) * k;
     }
 
+    /// Scenario `look_at`: `Some((point, weight))` moves the focus toward the
+    /// world `point` by `weight` (0 = on the player, 1 = on the point); the
+    /// scenario eases the weight in and out. `None` clears it.
+    pub fn set_cinematic(&mut self, focus: Option<(Vec2, f32)>) {
+        self.cine = match focus {
+            Some((p, w)) => {
+                let w = w.clamp(0.0, 1.0);
+                Vec2::new((p.x - self.target.x) * w, (p.y - self.target.y) * w)
+            }
+            None => Vec2::zero(),
+        };
+    }
+
     /// The world point that sits at the centre of the screen.
     fn focus(&self) -> Vec2 {
-        Vec2::new(self.target.x + self.look.x, self.target.y + self.look.y)
+        Vec2::new(
+            self.target.x + self.look.x + self.cine.x,
+            self.target.y + self.look.y + self.cine.y,
+        )
     }
 
     /// Advance the sway for this frame; `time` in seconds. Called once per

@@ -68,6 +68,14 @@
   "pickups": [
     { "x": 120, "y": 740, "weapon": "machinegun" }
   ],
+  "props": [
+    { "kind": "pipe_run", "x": 150, "y": 100, "rot": 0, "size": 120 },
+    { "kind": "pipe_run", "x": 850, "y": 100, "rot": 0, "size": 120 },
+    { "kind": "floor_vent", "x": 500, "y": 240, "rot": 0, "size": 60 },
+    { "kind": "floor_vent", "x": 500, "y": 560, "rot": 0, "size": 60 },
+    { "kind": "hazard_pad", "x": 500, "y": 670, "rot": 0, "size": 60 },
+    { "kind": "tape_library", "x": 900, "y": 700, "rot": 180, "size": 80 }
+  ],
   "scenario": [
     {
       "id": "intro",

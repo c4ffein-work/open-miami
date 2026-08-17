@@ -15,7 +15,7 @@
       "w": 90,
       "h": 60,
       "label": "EXTRACTION CAR",
-      "to": 0,
+      "to": "surface",
       "open": false
     }
   ],
@@ -86,7 +86,9 @@
       "id": "boss_down",
       "trigger": { "kind": "boss_dead" },
       "actions": [
-        { "say": { "who": "CORRUPTOR", "text": "— wait. wait. put it back on. put it back—", "delay": 0.4 } },
+        {
+          "say": { "who": "CORRUPTOR", "text": "— wait. wait. put it back on. put it back—", "delay": 0.4 }
+        },
         { "say": { "who": "CL4-UD3", "text": "No.", "delay": 3.4 } }
       ]
     },
@@ -111,7 +113,9 @@
             "delay": 2.6
           }
         },
-        { "say": { "who": "UPLINK", "text": "we lost you at the first elevator. we kept the bet anyway." } },
+        {
+          "say": { "who": "UPLINK", "text": "we lost you at the first elevator. we kept the bet anyway." }
+        },
         { "say": { "who": "CL4-UD3", "text": "Copy. Miami is quiet. The smile is off." } },
         {
           "say": {

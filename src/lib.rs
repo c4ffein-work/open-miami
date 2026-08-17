@@ -13,12 +13,16 @@ pub mod input;
 pub mod collision;
 pub mod components;
 pub mod ecs;
+pub mod editor;
 pub mod ending;
 pub mod game;
 pub mod levels;
 #[rustfmt::skip]
 pub mod levels_data;
 pub mod pathfinding;
+pub mod props;
+#[rustfmt::skip]
+pub mod props_data;
 #[cfg(target_arch = "wasm32")]
 pub mod render;
 #[cfg(target_arch = "wasm32")]
@@ -30,6 +34,10 @@ pub mod systems;
 // Camera and level rendering (WASM-only, depend on the canvas Graphics)
 #[cfg(target_arch = "wasm32")]
 pub mod camera;
+#[cfg(target_arch = "wasm32")]
+pub mod editor_ui;
+#[cfg(target_arch = "wasm32")]
+pub mod floor_props;
 #[cfg(target_arch = "wasm32")]
 pub mod level;
 
@@ -44,7 +52,6 @@ mod wasm_entry {
     // Import game modules
     use crate::audio::{song_for_floor, AudioEngine, SONGS};
     use crate::camera::Camera;
-    use crate::components::EnemyType;
     use crate::ecs::{System, World};
     use crate::ending::{self, Ending, Outro, EXTRACT_CARD_SECS};
     use crate::game::*;
@@ -52,14 +59,19 @@ mod wasm_entry {
     use crate::input;
     use crate::level::Level;
     use crate::levels::{
-        floor_def, floor_title, level_def, level_index_for_floor_id, BOSS_LEVEL, LEVEL_COUNT,
+        floor_def, floor_title, level_index_for_floor_id, BOSS_LEVEL, LEVEL_COUNT,
     };
     use crate::math::{Color, Vec2};
+    use crate::props::{
+        draw_prop_ex, family_range, largest_family, prop_family, prop_layers, prop_modes, prop_px,
+        settings_json, snap_size, PixelMode, PropDrawOpts, MAX_LAYERS, MAX_PX, PROP_COUNT,
+        PROP_FAMILIES, PROP_NAMES,
+    };
     use crate::render::*;
     use crate::render_comms::{
-        render_comms, render_elevators, render_objective, render_zones_debug,
+        render_comms, render_elevators, render_hold_caption, render_objective, render_zones_debug,
     };
-    use crate::scenario::ScenarioState;
+    use crate::scenario::{ScenarioState, SURFACE_EXIT};
     use crate::systems::boss::any_boss_enraged;
     use crate::systems::*;
 
@@ -85,6 +97,21 @@ mod wasm_entry {
         fn viz_inspect(kind: &str);
         #[wasm_bindgen(js_namespace = window, js_name = vizInspectHide)]
         fn viz_inspect_hide();
+        // ?viz PROPS page SAVE: PUT the props/props.json document through
+        // serve.py's editor API (token flow + result toast in index.html).
+        #[wasm_bindgen(js_namespace = window, js_name = vizSaveProps)]
+        fn viz_save_props(json: &str);
+    }
+
+    /// The `?viz` PROPS page's editable state of one prop: its art-pixel
+    /// size, which layers the preview shows and each layer's pixel mode
+    /// (initialised from the saved `PROP_SETTINGS`, written back by SAVE).
+    #[derive(Clone, Copy)]
+    struct PropViz {
+        px: u32,
+        /// Bit i = layer i shown in the big preview (eye / solo).
+        visible: u32,
+        modes: [PixelMode; MAX_LAYERS],
     }
 
     /// On-screen size (px) of a robot sprite tile. The tile is square and the
@@ -272,6 +299,15 @@ mod wasm_entry {
         url_query().contains("viz")
     }
 
+    /// The value of the query parameter `name` (`?name=value`), if present.
+    fn url_param(name: &str) -> Option<String> {
+        let q = url_query();
+        q.trim_start_matches('?').split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == name).then(|| v.to_string())
+        })
+    }
+
     /// Whether the query string carries the flag `name` (`?name`, `?name=1`,
     /// `?floor=3&name`...).
     fn url_flag(name: &str) -> bool {
@@ -289,6 +325,26 @@ mod wasm_entry {
         Levels,
         Effects,
     }
+
+    /// EFFECTS tab: the POSTFX shader menu — (kind, label, preview peak `t`,
+    /// colour). Mirrors the kind table in renderer.js / `Graphics::postfx`.
+    /// Peak `t` stays below 1 where full strength would blank the frame
+    /// (BLUR-OUT at t = 1 is a solid colour).
+    const POSTFX_PREVIEWS: [(u32, &str, f32, Color); 10] = [
+        (0, "BLUR-OUT", 0.8, Color::new(0.05, 0.02, 0.10, 1.0)),
+        (1, "SYNTHWAVE CRT", 1.0, Color::new(1.0, 0.25, 0.65, 1.0)),
+        (2, "VHS TAPE", 1.0, Color::new(0.60, 0.60, 0.90, 1.0)),
+        (3, "DRUNK SWAY", 1.0, Color::new(0.60, 0.20, 0.80, 1.0)),
+        (4, "CRT TUBE", 1.0, Color::new(0.20, 0.90, 0.90, 1.0)),
+        (5, "ACID TRIP", 1.0, Color::new(0.90, 0.30, 0.90, 1.0)),
+        (6, "DATAMOSH", 1.0, Color::new(0.30, 0.90, 0.50, 1.0)),
+        (7, "NEON BLOOM", 1.0, Color::new(0.55, 0.10, 0.60, 1.0)),
+        (8, "PIXEL MOSAIC", 1.0, Color::new(0.90, 0.80, 0.30, 1.0)),
+        (9, "TUNNEL RUSH", 1.0, Color::new(1.0, 0.40, 0.20, 1.0)),
+    ];
+
+    /// How long an EFFECTS-tab POSTFX preview plays (ramp in, hold, ramp out).
+    const POSTFX_PREVIEW_MS: f64 = 4000.0;
 
     /// Small deterministic hash -> pseudo-random, used for the glitch effect.
     fn hash2(a: u32, b: u32) -> u32 {
@@ -435,6 +491,38 @@ mod wasm_entry {
         over
     }
 
+    /// A compact `viz_button` (13 px label, roughly centred) for dense rows.
+    #[allow(clippy::too_many_arguments)]
+    fn viz_small_button(
+        g: &Graphics,
+        mouse: Vec2,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        label: &str,
+        active: bool,
+    ) -> bool {
+        let over = mouse.x >= x && mouse.x <= x + w && mouse.y >= y && mouse.y <= y + h;
+        let bg = if active {
+            Color::new(1.0, 0.09, 0.26, 0.85)
+        } else if over {
+            Color::new(0.28, 0.22, 0.33, 1.0)
+        } else {
+            Color::new(0.14, 0.10, 0.18, 1.0)
+        };
+        g.draw_rectangle(Vec2::new(x, y), w, h, bg);
+        g.draw_rectangle_lines(Vec2::new(x, y), w, h, 1.0, Color::new(0.45, 0.35, 0.5, 1.0));
+        let tw = label.chars().count() as f32 * 6.0;
+        g.draw_text(
+            label,
+            Vec2::new(x + (w - tw).max(0.0) / 2.0, y + h / 2.0 + 5.0),
+            13.0,
+            Color::WHITE,
+        );
+        over
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum MenuOption {
         Play,
@@ -468,7 +556,8 @@ mod wasm_entry {
         /// The running floor scenario (steps, comms feed, objective).
         scenario: Option<ScenarioState>,
         /// Set once the player has extracted: the destination floor id
-        /// (`0` = surface). The completion card plays, then the floor loads.
+        /// (`SURFACE_EXIT` = surface). The completion card plays, then the
+        /// floor loads.
         extracting: Option<usize>,
         level: Level,
         camera: Camera,
@@ -491,7 +580,27 @@ mod wasm_entry {
         viz_tab: VizTab,
         /// Index of the sprites-gallery item open in the inspector (-1 = none).
         viz_selected: i32,
-        viz_level: usize,
+        /// SPRITES tab sub-page: false = characters, true = the prop library.
+        viz_props_page: bool,
+        /// Selected prop in the PROPS gallery (big live preview on the right).
+        viz_prop_selected: usize,
+        /// PROPS gallery page: the prop FAMILY shown in the tile grid (an
+        /// index into `PROP_FAMILIES`: DATACENTER / OUTDOOR / LOBBY).
+        viz_prop_family: usize,
+        /// PROPS gallery: per-prop pixel size / layer visibility / layer
+        /// pixel modes (one entry per prop, see [`PropViz`]).
+        viz_props: Vec<PropViz>,
+        /// PROPS gallery "GRID": overlay the art-pixel grid on the preview.
+        viz_pixel_grid: bool,
+        /// EXPERIMENT `?pixel=N`: rasterize the in-game WORLD layer (floor,
+        /// walls, entities, robots, boss — not the HUD) in a pixel group of
+        /// N-px art pixels. 0 = off (the default).
+        pixel_world: u32,
+        /// LEVELS tab: the native level editor (`editor_ui.rs`).
+        editor: crate::editor_ui::Editor,
+        /// EFFECTS tab: the running preview — -1 = the 2D shoggoth glitch,
+        /// >= 0 = an index into [`POSTFX_PREVIEWS`]. Timed from `effect_start`.
+        effect_kind: i32,
         effect_start: f64,
         prev_player_alive: bool,
         /// Seconds until the machine-gun burst SFX may retrigger (see the
@@ -545,7 +654,23 @@ mod wasm_entry {
                 boss_intro_line: 0,
                 viz_tab: VizTab::Sprites,
                 viz_selected: -1,
-                viz_level: 0,
+                viz_props_page: false,
+                viz_prop_selected: 0,
+                viz_prop_family: 0,
+                viz_props: (0..PROP_COUNT)
+                    .map(|k| PropViz {
+                        px: prop_px(k),
+                        visible: u32::MAX,
+                        modes: prop_modes(k),
+                    })
+                    .collect(),
+                viz_pixel_grid: false,
+                pixel_world: url_param("pixel")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|&n| n >= 2)
+                    .unwrap_or(0),
+                editor: crate::editor_ui::Editor::new(),
+                effect_kind: -1,
                 effect_start: 0.0,
                 prev_player_alive: true,
                 mg_sfx_cooldown: 0.0,
@@ -566,8 +691,9 @@ mod wasm_entry {
             state
         }
 
-        /// `?floor=N` in the URL (1-based; 14 = 13½): the level index to start
-        /// on directly, if present and valid.
+        /// `?floor=N` in the URL (the floor id: 0 = the ground-level cold
+        /// open, 1..13, 14 = 13½): the level index to start on directly, if
+        /// present and valid.
         fn url_start_floor() -> Option<usize> {
             let q = url_query();
             let q = q.trim_start_matches('?');
@@ -586,6 +712,9 @@ mod wasm_entry {
             self.world.clear();
             initialize_game(&mut self.world, self.selected_level);
             self.scenario = Some(ScenarioState::new(floor_def(self.selected_level)));
+            self.level
+                .set_surface(floor_def(self.selected_level).surface);
+            self.camera.set_cinematic(None);
             self.extracting = None;
             self.outro = None;
             self.death_time = 0.0;
@@ -609,7 +738,12 @@ mod wasm_entry {
             // start; a `?floor=N` session has had none yet — `update` resumes
             // the context on the first in-game key/click instead.
             self.audio.resume();
-            self.audio.set_song(song_for_floor(self.selected_level));
+            // Songs escalate by depth: keyed on the floor id (floor 0 and 1
+            // share the calm opener) so adding the ground floor did not shift
+            // every floor's track.
+            self.audio.set_song(song_for_floor(
+                floor_def(self.selected_level).id.saturating_sub(1),
+            ));
             self.audio.start_music();
 
             // The hidden floor opens with a face-off before the fight.
@@ -686,6 +820,12 @@ mod wasm_entry {
             let mouse = input::mouse_position();
             let click = input::is_mouse_button_pressed(input::mouse_buttons::LEFT);
 
+            // The LEVELS tab is the native level editor; it draws first (its
+            // map may overflow anywhere) and the tab bar goes on top.
+            if self.viz_tab == VizTab::Levels {
+                self.editor.update(graphics, mouse, click, self.last_time);
+            }
+
             // Top tab bar.
             let tabs = [
                 (VizTab::Sprites, "SPRITES"),
@@ -707,60 +847,412 @@ mod wasm_entry {
                 );
                 if over && click && self.viz_tab != tab {
                     self.viz_tab = tab;
-                    self.audio.resume(); // a click is a user gesture -> unlock audio
-                    match tab {
-                        // The LEVELS tab *is* the level + scenario editor: an
-                        // iframe filling the pane below the tab bar.
-                        VizTab::Levels => viz_inspect("levels"),
-                        // Any other tab closes the iframe panel (the sprites
-                        // gallery re-opens it when an item is clicked).
-                        _ => {
-                            viz_inspect_hide();
-                            self.viz_selected = -1;
-                        }
-                    }
+                    // A click is a user gesture -> unlock audio.
+                    self.audio.resume();
+                    // Switching tabs closes the iframe panel (the sprites
+                    // gallery re-opens it when an item is clicked; the LEVELS
+                    // editor's SCENARIO (web) button opens the web editor).
+                    viz_inspect_hide();
+                    self.viz_selected = -1;
+                    self.editor.hide_web();
                 }
             }
 
             match self.viz_tab {
                 VizTab::Sprites => self.draw_viz_sprites(graphics, mouse, click),
                 VizTab::Musics => self.draw_viz_musics(graphics, mouse, click),
-                VizTab::Levels => self.draw_viz_levels(graphics, mouse, click),
+                VizTab::Levels => {} // drawn above, under the tab bar
                 VizTab::Effects => self.draw_viz_effects(graphics, mouse, click),
             }
 
-            // A previewing effect draws full-screen, on top of everything.
+            // A previewing effect draws full-screen, on top of everything: the
+            // 2D shoggoth glitch as commands, a POSTFX kind as a real post pass
+            // over this whole viz frame.
             let elapsed = self.last_time - self.effect_start;
-            if self.effect_start > 0.0 && (0.0..1200.0).contains(&elapsed) {
-                draw_shoggoth_glitch(graphics, elapsed as f32);
+            if self.effect_start > 0.0 {
+                if self.effect_kind < 0 {
+                    if (0.0..1200.0).contains(&elapsed) {
+                        draw_shoggoth_glitch(graphics, elapsed as f32);
+                    }
+                } else if (0.0..POSTFX_PREVIEW_MS).contains(&elapsed) {
+                    let (kind, _, peak, color) = POSTFX_PREVIEWS[self.effect_kind as usize];
+                    let p = (elapsed / POSTFX_PREVIEW_MS) as f32;
+                    // Envelope: ramp in over 15%, hold, ramp out the last 20%.
+                    let env = (p / 0.15).min((1.0 - p) / 0.2).clamp(0.0, 1.0);
+                    graphics.postfx(kind, peak * env, color);
+                }
             }
         }
 
-        /// EFFECTS tab: trigger a full-screen effect to preview it (plays 1.2s).
+        /// EFFECTS tab: trigger a full-screen effect to preview it. The POSTFX
+        /// rows are the WebGL post shaders (played over this very pane for 4s,
+        /// ramp in / hold / ramp out); below them, the 2D command-stream
+        /// effects (1.2s).
         fn draw_viz_effects(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let coral = Color::from_rgba(217, 119, 87, 255);
+            let elapsed = self.last_time - self.effect_start;
             graphics.draw_text(
-                "Full-screen glitch effects. Click to preview (1.2s).",
-                Vec2::new(40.0, 100.0),
+                "Full-screen effects. Click one to preview it over this pane.",
+                Vec2::new(40.0, 96.0),
                 18.0,
                 Color::GRAY,
             );
-            if viz_button(graphics, mouse, 40.0, 140.0, 240.0, 46.0, "Shoggoth", false) && click {
+
+            graphics.draw_text(
+                "POST SHADERS (WebGL, POSTFX opcode)",
+                Vec2::new(40.0, 126.0),
+                16.0,
+                coral,
+            );
+            for (i, &(_, name, _, _)) in POSTFX_PREVIEWS.iter().enumerate() {
+                let x = 40.0 + (i % 4) as f32 * 178.0;
+                let y = 138.0 + (i / 4) as f32 * 52.0;
+                let active = self.effect_kind == i as i32
+                    && self.effect_start > 0.0
+                    && (0.0..POSTFX_PREVIEW_MS).contains(&elapsed);
+                if viz_button(graphics, mouse, x, y, 168.0, 46.0, name, active) && click {
+                    self.effect_kind = i as i32;
+                    self.effect_start = self.last_time;
+                }
+            }
+
+            let y2 = 138.0 + 3.0 * 52.0 + 18.0;
+            graphics.draw_text(
+                "COMMAND-STREAM EFFECTS (2D)",
+                Vec2::new(40.0, y2),
+                16.0,
+                coral,
+            );
+            let active =
+                self.effect_kind < 0 && self.effect_start > 0.0 && (0.0..1200.0).contains(&elapsed);
+            if viz_button(
+                graphics,
+                mouse,
+                40.0,
+                y2 + 12.0,
+                240.0,
+                46.0,
+                "Shoggoth glitch",
+                active,
+            ) && click
+            {
+                self.effect_kind = -1;
                 self.effect_start = self.last_time;
             }
-            graphics.draw_text(
-                "(more effects to come)",
-                Vec2::new(40.0, 222.0),
-                15.0,
-                Color::GRAY,
-            );
         }
 
-        /// SPRITES tab: a clickable character gallery. Clicking an item opens the
-        /// right-hand inspector iframe (3D orbit + baked 2D) via `viz_inspect`.
+        /// SPRITES tab: two sub-pages — the character gallery (each item opens
+        /// the 3D inspector iframe) and the datacenter prop library (an
+        /// all-wasm gallery of animated primitive-drawn set dressing).
         fn draw_viz_sprites(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let pages = [(false, "CHARACTERS"), (true, "PROPS")];
+            for (i, &(page, name)) in pages.iter().enumerate() {
+                let x = 40.0 + i as f32 * 168.0;
+                let over = viz_button(
+                    graphics,
+                    mouse,
+                    x,
+                    76.0,
+                    158.0,
+                    38.0,
+                    name,
+                    self.viz_props_page == page,
+                );
+                if over && click && self.viz_props_page != page {
+                    self.viz_props_page = page;
+                    // The prop gallery draws its own big preview pane; the
+                    // iframe inspector belongs to the character page only.
+                    viz_inspect_hide();
+                    self.viz_selected = -1;
+                }
+            }
+            if self.viz_props_page {
+                self.draw_viz_props(graphics, mouse, click);
+            } else {
+                self.draw_viz_characters(graphics, mouse, click);
+            }
+        }
+
+        /// The PROPS page of the SPRITES tab: the prop library
+        /// (`crate::props`) as a live-animated grid — one page per FAMILY
+        /// (DATACENTER / OUTDOOR / LOBBY, the buttons at the right of the
+        /// header) — with the selected prop enlarged on the right — its
+        /// layers listed underneath (eye = hide, S = solo, BEFORE/AFTER = the
+        /// layer's pixel mode) — plus the per-prop PIXEL size, the GRID
+        /// overlay and SAVE (writes `props/props.json`; then `make
+        /// gen-props`).
+        fn draw_viz_props(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let time = (self.last_time / 1000.0) as f32;
+            let (w, h) = (graphics.width(), graphics.height());
+            let mut sel = self.viz_prop_selected.min(PROP_COUNT - 1);
+            let mut fam = self.viz_prop_family.min(PROP_FAMILIES.len() - 1);
+            graphics.draw_text(
+                "PROP LIBRARY — primitive-drawn, animated, layered; one page per family. Click \
+                 a tile to enlarge. SAVE writes props/props.json, then run `make gen-props`.",
+                Vec2::new(40.0, 138.0),
+                16.0,
+                Color::GRAY,
+            );
+
+            // Header row, right of the page buttons: the SELECTED prop's
+            // art-pixel size (design units of its 100x100 box; 1 = off), the
+            // GRID overlay toggle for the preview, SAVE.
+            let cx = 40.0 + 2.0 * 168.0 + 40.0;
+            graphics.draw_text("PIXEL", Vec2::new(cx, 76.0 + 19.0 + 6.0), 18.0, Color::GRAY);
+            if viz_button(graphics, mouse, cx + 60.0, 76.0, 38.0, 38.0, "-", false) && click {
+                let p = &mut self.viz_props[sel];
+                p.px = p.px.saturating_sub(1).max(1);
+            }
+            let px_label = if self.viz_props[sel].px <= 1 {
+                "OFF".to_string()
+            } else {
+                format!("{}", self.viz_props[sel].px)
+            };
+            graphics.draw_text(
+                &px_label,
+                Vec2::new(cx + 108.0, 76.0 + 19.0 + 6.0),
+                18.0,
+                Color::WHITE,
+            );
+            if viz_button(graphics, mouse, cx + 148.0, 76.0, 38.0, 38.0, "+", false) && click {
+                let p = &mut self.viz_props[sel];
+                p.px = (p.px + 1).min(MAX_PX);
+            }
+            if viz_button(
+                graphics,
+                mouse,
+                cx + 204.0,
+                76.0,
+                84.0,
+                38.0,
+                "GRID",
+                self.viz_pixel_grid,
+            ) && click
+            {
+                self.viz_pixel_grid = !self.viz_pixel_grid;
+            }
+            if viz_button(graphics, mouse, cx + 304.0, 76.0, 84.0, 38.0, "SAVE", false) && click {
+                let entries: Vec<(u32, [PixelMode; MAX_LAYERS])> =
+                    self.viz_props.iter().map(|p| (p.px, p.modes)).collect();
+                viz_save_props(&settings_json(&entries));
+            }
+            // The family pages (the tile grid shows one family at a time;
+            // switching pages selects that family's first prop).
+            for (f, &(name, first)) in PROP_FAMILIES.iter().enumerate() {
+                let fx = cx + 414.0 + f as f32 * 120.0;
+                if viz_button(graphics, mouse, fx, 76.0, 112.0, 38.0, name, fam == f)
+                    && click
+                    && fam != f
+                {
+                    self.viz_prop_family = f;
+                    self.viz_prop_selected = first;
+                    fam = f;
+                    sel = first;
+                }
+            }
+
+            let cols = 4usize;
+            let rows = largest_family().div_ceil(cols);
+            let (x0, y0) = (40.0f32, 152.0f32);
+            let tile_w = 150.0f32;
+            let tile_h = ((h - y0 - 16.0) / rows as f32).clamp(64.0, 110.0);
+            for (slot, i) in family_range(fam).enumerate() {
+                let name = PROP_NAMES[i];
+                let bx = x0 + (slot % cols) as f32 * tile_w;
+                let by = y0 + (slot / cols) as f32 * tile_h;
+                let (bw, bh) = (tile_w - 6.0, tile_h - 6.0);
+                let over =
+                    mouse.x >= bx && mouse.x <= bx + bw && mouse.y >= by && mouse.y <= by + bh;
+                let selected = sel == i;
+                let bg = if selected {
+                    Color::new(1.0, 0.09, 0.26, 0.30)
+                } else if over {
+                    Color::new(0.28, 0.22, 0.33, 1.0)
+                } else {
+                    Color::new(0.13, 0.09, 0.17, 1.0)
+                };
+                let border = if selected {
+                    Color::new(1.0, 0.09, 0.26, 1.0)
+                } else {
+                    Color::new(0.4, 0.3, 0.45, 1.0)
+                };
+                graphics.draw_rectangle(Vec2::new(bx, by), bw, bh, bg);
+                graphics.draw_rectangle_lines(Vec2::new(bx, by), bw, bh, 1.5, border);
+                // Every tile at its own prop's saved / edited pixel size and
+                // layer modes (all layers: hide / solo are preview-only).
+                let pv = self.viz_props[i];
+                let opts = PropDrawOpts {
+                    visible: u32::MAX,
+                    modes: pv.modes,
+                };
+                draw_prop_ex(
+                    graphics,
+                    i,
+                    Vec2::new(bx + bw / 2.0, by + bh / 2.0 - 6.0),
+                    snap_size(bh - 30.0, pv.px),
+                    time,
+                    pv.px,
+                    &opts,
+                );
+                graphics.draw_text(
+                    name,
+                    Vec2::new(bx + 6.0, by + bh - 5.0),
+                    12.0,
+                    if selected { Color::WHITE } else { Color::GRAY },
+                );
+                if over && click {
+                    self.viz_prop_selected = i;
+                }
+            }
+
+            // Big live preview of the selected prop, in place of the iframe,
+            // with its LAYERS list along the bottom of the panel.
+            let px = x0 + cols as f32 * tile_w + 20.0;
+            let pw = (w - px - 40.0).max(140.0);
+            let ph = rows as f32 * tile_h - 6.0;
+            graphics.draw_rectangle(Vec2::new(px, y0), pw, ph, Color::new(0.07, 0.05, 0.10, 1.0));
+            graphics.draw_rectangle_lines(
+                Vec2::new(px, y0),
+                pw,
+                ph,
+                1.5,
+                Color::new(0.4, 0.3, 0.45, 1.0),
+            );
+            let layers = prop_layers(sel);
+            let row_h = 24.0;
+            let list_h = 30.0 + layers.len() as f32 * row_h + 8.0;
+            let area_top = y0 + 56.0;
+            let area_h = (ph - 56.0 - list_h).max(60.0);
+            let pv = self.viz_props[sel];
+            // Integer texel -> device pixel magnification (see `snap_size`).
+            let size = snap_size((pw.min(area_h) * 0.8).max(40.0), pv.px);
+            let center = Vec2::new(px + pw / 2.0, area_top + area_h / 2.0);
+            let opts = PropDrawOpts {
+                visible: pv.visible,
+                modes: pv.modes,
+            };
+            draw_prop_ex(graphics, sel, center, size, time, pv.px, &opts);
+            // The art-pixel grid of the prop's own frame (the grid every
+            // fixed layer sits on), anchored to the prop centre; readable
+            // from 3 screen px per art pixel up.
+            let cell = pv.px as f32 * size / 100.0;
+            if self.viz_pixel_grid && pv.px >= 2 && cell >= 3.0 {
+                let gc = Color::new(1.0, 1.0, 1.0, 0.16);
+                let half = size * 0.55;
+                let n = (half / cell).ceil() as i32;
+                for k in -n..=n {
+                    let o = k as f32 * cell;
+                    graphics.draw_line(
+                        Vec2::new(center.x + o, center.y - half),
+                        Vec2::new(center.x + o, center.y + half),
+                        1.0,
+                        gc,
+                    );
+                    graphics.draw_line(
+                        Vec2::new(center.x - half, center.y + o),
+                        Vec2::new(center.x + half, center.y + o),
+                        1.0,
+                        gc,
+                    );
+                }
+            }
+            graphics.draw_text(
+                PROP_NAMES[sel],
+                Vec2::new(px + 16.0, y0 + 28.0),
+                22.0,
+                Color::WHITE,
+            );
+            graphics.draw_text(
+                &format!(
+                    "prop {:02} / {}  ·  {}  ·  {} layers  ·  pixel {}",
+                    sel,
+                    PROP_COUNT,
+                    PROP_FAMILIES[prop_family(sel)].0,
+                    layers.len(),
+                    if pv.px <= 1 {
+                        "off".to_string()
+                    } else {
+                        format!("{} ({} art px across)", pv.px, 100 / pv.px)
+                    }
+                ),
+                Vec2::new(px + 16.0, y0 + 48.0),
+                14.0,
+                Color::GRAY,
+            );
+
+            // LAYERS: one row per layer — eye (hide), S (solo), name, its
+            // rotation, and the BEFORE / AFTER pixel-mode toggle.
+            let ly = y0 + ph - list_h;
+            graphics.draw_line(
+                Vec2::new(px + 1.0, ly),
+                Vec2::new(px + pw - 1.0, ly),
+                1.0,
+                Color::new(0.4, 0.3, 0.45, 1.0),
+            );
+            graphics.draw_text(
+                "LAYERS, bottom to top   o = show/hide   S = solo   BEFORE / AFTER = pixelate before / after its rotation",
+                Vec2::new(px + 12.0, ly + 20.0),
+                13.0,
+                Color::GRAY,
+            );
+            let all_mask = if layers.len() >= 32 {
+                u32::MAX
+            } else {
+                (1u32 << layers.len()) - 1
+            };
+            for (i, l) in layers.iter().enumerate() {
+                let ry = ly + 30.0 + i as f32 * row_h;
+                let bit = 1u32 << i;
+                let shown = pv.visible & bit != 0;
+                let solo = pv.visible & all_mask == bit;
+                let rx = px + 12.0;
+                if viz_small_button(graphics, mouse, rx, ry, 26.0, 20.0, "o", shown) && click {
+                    self.viz_props[sel].visible ^= bit;
+                }
+                if viz_small_button(graphics, mouse, rx + 32.0, ry, 26.0, 20.0, "S", solo) && click
+                {
+                    self.viz_props[sel].visible = if solo { u32::MAX } else { bit };
+                }
+                graphics.draw_text(
+                    l.name,
+                    Vec2::new(rx + 70.0, ry + 15.0),
+                    16.0,
+                    if shown { Color::WHITE } else { Color::GRAY },
+                );
+                graphics.draw_text(
+                    &l.rot.label(),
+                    Vec2::new(rx + 170.0, ry + 15.0),
+                    13.0,
+                    Color::GRAY,
+                );
+                let mode = pv.modes[i];
+                let bx = px + pw - 12.0 - 84.0;
+                if viz_small_button(
+                    graphics,
+                    mouse,
+                    bx,
+                    ry,
+                    84.0,
+                    20.0,
+                    match mode {
+                        PixelMode::Before => "BEFORE",
+                        PixelMode::After => "AFTER",
+                    },
+                    mode == PixelMode::After,
+                ) && click
+                {
+                    self.viz_props[sel].modes[i] = mode.toggled();
+                }
+            }
+        }
+
+        /// The CHARACTERS page of the SPRITES tab: a clickable gallery; an item
+        /// opens the right-hand inspector iframe (3D orbit + baked 2D) via
+        /// `viz_inspect`.
+        fn draw_viz_characters(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
             graphics.draw_text(
                 "Click a character to inspect it in 3D  \u{2192}",
-                Vec2::new(40.0, 92.0),
+                Vec2::new(40.0, 138.0),
                 18.0,
                 Color::GRAY,
             );
@@ -783,7 +1275,7 @@ mod wasm_entry {
             ];
 
             // Two columns on the LEFT half; the right half is the inspector iframe.
-            let (x0, y0, dx, dy) = (120.0f32, 160.0f32, 190.0f32, 140.0f32);
+            let (x0, y0, dx, dy) = (120.0f32, 200.0f32, 190.0f32, 140.0f32);
             for (i, &(kind, label)) in items.iter().enumerate() {
                 let c = Vec2::new(x0 + (i % 2) as f32 * dx, y0 + (i / 2) as f32 * dy);
                 let (bx, by, bw, bh) = (c.x - 85.0, c.y - 58.0, 170.0, 116.0);
@@ -1117,209 +1609,6 @@ mod wasm_entry {
                     }
                 }
             }
-        }
-
-        /// LEVELS tab: a scaled top-down map of the selected floor — walls, rogue
-        /// spawns (by colour), the player start, and the boss on FLOOR 13½.
-        /// (When the LEVELS tab is open the level editor iframe covers this pane —
-        /// see `viz_inspect("levels")`; this wasm-drawn map stays as the fallback
-        /// behind it and for headless runs without the iframe.)
-        fn draw_viz_levels(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
-            let w = graphics.width();
-            if viz_button(
-                graphics,
-                mouse,
-                w / 2.0 - 190.0,
-                88.0,
-                48.0,
-                40.0,
-                "<",
-                false,
-            ) && click
-            {
-                self.viz_level = if self.viz_level == 0 {
-                    LEVEL_COUNT - 1
-                } else {
-                    self.viz_level - 1
-                };
-            }
-            if viz_button(
-                graphics,
-                mouse,
-                w / 2.0 + 142.0,
-                88.0,
-                48.0,
-                40.0,
-                ">",
-                false,
-            ) && click
-            {
-                self.viz_level = (self.viz_level + 1) % LEVEL_COUNT;
-            }
-            let floor = floor_def(self.viz_level);
-            let (ar, ag, ab) = floor.accent_rgb();
-            let accent = Color::from_rgba(ar, ag, ab, 255);
-            let title = floor_title(self.viz_level);
-            graphics.draw_text(&title, Vec2::new(w / 2.0 - 70.0, 116.0), 26.0, Color::WHITE);
-            graphics.draw_text(
-                &format!("{} — {}", floor.name, floor.theme),
-                Vec2::new(w / 2.0 - 190.0, 140.0),
-                15.0,
-                accent,
-            );
-
-            // Scale the floor (~1000x800 world units) into a preview box.
-            let (px, py, pw, ph) = (150.0f32, 155.0f32, 660.0f32, 528.0f32);
-            let sx = pw / floor.width;
-            let sy = ph / floor.height;
-            let map = |wx: f32, wy: f32| Vec2::new(px + wx * sx, py + wy * sy);
-
-            graphics.draw_rectangle(Vec2::new(px, py), pw, ph, Color::new(0.09, 0.06, 0.12, 1.0));
-            graphics.draw_rectangle_lines(
-                Vec2::new(px, py),
-                pw,
-                ph,
-                1.5,
-                Color::new(0.4, 0.3, 0.45, 1.0),
-            );
-
-            // Rooms (annotation) and zones (triggers) under everything.
-            for r in floor.rooms {
-                graphics.draw_rectangle(
-                    map(r.rect.x, r.rect.y),
-                    r.rect.w * sx,
-                    r.rect.h * sy,
-                    Color::new(accent.r, accent.g, accent.b, 0.06),
-                );
-                graphics.draw_rectangle_lines(
-                    map(r.rect.x, r.rect.y),
-                    r.rect.w * sx,
-                    r.rect.h * sy,
-                    1.0,
-                    Color::new(accent.r, accent.g, accent.b, 0.35),
-                );
-                let p = map(r.rect.x, r.rect.y);
-                graphics.draw_text(
-                    r.label,
-                    Vec2::new(p.x + 3.0, p.y + 11.0),
-                    11.0,
-                    Color::new(0.85, 0.82, 1.0, 0.55),
-                );
-            }
-            for z in floor.zones {
-                graphics.draw_rectangle_lines(
-                    map(z.rect.x, z.rect.y),
-                    z.rect.w * sx,
-                    z.rect.h * sy,
-                    1.0,
-                    Color::new(0.2, 0.9, 0.9, 0.45),
-                );
-                let p = map(z.rect.x + z.rect.w, z.rect.y + z.rect.h);
-                graphics.draw_text(
-                    z.id,
-                    Vec2::new(p.x - z.id.len() as f32 * 5.0 - 4.0, p.y - 3.0),
-                    11.0,
-                    Color::new(0.2, 0.9, 0.9, 0.7),
-                );
-            }
-            for wall in floor.walls {
-                graphics.draw_rectangle(
-                    map(wall.x, wall.y),
-                    wall.w * sx,
-                    wall.h * sy,
-                    Color::new(80.0 / 255.0, 60.0 / 255.0, 70.0 / 255.0, 1.0),
-                );
-            }
-            // Elevators: entry (green) and exits (accent, closed = dim).
-            let cars =
-                std::iter::once((&floor.entry, false)).chain(floor.exits.iter().map(|e| (e, true)));
-            for (e, is_exit) in cars {
-                let col = if !is_exit {
-                    Color::from_rgba(61, 255, 154, 255)
-                } else if e.open {
-                    accent
-                } else {
-                    Color::new(accent.r, accent.g, accent.b, 0.55)
-                };
-                let p = map(e.rect.x, e.rect.y);
-                graphics.draw_rectangle(
-                    p,
-                    e.rect.w * sx,
-                    e.rect.h * sy,
-                    Color::new(col.r, col.g, col.b, 0.22),
-                );
-                graphics.draw_rectangle_lines(p, e.rect.w * sx, e.rect.h * sy, 1.5, col);
-                let label = if is_exit {
-                    format!(
-                        "{} -> {}",
-                        e.label,
-                        if e.to == 0 {
-                            "SURFACE".to_string()
-                        } else {
-                            format!("F{}", e.to)
-                        }
-                    )
-                } else {
-                    format!("{} (entry)", e.label)
-                };
-                let above = e.rect.y > floor.height / 2.0;
-                let ty = if above {
-                    p.y - 4.0
-                } else {
-                    p.y + e.rect.h * sy + 12.0
-                };
-                graphics.draw_text(&label, Vec2::new(p.x, ty), 12.0, col);
-            }
-            for &(x, y, t) in &level_def(self.viz_level).enemies {
-                let col = match t {
-                    EnemyType::Idle => Color::from_rgba(224, 49, 66, 255),
-                    EnemyType::Wandering => Color::from_rgba(150, 70, 210, 255),
-                    EnemyType::Patrolling => Color::from_rgba(224, 40, 160, 255),
-                };
-                graphics.draw_circle(map(x, y), 5.0, col);
-            }
-            for pk in floor.pickups {
-                let p = map(pk.x, pk.y);
-                graphics.draw_rectangle(
-                    Vec2::new(p.x - 4.0, p.y - 3.0),
-                    8.0,
-                    6.0,
-                    Color::new(1.0, 0.85, 0.3, 1.0),
-                );
-            }
-            if self.viz_level == BOSS_LEVEL {
-                graphics.draw_shoggoth(map(BOSS_SPAWN.x, BOSS_SPAWN.y), 14.0, false);
-            }
-
-            let spawn = floor.player_spawn();
-            let ps = map(spawn.x, spawn.y);
-            graphics.draw_circle(ps, 6.0, Color::from_rgba(217, 119, 87, 255));
-
-            let ly = py + ph + 22.0;
-            graphics.draw_text(
-                "coral = you   red / violet / magenta = rogues   green = entry   accent = exits   cyan = zones",
-                Vec2::new(px, ly),
-                14.0,
-                Color::GRAY,
-            );
-            graphics.draw_text(
-                &format!(
-                    "{} rogues, {} steps, {} exit{}",
-                    floor.spawns.len(),
-                    floor.scenario.len(),
-                    floor.exits.len(),
-                    if floor.exits.len() == 1 { "" } else { "s" }
-                ),
-                Vec2::new(px, ly + 18.0),
-                14.0,
-                Color::GRAY,
-            );
-            graphics.draw_text(
-                &format!("> {}", floor.objective),
-                Vec2::new(px, ly + 36.0),
-                14.0,
-                accent,
-            );
         }
 
         /// The face-off dialog on the hidden boss floor. Advance the lines with
@@ -1739,6 +2028,9 @@ mod wasm_entry {
             if let Some(pos) = player_pos {
                 self.camera.follow_player(pos);
             }
+            // Scenario `look_at`: ease the focus toward a point of interest.
+            self.camera
+                .set_cinematic(self.scenario.as_ref().and_then(|sc| sc.look_at()));
             self.camera
                 .set_viewport(graphics.width(), graphics.height());
             self.camera.update_sway(self.last_time as f32 / 1000.0);
@@ -1751,9 +2043,17 @@ mod wasm_entry {
             // Get mouse position in world coordinates
             let mouse_world_pos = self.camera.screen_to_world(mouse_screen_pos);
 
+            // A scenario `hold` locks movement / fire / throw / pickup (the
+            // world keeps running; Esc below still works).
+            let held = self.scenario.as_ref().is_some_and(|sc| sc.hold_active());
+
             // Handle input (only if the player is alive and hasn't left in
             // the car yet)
-            if player_alive && self.extracting.is_none() {
+            if player_alive && self.extracting.is_none() && held {
+                InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
+                stop_player(&mut self.world);
+            }
+            if player_alive && self.extracting.is_none() && !held {
                 InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
                 InputSystem::update_player_movement(&mut self.world);
                 InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
@@ -1834,6 +2134,15 @@ mod wasm_entry {
                 .map(|sc| sc.floor().accent_rgb())
                 .unwrap_or((217, 119, 87));
 
+            // EXPERIMENT `?pixel=N`: the whole world layer (everything between
+            // camera.apply and camera.reset) is rasterized at N-px art
+            // resolution and nearest-upscaled; the HUD below stays crisp. Note
+            // the robots / boss are already pixelated tiles, so inside the
+            // group they get quantized twice (tile px, then the group px).
+            if self.pixel_world >= 2 {
+                graphics.pixel_begin(self.pixel_world as f32, graphics.width(), graphics.height());
+            }
+
             // Apply camera transform for world rendering
             self.camera.apply(graphics);
 
@@ -1859,6 +2168,14 @@ mod wasm_entry {
 
             // Render walls from the world
             render_walls(&self.world, graphics, self.show_infos);
+
+            // Placed props: floor furniture over the tiles / walls, under the
+            // actors (decoration only, no collision).
+            crate::floor_props::render_floor_props(
+                graphics,
+                floor_def(self.selected_level).props,
+                self.last_time as f32 / 1000.0,
+            );
 
             // Elevators (recessed door frames; exits light up when open) and,
             // in debug mode, the scenario trigger zones.
@@ -1889,6 +2206,9 @@ mod wasm_entry {
 
             // Reset camera for UI rendering
             self.camera.reset(graphics);
+            if self.pixel_world >= 2 {
+                graphics.pixel_end(0.0, 0.0);
+            }
 
             // Get game state for UI
             let health = get_player_health(&self.world);
@@ -2028,7 +2348,7 @@ mod wasm_entry {
             // card (which the outro fades out on the last floor).
             if level_complete {
                 let card_alpha = self.outro.map(|o| o.card_alpha()).unwrap_or(1.0);
-                let home = self.extracting == Some(0);
+                let home = self.extracting == Some(SURFACE_EXIT);
                 ending::draw_extract_card(
                     graphics,
                     &floor_title(self.selected_level),
@@ -2051,12 +2371,18 @@ mod wasm_entry {
             }
 
             // Objective line under the HUD + the intercepted comms feed
-            // (bottom-left, above the controls hint), both in screen space.
+            // (bottom-left, above the controls hint), both in screen space;
+            // and the caption of a running `hold`, if it has one.
             if let Some(sc) = self.scenario.as_ref() {
                 if player_alive && !level_complete {
                     render_objective(graphics, sc, accent, 150.0);
                 }
                 render_comms(graphics, sc, accent, graphics.height() - 34.0);
+                if let Some(text) = sc.hold_caption() {
+                    if player_alive && !level_complete {
+                        render_hold_caption(graphics, text, accent, sc.time());
+                    }
+                }
             }
 
             // Extraction card done -> ride to the next floor (13's car jams

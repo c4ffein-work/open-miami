@@ -8,9 +8,12 @@ Also exposes the level editor's persistence API (used by tools/levels.html):
 
     PUT /levels/<file>.json            write a floor / index file
     PUT /levels/<subdir>/<file>.json   (one optional sub-directory, e.g. samples/)
+    PUT /props/props.json              the prop library's pixel-art settings
+                                       (saved by the ?viz PROPS page)
 
-  * Only paths under levels/ are writable; segments must match
-    [A-Za-z0-9_-]+ and the file must end in .json (no "..", no absolute paths).
+  * Only paths under levels/ — plus exactly props/props.json — are writable;
+    segments must match [A-Za-z0-9_-]+ and the file must end in .json (no
+    "..", no absolute paths).
   * The body must be valid JSON (it is written verbatim, so the editor's canonical
     formatting is preserved byte-for-byte).
   * After writing a floor file, index.json in the same directory is updated
@@ -86,6 +89,37 @@ def safe_levels_path(url_path):
     if os.path.commonpath([abs_path, os.path.realpath(LEVELS_DIR)]) != os.path.realpath(LEVELS_DIR):
         return None
     return abs_path
+
+
+# The prop settings document (see docs/PROPS_FORMAT.md): the only writable
+# path outside levels/.
+PROPS_JSON = os.path.join(ROOT, "props", "props.json")
+
+
+def safe_props_path(url_path):
+    """Map a request path to props/props.json, or None."""
+    from urllib.parse import urlparse, unquote
+    p = unquote(urlparse(url_path).path)
+    return PROPS_JSON if p == "/props/props.json" else None
+
+
+def validate_props_doc(doc):
+    """Shape check of a props.json body (tools/gen_props.py is the full
+    validator): {"props": [{"kind": str, "px": 1..10, "layers": [{"name", "pixel"}]}]}."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("props"), list):
+        return 'top level must be {"props": [...]}'
+    for i, p in enumerate(doc["props"]):
+        if not isinstance(p, dict) or not isinstance(p.get("kind"), str):
+            return "props[%d]: needs a string kind" % i
+        px = p.get("px", 1)
+        if not isinstance(px, int) or isinstance(px, bool) or not 1 <= px <= 10:
+            return "%s: px must be an integer 1..10" % p["kind"]
+        for l in p.get("layers", []):
+            if not isinstance(l, dict) or not isinstance(l.get("name"), str):
+                return "%s: layers[] entries need a name" % p["kind"]
+            if l.get("pixel", "before") not in ("before", "after"):
+                return "%s/%s: pixel must be 'before' or 'after'" % (p["kind"], l["name"])
+    return None
 
 
 def index_entries(idx):
@@ -197,10 +231,11 @@ class NoCache(http.server.SimpleHTTPRequestHandler):
     def do_PUT(self):
         if not self._authorized():
             return self._json(401, {"ok": False, "error": "missing or wrong X-Editor-Token"})
-        abs_path = safe_levels_path(self.path)
+        props_path = safe_props_path(self.path)
+        abs_path = props_path or safe_levels_path(self.path)
         if abs_path is None:
-            return self._json(403, {"ok": False, "error": "PUT allowed only for levels/**/*.json"})
-        if not os.path.exists(abs_path) and count_level_files() >= MAX_LEVEL_FILES:
+            return self._json(403, {"ok": False, "error": "PUT allowed only for levels/**/*.json and props/props.json"})
+        if props_path is None and not os.path.exists(abs_path) and count_level_files() >= MAX_LEVEL_FILES:
             return self._json(429, {"ok": False, "error": "too many level files"})
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -213,6 +248,10 @@ class NoCache(http.server.SimpleHTTPRequestHandler):
             doc = json.loads(body.decode("utf-8"))
         except Exception as e:
             return self._json(400, {"ok": False, "error": "body is not valid JSON: %s" % e})
+        if props_path is not None:
+            err = validate_props_doc(doc)
+            if err:
+                return self._json(400, {"ok": False, "error": "props.json: " + err})
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
         tmp = abs_path + ".tmp"
         with open(tmp, "wb") as fh:
@@ -220,7 +259,7 @@ class NoCache(http.server.SimpleHTTPRequestHandler):
         os.replace(tmp, abs_path)
         rel = os.path.relpath(abs_path, ROOT)
         idx = None
-        if os.path.basename(abs_path) != "index.json":
+        if props_path is None and os.path.basename(abs_path) != "index.json":
             idx = update_index(os.path.dirname(abs_path), os.path.basename(abs_path), doc)
         return self._json(200, {"ok": True, "path": rel, "bytes": len(body), "index": idx})
 
@@ -254,5 +293,5 @@ if __name__ == "__main__":
     print("editor write token (X-Editor-Token): %s" % editor_token(), flush=True)
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("0.0.0.0", port), NoCache) as httpd:
-        print("serving :%d (no-store) — PUT/DELETE enabled under /levels/" % port)
+        print("serving :%d (no-store) — PUT/DELETE enabled under /levels/, PUT /props/props.json" % port)
         httpd.serve_forever()

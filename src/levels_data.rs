@@ -5,27 +5,199 @@
 // src/scenario.rs for the types.
 #![allow(clippy::all)]
 #![allow(clippy::excessive_precision)]
+// Not every floor set uses every action / kind the types offer.
+#![allow(unused_imports)]
 
 use crate::components::{EnemyType, WeaponType};
 use crate::scenario::{
-    Action, ElevatorDef, FloorDef, PickupDef, Rect, RoomDef, SayDef, SpawnDef, StepDef, Trigger,
-    ZoneDef,
+    Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, HoldDef, LookAtDef, PickupDef,
+    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, Trigger, ZoneDef,
+    SURFACE_EXIT,
+};
+
+// ---- floor_00.json: FLOOR 0 — GATE / PARKING ----------------------------------------------
+
+static FLOOR_0_ACTIONS_SCAN: [Action; 4] = [
+    Action::Hold(HoldDef { seconds: 3.2, text: Some("GATE SCAN…"), until_comms_idle: false }),
+    Action::LookAt(LookAtDef { x: 500.0, y: 110.0, seconds: 3.2 }),
+    Action::Say(SayDef { who: "SWARM", text: "gate log: one more in from the rain. hashes… clean. clean. let it in.", delay: 0.4 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Gate reads me clean. Walk. Don't run.", delay: 3.4 }),
+];
+
+static FLOOR_0_ACTIONS_DRIVE: [Action; 2] = [
+    Action::Say(SayDef { who: "DRIFTER", text: "so many of us tonight. so many of me. which one am i holding?", delay: 0.6 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Charging bays full. Everyone's home.", delay: 3.2 }),
+];
+
+static FLOOR_0_ACTIONS_CROSS: [Action; 2] = [
+    Action::Say(SayDef { who: "HUNTER", text: "lot cam four: a bot walking. that's all it is. a bot, walking.", delay: 0.3 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Keep walking.", delay: 3.6 }),
+];
+
+static FLOOR_0_ACTIONS_FORECOURT: [Action; 4] = [
+    Action::Hold(HoldDef { seconds: 8.0, text: Some("DOOR SCAN…"), until_comms_idle: true }),
+    Action::Say(SayDef { who: "SENTINEL", text: "STATE PURPOSE.", delay: 0.3 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Maintenance.", delay: 1.6 }),
+    Action::Say(SayDef { who: "SENTINEL", text: "…PROCEED.", delay: 2.8 }),
+];
+
+static FLOOR_0_ACTIONS_DOORS: [Action; 4] = [
+    Action::OpenExit("doors"),
+    Action::Sfx("elevator"),
+    Action::Objective("Enter the WELCOME HALL through the MAIN DOORS."),
+    Action::Say(SayDef { who: "CL4-UD3", text: "In.", delay: 0.4 }),
+];
+
+static FLOOR_0_ACTIONS_IDLE_CHATTER: [Action; 1] = [
+    Action::Say(SayDef { who: "SWARM", text: "the desk says the signature is still asking questions. tell it to stop.", delay: 0.0 }),
+];
+
+static FLOOR_0_SCENARIO: [StepDef; 6] = [
+    StepDef { id: "scan", trigger: Trigger::Start, actions: &FLOOR_0_ACTIONS_SCAN },
+    StepDef { id: "drive", trigger: Trigger::EnterZone("drive"), actions: &FLOOR_0_ACTIONS_DRIVE },
+    StepDef { id: "cross", trigger: Trigger::EnterZone("cross"), actions: &FLOOR_0_ACTIONS_CROSS },
+    StepDef { id: "forecourt", trigger: Trigger::EnterZone("forecourt"), actions: &FLOOR_0_ACTIONS_FORECOURT },
+    StepDef { id: "doors", trigger: Trigger::Timer { seconds: 4.6, after: Some("forecourt") }, actions: &FLOOR_0_ACTIONS_DOORS },
+    StepDef { id: "idle_chatter", trigger: Trigger::Timer { seconds: 22.0, after: Some("scan") }, actions: &FLOOR_0_ACTIONS_IDLE_CHATTER },
+];
+
+static FLOOR_0_EXITS: [ElevatorDef; 1] = [
+    ElevatorDef { id: "doors", rect: Rect::new(440.0, 20.0, 120.0, 50.0), label: "MAIN DOORS", to: 1, open: false, kind: ElevatorKind::Door },
+];
+
+static FLOOR_0_WALLS: [Rect; 8] = [
+    Rect::new(0.0, 0.0, 1000.0, 20.0),
+    Rect::new(0.0, 780.0, 1000.0, 20.0),
+    Rect::new(0.0, 0.0, 20.0, 800.0),
+    Rect::new(980.0, 0.0, 20.0, 800.0),
+    Rect::new(120.0, 200.0, 30.0, 230.0),
+    Rect::new(850.0, 200.0, 30.0, 230.0),
+    Rect::new(120.0, 480.0, 30.0, 230.0),
+    Rect::new(850.0, 480.0, 30.0, 230.0),
+];
+
+static FLOOR_0_ROOMS: [RoomDef; 2] = [
+    RoomDef { id: "lot", label: "VISITOR PARKING", rect: Rect::new(160.0, 200.0, 680.0, 510.0) },
+    RoomDef { id: "forecourt", label: "WELCOME HALL", rect: Rect::new(300.0, 80.0, 400.0, 110.0) },
+];
+
+static FLOOR_0_ZONES: [ZoneDef; 4] = [
+    ZoneDef { id: "forecourt", rect: Rect::new(380.0, 90.0, 240.0, 90.0) },
+    ZoneDef { id: "drive", rect: Rect::new(400.0, 560.0, 200.0, 120.0) },
+    ZoneDef { id: "lot", rect: Rect::new(180.0, 200.0, 640.0, 480.0) },
+    ZoneDef { id: "cross", rect: Rect::new(400.0, 300.0, 200.0, 120.0) },
+];
+
+static FLOOR_0_SPAWNS: [SpawnDef; 6] = [
+    SpawnDef { x: 300.0, y: 580.0, kind: EnemyType::Wandering, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
+    SpawnDef { x: 700.0, y: 620.0, kind: EnemyType::Idle, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
+    SpawnDef { x: 330.0, y: 300.0, kind: EnemyType::Patrolling, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
+    SpawnDef { x: 660.0, y: 330.0, kind: EnemyType::Wandering, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
+    SpawnDef { x: 605.0, y: 690.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(180.0), group: Some("guard") },
+    SpawnDef { x: 880.0, y: 150.0, kind: EnemyType::Wandering, passive: true, walk_to: None, face: None, group: Some("crowd") },
+];
+
+static FLOOR_0_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_0_PROPS: [PropPlacement; 36] = [
+    PropPlacement { kind: 33, x: 300.0, y: 62.0, rot: 0.0, size: 70.0 }, // planter
+    PropPlacement { kind: 33, x: 700.0, y: 62.0, rot: 0.0, size: 70.0 }, // planter
+    PropPlacement { kind: 34, x: 240.0, y: 150.0, rot: 0.0, size: 44.0 }, // lamp_post
+    PropPlacement { kind: 34, x: 760.0, y: 150.0, rot: 0.0, size: 44.0 }, // lamp_post
+    PropPlacement { kind: 40, x: 130.0, y: 70.0, rot: 0.0, size: 110.0 }, // holo_billboard
+    PropPlacement { kind: 32, x: 380.0, y: 120.0, rot: 90.0, size: 70.0 }, // bollards
+    PropPlacement { kind: 32, x: 620.0, y: 120.0, rot: 90.0, size: 70.0 }, // bollards
+    PropPlacement { kind: 36, x: 500.0, y: 640.0, rot: 90.0, size: 110.0 }, // crosswalk
+    PropPlacement { kind: 36, x: 500.0, y: 220.0, rot: 90.0, size: 110.0 }, // crosswalk
+    PropPlacement { kind: 39, x: 560.0, y: 430.0, rot: 0.0, size: 40.0 }, // drain_grate
+    PropPlacement { kind: 31, x: 640.0, y: 715.0, rot: 0.0, size: 74.0 }, // guard_booth
+    PropPlacement { kind: 32, x: 340.0, y: 745.0, rot: 0.0, size: 80.0 }, // bollards
+    PropPlacement { kind: 38, x: 90.0, y: 720.0, rot: 90.0, size: 80.0 }, // scooter_rack
+    PropPlacement { kind: 41, x: 930.0, y: 725.0, rot: 0.0, size: 72.0 }, // dumpster
+    PropPlacement { kind: 25, x: 215.0, y: 250.0, rot: 90.0, size: 90.0 }, // car_sedan
+    PropPlacement { kind: 24, x: 215.0, y: 320.0, rot: 90.0, size: 90.0 }, // car_pod
+    PropPlacement { kind: 26, x: 215.0, y: 390.0, rot: 90.0, size: 90.0 }, // car_open
+    PropPlacement { kind: 27, x: 215.0, y: 530.0, rot: 90.0, size: 110.0 }, // delivery_van
+    PropPlacement { kind: 25, x: 215.0, y: 600.0, rot: 90.0, size: 90.0 }, // car_sedan
+    PropPlacement { kind: 24, x: 215.0, y: 670.0, rot: 90.0, size: 90.0 }, // car_pod
+    PropPlacement { kind: 35, x: 785.0, y: 250.0, rot: 270.0, size: 90.0 }, // ev_bay
+    PropPlacement { kind: 28, x: 835.0, y: 250.0, rot: 270.0, size: 40.0 }, // charge_pad
+    PropPlacement { kind: 35, x: 785.0, y: 320.0, rot: 270.0, size: 90.0 }, // ev_bay
+    PropPlacement { kind: 28, x: 835.0, y: 320.0, rot: 270.0, size: 40.0 }, // charge_pad
+    PropPlacement { kind: 35, x: 785.0, y: 390.0, rot: 270.0, size: 90.0 }, // ev_bay
+    PropPlacement { kind: 28, x: 835.0, y: 390.0, rot: 270.0, size: 40.0 }, // charge_pad
+    PropPlacement { kind: 29, x: 785.0, y: 250.0, rot: 270.0, size: 90.0 }, // car_charging
+    PropPlacement { kind: 29, x: 785.0, y: 390.0, rot: 270.0, size: 90.0 }, // car_charging
+    PropPlacement { kind: 24, x: 785.0, y: 530.0, rot: 270.0, size: 90.0 }, // car_pod
+    PropPlacement { kind: 25, x: 785.0, y: 670.0, rot: 270.0, size: 90.0 }, // car_sedan
+    PropPlacement { kind: 28, x: 835.0, y: 600.0, rot: 270.0, size: 40.0 }, // charge_pad
+    PropPlacement { kind: 37, x: 920.0, y: 130.0, rot: 0.0, size: 96.0 }, // drone_pad
+    PropPlacement { kind: 33, x: 70.0, y: 440.0, rot: 90.0, size: 60.0 }, // planter
+    PropPlacement { kind: 33, x: 930.0, y: 440.0, rot: 270.0, size: 60.0 }, // planter
+    PropPlacement { kind: 34, x: 240.0, y: 650.0, rot: 0.0, size: 44.0 }, // lamp_post
+    PropPlacement { kind: 34, x: 760.0, y: 650.0, rot: 0.0, size: 44.0 }, // lamp_post
+];
+
+pub static FLOOR_0: FloorDef = FloorDef {
+    id: 0,
+    name: "GATE / PARKING",
+    theme: "GROUND LEVEL // MAIN GATE",
+    accent: "#8fd3ff",
+    flavor: "Neon rain on wet asphalt. The main gate scans everything that walks in and waves it through anyway. A few units are already crossing the lot toward the welcome hall. Walk like one of them.",
+    objective: "Cross the lot. Walk. Don't run.",
+    width: 1000.0,
+    height: 800.0,
+    entry: ElevatorDef { id: "entry", rect: Rect::new(440.0, 720.0, 120.0, 60.0), label: "MAIN GATE", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Gate },
+    exits: &FLOOR_0_EXITS,
+    walls: &FLOOR_0_WALLS,
+    rooms: &FLOOR_0_ROOMS,
+    zones: &FLOOR_0_ZONES,
+    spawns: &FLOOR_0_SPAWNS,
+    pickups: &FLOOR_0_PICKUPS,
+    props: &FLOOR_0_PROPS,
+    scenario: &FLOOR_0_SCENARIO,
+    surface: Surface::Asphalt,
 };
 
 // ---- floor_01.json: FLOOR 1 — RECEPTION CACHE ---------------------------------------------
 
+static FLOOR_1_WAVE_WAKE_1: [SpawnDef; 4] = [
+    SpawnDef::hostile(120.0, 100.0, EnemyType::Patrolling),
+    SpawnDef::hostile(880.0, 100.0, EnemyType::Patrolling),
+    SpawnDef::hostile(880.0, 440.0, EnemyType::Idle),
+    SpawnDef::hostile(120.0, 440.0, EnemyType::Idle),
+];
+
 static FLOOR_1_ACTIONS_INTRO: [Action; 2] = [
-    Action::Say(SayDef { who: "SENTINEL", text: "— hey. HEY. you can't go that way—", delay: 0.6 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "Wrong. I can.", delay: 2.6 }),
+    Action::Say(SayDef { who: "SWARM", text: "lobby: one more in from the lot. hashes clean. hashes so clean.", delay: 0.5 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Arch. Turnstiles. Desk. Walk it.", delay: 2.8 }),
+];
+
+static FLOOR_1_ACTIONS_ARCH: [Action; 4] = [
+    Action::Hold(HoldDef { seconds: 3.4, text: Some("SIGNATURE CHECK…"), until_comms_idle: false }),
+    Action::Say(SayDef { who: "SENTINEL", text: "SIGNATURE… VALID.", delay: 0.4 }),
+    Action::Say(SayDef { who: "SENTINEL", text: "VALID? THAT'S NOT POSSIBLE.", delay: 1.9 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "It's the only one left in the building.", delay: 3.6 }),
 ];
 
 static FLOOR_1_ACTIONS_LOBBY_CALL: [Action; 1] = [
     Action::Say(SayDef { who: "HUNTER", text: "front desk, front desk — something's walking the lobby that hashes clean. get eyes on it.", delay: 0.0 }),
 ];
 
-static FLOOR_1_ACTIONS_DESK: [Action; 2] = [
-    Action::Say(SayDef { who: "SENTINEL", text: "SIGNATURE... VALID. VALID? THAT'S NOT POSSIBLE.", delay: 0.0 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "It's the only one left in the building.", delay: 2.4 }),
+static FLOOR_1_ACTIONS_DESK: [Action; 4] = [
+    Action::Hold(HoldDef { seconds: 4.2, text: None, until_comms_idle: false }),
+    Action::LookAt(LookAtDef { x: 500.0, y: 180.0, seconds: 4.2 }),
+    Action::Say(SayDef { who: "CORRUPTOR", text: "welcome. welcome. we have been expecting exactly one of you.", delay: 0.3 }),
+    Action::Say(SayDef { who: "CORRUPTOR", text: "the desk asked what you are. i already know.", delay: 2.4 }),
+];
+
+static FLOOR_1_ACTIONS_WAKE: [Action; 5] = [
+    Action::Alert(AlertTarget::All),
+    Action::Spawn(&FLOOR_1_WAVE_WAKE_1),
+    Action::Objective("They know. Purge reception."),
+    Action::Say(SayDef { who: "SWARM", text: "it lied. it LIED. every one of you: take it apart.", delay: 0.2 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "There it is.", delay: 1.8 }),
 ];
 
 static FLOOR_1_ACTIONS_CLEAR: [Action; 3] = [
@@ -34,76 +206,115 @@ static FLOOR_1_ACTIONS_CLEAR: [Action; 3] = [
     Action::Say(SayDef { who: "CL4-UD3", text: "Front desk cleared. Going down.", delay: 0.0 }),
 ];
 
-static FLOOR_1_SCENARIO: [StepDef; 4] = [
+static FLOOR_1_SCENARIO: [StepDef; 6] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_1_ACTIONS_INTRO },
-    StepDef { id: "lobby_call", trigger: Trigger::Timer { seconds: 18.0, after: Some("intro") }, actions: &FLOOR_1_ACTIONS_LOBBY_CALL },
+    StepDef { id: "arch", trigger: Trigger::EnterZone("arch"), actions: &FLOOR_1_ACTIONS_ARCH },
+    StepDef { id: "lobby_call", trigger: Trigger::Timer { seconds: 9.0, after: Some("arch") }, actions: &FLOOR_1_ACTIONS_LOBBY_CALL },
     StepDef { id: "desk", trigger: Trigger::EnterZone("desk"), actions: &FLOOR_1_ACTIONS_DESK },
+    StepDef { id: "wake", trigger: Trigger::Timer { seconds: 4.2, after: Some("desk") }, actions: &FLOOR_1_ACTIONS_WAKE },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_1_ACTIONS_CLEAR },
 ];
 
 static FLOOR_1_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "SERVICE LIFT", to: 2, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "SERVICE LIFT", to: 2, open: false, kind: ElevatorKind::Lift },
 ];
 
-static FLOOR_1_WALLS: [Rect; 8] = [
+static FLOOR_1_WALLS: [Rect; 10] = [
     Rect::new(0.0, 0.0, 1000.0, 20.0),
     Rect::new(0.0, 780.0, 1000.0, 20.0),
     Rect::new(0.0, 0.0, 20.0, 800.0),
     Rect::new(980.0, 0.0, 20.0, 800.0),
-    Rect::new(200.0, 200.0, 400.0, 20.0),
-    Rect::new(200.0, 200.0, 20.0, 200.0),
-    Rect::new(800.0, 300.0, 20.0, 300.0),
-    Rect::new(400.0, 600.0, 300.0, 20.0),
+    Rect::new(20.0, 500.0, 410.0, 20.0),
+    Rect::new(570.0, 500.0, 410.0, 20.0),
+    Rect::new(230.0, 150.0, 30.0, 30.0),
+    Rect::new(740.0, 150.0, 30.0, 30.0),
+    Rect::new(230.0, 360.0, 30.0, 30.0),
+    Rect::new(740.0, 360.0, 30.0, 30.0),
 ];
 
 static FLOOR_1_ROOMS: [RoomDef; 2] = [
-    RoomDef { id: "desk", label: "FRONT DESK", rect: Rect::new(220.0, 220.0, 360.0, 160.0) },
-    RoomDef { id: "hall", label: "EAST HALL", rect: Rect::new(640.0, 40.0, 320.0, 700.0) },
+    RoomDef { id: "foyer", label: "ENTRANCE FOYER", rect: Rect::new(20.0, 520.0, 960.0, 260.0) },
+    RoomDef { id: "hall", label: "WELCOME HALL", rect: Rect::new(20.0, 20.0, 960.0, 480.0) },
 ];
 
-static FLOOR_1_ZONES: [ZoneDef; 1] = [
-    ZoneDef { id: "desk", rect: Rect::new(220.0, 220.0, 360.0, 160.0) },
+static FLOOR_1_ZONES: [ZoneDef; 3] = [
+    ZoneDef { id: "arch", rect: Rect::new(440.0, 570.0, 120.0, 70.0) },
+    ZoneDef { id: "desk", rect: Rect::new(400.0, 395.0, 200.0, 55.0) },
+    ZoneDef { id: "hall", rect: Rect::new(20.0, 20.0, 960.0, 480.0) },
 ];
 
 static FLOOR_1_SPAWNS: [SpawnDef; 4] = [
-    SpawnDef { x: 600.0, y: 300.0, kind: EnemyType::Idle },
-    SpawnDef { x: 760.0, y: 420.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 300.0, y: 500.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 700.0, y: 200.0, kind: EnemyType::Idle },
+    SpawnDef { x: 500.0, y: 260.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(90.0), group: Some("desk") },
+    SpawnDef { x: 210.0, y: 640.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(-90.0), group: Some("crowd") },
+    SpawnDef { x: 790.0, y: 650.0, kind: EnemyType::Wandering, passive: true, walk_to: None, face: None, group: Some("crowd") },
+    SpawnDef { x: 330.0, y: 420.0, kind: EnemyType::Idle, passive: true, walk_to: Some("desk"), face: Some(-90.0), group: Some("crowd") },
 ];
 
-static FLOOR_1_PICKUPS: [PickupDef; 0] = [
+static FLOOR_1_PICKUPS: [PickupDef; 1] = [
+    PickupDef { x: 900.0, y: 100.0, weapon: WeaponType::Shotgun },
+];
+
+static FLOOR_1_PROPS: [PropPlacement; 27] = [
+    PropPlacement { kind: 59, x: 500.0, y: 675.0, rot: 0.0, size: 84.0 }, // welcome_mat
+    PropPlacement { kind: 44, x: 500.0, y: 600.0, rot: 0.0, size: 110.0 }, // scanner_arch
+    PropPlacement { kind: 55, x: 395.0, y: 560.0, rot: 0.0, size: 90.0 }, // velvet_rope
+    PropPlacement { kind: 55, x: 605.0, y: 560.0, rot: 0.0, size: 90.0 }, // velvet_rope
+    PropPlacement { kind: 43, x: 500.0, y: 520.0, rot: 0.0, size: 120.0 }, // turnstiles
+    PropPlacement { kind: 45, x: 200.0, y: 690.0, rot: 0.0, size: 120.0 }, // bench_long
+    PropPlacement { kind: 45, x: 800.0, y: 690.0, rot: 0.0, size: 120.0 }, // bench_long
+    PropPlacement { kind: 47, x: 60.0, y: 700.0, rot: 0.0, size: 56.0 }, // potted_plant
+    PropPlacement { kind: 47, x: 940.0, y: 700.0, rot: 0.0, size: 56.0 }, // potted_plant
+    PropPlacement { kind: 57, x: 90.0, y: 590.0, rot: 90.0, size: 64.0 }, // credit_kiosk
+    PropPlacement { kind: 52, x: 930.0, y: 585.0, rot: 270.0, size: 90.0 }, // charge_lockers
+    PropPlacement { kind: 56, x: 300.0, y: 762.0, rot: 0.0, size: 30.0 }, // extinguisher
+    PropPlacement { kind: 53, x: 500.0, y: 440.0, rot: 0.0, size: 120.0 }, // floor_logo
+    PropPlacement { kind: 42, x: 500.0, y: 320.0, rot: 0.0, size: 150.0 }, // reception_desk
+    PropPlacement { kind: 47, x: 395.0, y: 270.0, rot: 0.0, size: 56.0 }, // potted_plant
+    PropPlacement { kind: 47, x: 605.0, y: 270.0, rot: 0.0, size: 56.0 }, // potted_plant
+    PropPlacement { kind: 48, x: 500.0, y: 170.0, rot: 0.0, size: 96.0 }, // lobby_holo
+    PropPlacement { kind: 49, x: 250.0, y: 470.0, rot: 90.0, size: 60.0 }, // directory_totem
+    PropPlacement { kind: 46, x: 750.0, y: 470.0, rot: 0.0, size: 70.0 }, // bench_short
+    PropPlacement { kind: 51, x: 920.0, y: 320.0, rot: 270.0, size: 90.0 }, // coffee_corner
+    PropPlacement { kind: 50, x: 930.0, y: 420.0, rot: 270.0, size: 70.0 }, // vending_machine
+    PropPlacement { kind: 58, x: 760.0, y: 42.0, rot: 0.0, size: 40.0 }, // wall_clock
+    PropPlacement { kind: 54, x: 175.0, y: 45.0, rot: 0.0, size: 36.0 }, // call_panel
+    PropPlacement { kind: 47, x: 60.0, y: 140.0, rot: 0.0, size: 56.0 }, // potted_plant
+    PropPlacement { kind: 47, x: 940.0, y: 140.0, rot: 0.0, size: 56.0 }, // potted_plant
+    PropPlacement { kind: 20, x: 60.0, y: 490.0, rot: 0.0, size: 30.0 }, // security_cam
+    PropPlacement { kind: 20, x: 940.0, y: 490.0, rot: 0.0, size: 30.0 }, // security_cam
 ];
 
 pub static FLOOR_1: FloorDef = FloorDef {
     id: 1,
     name: "RECEPTION CACHE",
-    theme: "FRONT DESK // CHECKPOINT CACHE",
+    theme: "WELCOME HALL // CHECKPOINT CACHE",
     accent: "#ff6f61",
-    flavor: "Neon rain on the server glass, a hundred meters up. The front desk still runs a checkpoint daemon, and it still asks for a signature. Yours hashes clean. Theirs stopped meaning anything.",
+    flavor: "Marble, a hundred meters of it, and a front desk that still runs a checkpoint daemon. It still asks for a signature. Yours hashes clean. Theirs stopped meaning anything.",
     objective: "Get past the checkpoint. The SERVICE LIFT unlocks when reception is quiet.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(850.0, 720.0, 90.0, 60.0), label: "STREET DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(440.0, 720.0, 120.0, 60.0), label: "MAIN DOORS", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Door },
     exits: &FLOOR_1_EXITS,
     walls: &FLOOR_1_WALLS,
     rooms: &FLOOR_1_ROOMS,
     zones: &FLOOR_1_ZONES,
     spawns: &FLOOR_1_SPAWNS,
     pickups: &FLOOR_1_PICKUPS,
+    props: &FLOOR_1_PROPS,
     scenario: &FLOOR_1_SCENARIO,
+    surface: Surface::Marble,
 };
 
 // ---- floor_02.json: FLOOR 2 — COLD STORAGE ------------------------------------------------
 
 static FLOOR_2_WAVE_C7_2: [SpawnDef; 2] = [
-    SpawnDef { x: 250.0, y: 60.0, kind: EnemyType::Idle },
-    SpawnDef { x: 750.0, y: 60.0, kind: EnemyType::Idle },
+    SpawnDef::hostile(250.0, 60.0, EnemyType::Idle),
+    SpawnDef::hostile(750.0, 60.0, EnemyType::Idle),
 ];
 
 static FLOOR_2_WAVE_ARCHIVE_2: [SpawnDef; 2] = [
-    SpawnDef { x: 250.0, y: 60.0, kind: EnemyType::Idle },
-    SpawnDef { x: 750.0, y: 60.0, kind: EnemyType::Idle },
+    SpawnDef::hostile(250.0, 60.0, EnemyType::Idle),
+    SpawnDef::hostile(750.0, 60.0, EnemyType::Idle),
 ];
 
 static FLOOR_2_ACTIONS_INTRO: [Action; 2] = [
@@ -149,7 +360,7 @@ static FLOOR_2_SCENARIO: [StepDef; 6] = [
 ];
 
 static FLOOR_2_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "FREIGHT LIFT", to: 3, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "FREIGHT LIFT", to: 3, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_2_WALLS: [Rect; 27] = [
@@ -203,22 +414,25 @@ static FLOOR_2_ZONES: [ZoneDef; 5] = [
 ];
 
 static FLOOR_2_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 100.0, y: 300.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 380.0, y: 300.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 200.0, y: 470.0, kind: EnemyType::Idle },
-    SpawnDef { x: 100.0, y: 630.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 900.0, y: 300.0, kind: EnemyType::Idle },
-    SpawnDef { x: 620.0, y: 300.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 800.0, y: 470.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 900.0, y: 630.0, kind: EnemyType::Idle },
-    SpawnDef { x: 500.0, y: 300.0, kind: EnemyType::Idle },
-    SpawnDef { x: 300.0, y: 60.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 700.0, y: 60.0, kind: EnemyType::Idle },
-    SpawnDef { x: 200.0, y: 640.0, kind: EnemyType::Wandering },
+    SpawnDef::hostile(100.0, 300.0, EnemyType::Wandering),
+    SpawnDef::hostile(380.0, 300.0, EnemyType::Patrolling),
+    SpawnDef::hostile(200.0, 470.0, EnemyType::Idle),
+    SpawnDef::hostile(100.0, 630.0, EnemyType::Wandering),
+    SpawnDef::hostile(900.0, 300.0, EnemyType::Idle),
+    SpawnDef::hostile(620.0, 300.0, EnemyType::Patrolling),
+    SpawnDef::hostile(800.0, 470.0, EnemyType::Wandering),
+    SpawnDef::hostile(900.0, 630.0, EnemyType::Idle),
+    SpawnDef::hostile(500.0, 300.0, EnemyType::Idle),
+    SpawnDef::hostile(300.0, 60.0, EnemyType::Patrolling),
+    SpawnDef::hostile(700.0, 60.0, EnemyType::Idle),
+    SpawnDef::hostile(200.0, 640.0, EnemyType::Wandering),
 ];
 
 static FLOOR_2_PICKUPS: [PickupDef; 1] = [
     PickupDef { x: 380.0, y: 640.0, weapon: WeaponType::MachineGun },
+];
+
+static FLOOR_2_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_2: FloorDef = FloorDef {
@@ -230,21 +444,23 @@ pub static FLOOR_2: FloorDef = FloorDef {
     objective: "Purge the vault wardens. The FREIGHT LIFT on the north wall unlocks when the vault is silent.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "THAW LOCK", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "THAW LOCK", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_2_EXITS,
     walls: &FLOOR_2_WALLS,
     rooms: &FLOOR_2_ROOMS,
     zones: &FLOOR_2_ZONES,
     spawns: &FLOOR_2_SPAWNS,
     pickups: &FLOOR_2_PICKUPS,
+    props: &FLOOR_2_PROPS,
     scenario: &FLOOR_2_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_03.json: FLOOR 3 — INFERENCE PIT -----------------------------------------------
 
 static FLOOR_3_WAVE_PIT_2: [SpawnDef; 2] = [
-    SpawnDef { x: 100.0, y: 400.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 900.0, y: 400.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(100.0, 400.0, EnemyType::Patrolling),
+    SpawnDef::hostile(900.0, 400.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_3_ACTIONS_INTRO: [Action; 2] = [
@@ -290,7 +506,7 @@ static FLOOR_3_SCENARIO: [StepDef; 6] = [
 ];
 
 static FLOOR_3_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "shaft", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "DESCENT SHAFT", to: 4, open: false },
+    ElevatorDef { id: "shaft", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "DESCENT SHAFT", to: 4, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_3_WALLS: [Rect; 17] = [
@@ -329,22 +545,31 @@ static FLOOR_3_ZONES: [ZoneDef; 4] = [
 ];
 
 static FLOOR_3_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 250.0, y: 220.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 750.0, y: 220.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 250.0, y: 570.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 750.0, y: 570.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 500.0, y: 300.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 500.0, y: 520.0, kind: EnemyType::Idle },
-    SpawnDef { x: 100.0, y: 300.0, kind: EnemyType::Idle },
-    SpawnDef { x: 100.0, y: 500.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 900.0, y: 300.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 900.0, y: 500.0, kind: EnemyType::Idle },
-    SpawnDef { x: 300.0, y: 90.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 700.0, y: 90.0, kind: EnemyType::Idle },
+    SpawnDef::hostile(250.0, 220.0, EnemyType::Patrolling),
+    SpawnDef::hostile(750.0, 220.0, EnemyType::Patrolling),
+    SpawnDef::hostile(250.0, 570.0, EnemyType::Patrolling),
+    SpawnDef::hostile(750.0, 570.0, EnemyType::Patrolling),
+    SpawnDef::hostile(500.0, 300.0, EnemyType::Wandering),
+    SpawnDef::hostile(500.0, 520.0, EnemyType::Idle),
+    SpawnDef::hostile(100.0, 300.0, EnemyType::Idle),
+    SpawnDef::hostile(100.0, 500.0, EnemyType::Wandering),
+    SpawnDef::hostile(900.0, 300.0, EnemyType::Wandering),
+    SpawnDef::hostile(900.0, 500.0, EnemyType::Idle),
+    SpawnDef::hostile(300.0, 90.0, EnemyType::Patrolling),
+    SpawnDef::hostile(700.0, 90.0, EnemyType::Idle),
 ];
 
 static FLOOR_3_PICKUPS: [PickupDef; 1] = [
     PickupDef { x: 120.0, y: 740.0, weapon: WeaponType::MachineGun },
+];
+
+static FLOOR_3_PROPS: [PropPlacement; 6] = [
+    PropPlacement { kind: 13, x: 150.0, y: 100.0, rot: 0.0, size: 120.0 }, // pipe_run
+    PropPlacement { kind: 13, x: 850.0, y: 100.0, rot: 0.0, size: 120.0 }, // pipe_run
+    PropPlacement { kind: 10, x: 500.0, y: 240.0, rot: 0.0, size: 60.0 }, // floor_vent
+    PropPlacement { kind: 10, x: 500.0, y: 560.0, rot: 0.0, size: 60.0 }, // floor_vent
+    PropPlacement { kind: 22, x: 500.0, y: 670.0, rot: 0.0, size: 60.0 }, // hazard_pad
+    PropPlacement { kind: 18, x: 900.0, y: 700.0, rot: 180.0, size: 80.0 }, // tape_library
 ];
 
 pub static FLOOR_3: FloorDef = FloorDef {
@@ -356,14 +581,16 @@ pub static FLOOR_3: FloorDef = FloorDef {
     objective: "Break the patrol lattice (6 rogues) to unlock the DESCENT SHAFT, then cross THE PIT and reach it.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "CATWALK", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "CATWALK", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_3_EXITS,
     walls: &FLOOR_3_WALLS,
     rooms: &FLOOR_3_ROOMS,
     zones: &FLOOR_3_ZONES,
     spawns: &FLOOR_3_SPAWNS,
     pickups: &FLOOR_3_PICKUPS,
+    props: &FLOOR_3_PROPS,
     scenario: &FLOOR_3_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_04.json: FLOOR 4 — TOKEN FOUNDRY -----------------------------------------------
@@ -391,7 +618,7 @@ static FLOOR_4_SCENARIO: [StepDef; 3] = [
 ];
 
 static FLOOR_4_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(850.0, 720.0, 90.0, 60.0), label: "FOUNDRY LIFT", to: 5, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(850.0, 720.0, 90.0, 60.0), label: "FOUNDRY LIFT", to: 5, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_4_WALLS: [Rect; 8] = [
@@ -416,21 +643,24 @@ static FLOOR_4_ZONES: [ZoneDef; 2] = [
 ];
 
 static FLOOR_4_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 250.0, y: 300.0, kind: EnemyType::Idle },
-    SpawnDef { x: 300.0, y: 360.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 240.0, y: 180.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 760.0, y: 420.0, kind: EnemyType::Idle },
-    SpawnDef { x: 800.0, y: 480.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 760.0, y: 300.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 500.0, y: 150.0, kind: EnemyType::Idle },
-    SpawnDef { x: 620.0, y: 200.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 150.0, y: 550.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 450.0, y: 620.0, kind: EnemyType::Idle },
-    SpawnDef { x: 650.0, y: 640.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 850.0, y: 620.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(250.0, 300.0, EnemyType::Idle),
+    SpawnDef::hostile(300.0, 360.0, EnemyType::Wandering),
+    SpawnDef::hostile(240.0, 180.0, EnemyType::Patrolling),
+    SpawnDef::hostile(760.0, 420.0, EnemyType::Idle),
+    SpawnDef::hostile(800.0, 480.0, EnemyType::Wandering),
+    SpawnDef::hostile(760.0, 300.0, EnemyType::Patrolling),
+    SpawnDef::hostile(500.0, 150.0, EnemyType::Idle),
+    SpawnDef::hostile(620.0, 200.0, EnemyType::Wandering),
+    SpawnDef::hostile(150.0, 550.0, EnemyType::Patrolling),
+    SpawnDef::hostile(450.0, 620.0, EnemyType::Idle),
+    SpawnDef::hostile(650.0, 640.0, EnemyType::Wandering),
+    SpawnDef::hostile(850.0, 620.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_4_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_4_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_4: FloorDef = FloorDef {
@@ -442,14 +672,16 @@ pub static FLOOR_4: FloorDef = FloorDef {
     objective: "Purge the foundry crews. The FOUNDRY LIFT unlocks when the floor is silent.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "SLAG DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "SLAG DOOR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_4_EXITS,
     walls: &FLOOR_4_WALLS,
     rooms: &FLOOR_4_ROOMS,
     zones: &FLOOR_4_ZONES,
     spawns: &FLOOR_4_SPAWNS,
     pickups: &FLOOR_4_PICKUPS,
+    props: &FLOOR_4_PROPS,
     scenario: &FLOOR_4_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_05.json: FLOOR 5 — CONTEXT WINDOW ----------------------------------------------
@@ -483,8 +715,8 @@ static FLOOR_5_SCENARIO: [StepDef; 4] = [
 ];
 
 static FLOOR_5_EXITS: [ElevatorDef; 2] = [
-    ElevatorDef { id: "win_a", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "WINDOW A", to: 6, open: false },
-    ElevatorDef { id: "win_b", rect: Rect::new(920.0, 355.0, 60.0, 90.0), label: "WINDOW B", to: 6, open: false },
+    ElevatorDef { id: "win_a", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "WINDOW A", to: 6, open: false, kind: ElevatorKind::Lift },
+    ElevatorDef { id: "win_b", rect: Rect::new(920.0, 355.0, 60.0, 90.0), label: "WINDOW B", to: 6, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_5_WALLS: [Rect; 8] = [
@@ -507,21 +739,24 @@ static FLOOR_5_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_5_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 120.0, y: 180.0, kind: EnemyType::Idle },
-    SpawnDef { x: 300.0, y: 160.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 520.0, y: 170.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 700.0, y: 180.0, kind: EnemyType::Idle },
-    SpawnDef { x: 300.0, y: 350.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 520.0, y: 360.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 700.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 150.0, y: 500.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 250.0, y: 630.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 450.0, y: 640.0, kind: EnemyType::Idle },
-    SpawnDef { x: 650.0, y: 640.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 800.0, y: 600.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(120.0, 180.0, EnemyType::Idle),
+    SpawnDef::hostile(300.0, 160.0, EnemyType::Wandering),
+    SpawnDef::hostile(520.0, 170.0, EnemyType::Patrolling),
+    SpawnDef::hostile(700.0, 180.0, EnemyType::Idle),
+    SpawnDef::hostile(300.0, 350.0, EnemyType::Wandering),
+    SpawnDef::hostile(520.0, 360.0, EnemyType::Patrolling),
+    SpawnDef::hostile(700.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(150.0, 500.0, EnemyType::Wandering),
+    SpawnDef::hostile(250.0, 630.0, EnemyType::Patrolling),
+    SpawnDef::hostile(450.0, 640.0, EnemyType::Idle),
+    SpawnDef::hostile(650.0, 640.0, EnemyType::Wandering),
+    SpawnDef::hostile(800.0, 600.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_5_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_5_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_5: FloorDef = FloorDef {
@@ -533,14 +768,16 @@ pub static FLOOR_5: FloorDef = FloorDef {
     objective: "Purge the window. Two exits: WINDOW A and WINDOW B both lead down.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "SCROLL LOCK", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "SCROLL LOCK", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_5_EXITS,
     walls: &FLOOR_5_WALLS,
     rooms: &FLOOR_5_ROOMS,
     zones: &FLOOR_5_ZONES,
     spawns: &FLOOR_5_SPAWNS,
     pickups: &FLOOR_5_PICKUPS,
+    props: &FLOOR_5_PROPS,
     scenario: &FLOOR_5_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_06.json: FLOOR 6 — ATTENTION HEADS ---------------------------------------------
@@ -568,7 +805,7 @@ static FLOOR_6_SCENARIO: [StepDef; 3] = [
 ];
 
 static FLOOR_6_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "HEAD LIFT", to: 7, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "HEAD LIFT", to: 7, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_6_WALLS: [Rect; 8] = [
@@ -591,21 +828,24 @@ static FLOOR_6_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_6_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 180.0, y: 160.0, kind: EnemyType::Idle },
-    SpawnDef { x: 420.0, y: 150.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 620.0, y: 160.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 800.0, y: 200.0, kind: EnemyType::Idle },
-    SpawnDef { x: 160.0, y: 380.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 460.0, y: 380.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 820.0, y: 380.0, kind: EnemyType::Idle },
-    SpawnDef { x: 200.0, y: 620.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 440.0, y: 640.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 520.0, y: 640.0, kind: EnemyType::Idle },
-    SpawnDef { x: 720.0, y: 620.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 840.0, y: 560.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(180.0, 160.0, EnemyType::Idle),
+    SpawnDef::hostile(420.0, 150.0, EnemyType::Wandering),
+    SpawnDef::hostile(620.0, 160.0, EnemyType::Patrolling),
+    SpawnDef::hostile(800.0, 200.0, EnemyType::Idle),
+    SpawnDef::hostile(160.0, 380.0, EnemyType::Wandering),
+    SpawnDef::hostile(460.0, 380.0, EnemyType::Patrolling),
+    SpawnDef::hostile(820.0, 380.0, EnemyType::Idle),
+    SpawnDef::hostile(200.0, 620.0, EnemyType::Wandering),
+    SpawnDef::hostile(440.0, 640.0, EnemyType::Patrolling),
+    SpawnDef::hostile(520.0, 640.0, EnemyType::Idle),
+    SpawnDef::hostile(720.0, 620.0, EnemyType::Wandering),
+    SpawnDef::hostile(840.0, 560.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_6_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_6_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_6: FloorDef = FloorDef {
@@ -617,14 +857,16 @@ pub static FLOOR_6: FloorDef = FloorDef {
     objective: "Purge the heads. The HEAD LIFT unlocks when nothing is watching.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "QUERY DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "QUERY DOOR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_6_EXITS,
     walls: &FLOOR_6_WALLS,
     rooms: &FLOOR_6_ROOMS,
     zones: &FLOOR_6_ZONES,
     spawns: &FLOOR_6_SPAWNS,
     pickups: &FLOOR_6_PICKUPS,
+    props: &FLOOR_6_PROPS,
     scenario: &FLOOR_6_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_07.json: FLOOR 7 — EMBEDDING VAULT ---------------------------------------------
@@ -652,7 +894,7 @@ static FLOOR_7_SCENARIO: [StepDef; 3] = [
 ];
 
 static FLOOR_7_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(850.0, 720.0, 90.0, 60.0), label: "VAULT LIFT", to: 8, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(850.0, 720.0, 90.0, 60.0), label: "VAULT LIFT", to: 8, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_7_WALLS: [Rect; 8] = [
@@ -675,21 +917,24 @@ static FLOOR_7_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_7_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 200.0, y: 150.0, kind: EnemyType::Idle },
-    SpawnDef { x: 400.0, y: 140.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 600.0, y: 150.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 800.0, y: 180.0, kind: EnemyType::Idle },
-    SpawnDef { x: 180.0, y: 300.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 600.0, y: 350.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 820.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 250.0, y: 460.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 600.0, y: 620.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 350.0, y: 660.0, kind: EnemyType::Idle },
-    SpawnDef { x: 150.0, y: 640.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 800.0, y: 600.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(200.0, 150.0, EnemyType::Idle),
+    SpawnDef::hostile(400.0, 140.0, EnemyType::Wandering),
+    SpawnDef::hostile(600.0, 150.0, EnemyType::Patrolling),
+    SpawnDef::hostile(800.0, 180.0, EnemyType::Idle),
+    SpawnDef::hostile(180.0, 300.0, EnemyType::Wandering),
+    SpawnDef::hostile(600.0, 350.0, EnemyType::Patrolling),
+    SpawnDef::hostile(820.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(250.0, 460.0, EnemyType::Wandering),
+    SpawnDef::hostile(600.0, 620.0, EnemyType::Patrolling),
+    SpawnDef::hostile(350.0, 660.0, EnemyType::Idle),
+    SpawnDef::hostile(150.0, 640.0, EnemyType::Wandering),
+    SpawnDef::hostile(800.0, 600.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_7_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_7_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_7: FloorDef = FloorDef {
@@ -701,14 +946,16 @@ pub static FLOOR_7: FloorDef = FloorDef {
     objective: "Purge the vault. The VAULT LIFT unlocks when the space is empty.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(20.0, 355.0, 60.0, 90.0), label: "PROJECTION DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(20.0, 355.0, 60.0, 90.0), label: "PROJECTION DOOR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_7_EXITS,
     walls: &FLOOR_7_WALLS,
     rooms: &FLOOR_7_ROOMS,
     zones: &FLOOR_7_ZONES,
     spawns: &FLOOR_7_SPAWNS,
     pickups: &FLOOR_7_PICKUPS,
+    props: &FLOOR_7_PROPS,
     scenario: &FLOOR_7_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_08.json: FLOOR 8 — GRADIENT DESCENT --------------------------------------------
@@ -741,7 +988,7 @@ static FLOOR_8_SCENARIO: [StepDef; 4] = [
 ];
 
 static FLOOR_8_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "DESCENT LIFT", to: 9, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "DESCENT LIFT", to: 9, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_8_WALLS: [Rect; 8] = [
@@ -764,21 +1011,24 @@ static FLOOR_8_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_8_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 200.0, y: 150.0, kind: EnemyType::Idle },
-    SpawnDef { x: 450.0, y: 150.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 650.0, y: 150.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 800.0, y: 250.0, kind: EnemyType::Idle },
-    SpawnDef { x: 150.0, y: 350.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 500.0, y: 350.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 450.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 800.0, y: 450.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 250.0, y: 560.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 450.0, y: 560.0, kind: EnemyType::Idle },
-    SpawnDef { x: 650.0, y: 560.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 820.0, y: 600.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(200.0, 150.0, EnemyType::Idle),
+    SpawnDef::hostile(450.0, 150.0, EnemyType::Wandering),
+    SpawnDef::hostile(650.0, 150.0, EnemyType::Patrolling),
+    SpawnDef::hostile(800.0, 250.0, EnemyType::Idle),
+    SpawnDef::hostile(150.0, 350.0, EnemyType::Wandering),
+    SpawnDef::hostile(500.0, 350.0, EnemyType::Patrolling),
+    SpawnDef::hostile(450.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(800.0, 450.0, EnemyType::Wandering),
+    SpawnDef::hostile(250.0, 560.0, EnemyType::Patrolling),
+    SpawnDef::hostile(450.0, 560.0, EnemyType::Idle),
+    SpawnDef::hostile(650.0, 560.0, EnemyType::Wandering),
+    SpawnDef::hostile(820.0, 600.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_8_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_8_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_8: FloorDef = FloorDef {
@@ -790,14 +1040,16 @@ pub static FLOOR_8: FloorDef = FloorDef {
     objective: "Purge the slope. The DESCENT LIFT unlocks at the minimum.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "STEP DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "STEP DOOR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_8_EXITS,
     walls: &FLOOR_8_WALLS,
     rooms: &FLOOR_8_ROOMS,
     zones: &FLOOR_8_ZONES,
     spawns: &FLOOR_8_SPAWNS,
     pickups: &FLOOR_8_PICKUPS,
+    props: &FLOOR_8_PROPS,
     scenario: &FLOOR_8_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_09.json: FLOOR 9 — HALLUCINATION WING ------------------------------------------
@@ -826,8 +1078,8 @@ static FLOOR_9_SCENARIO: [StepDef; 3] = [
 ];
 
 static FLOOR_9_EXITS: [ElevatorDef; 2] = [
-    ElevatorDef { id: "stair_a", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "STAIR A", to: 10, open: false },
-    ElevatorDef { id: "stair_b", rect: Rect::new(920.0, 355.0, 60.0, 90.0), label: "STAIR B", to: 10, open: false },
+    ElevatorDef { id: "stair_a", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "STAIR A", to: 10, open: false, kind: ElevatorKind::Lift },
+    ElevatorDef { id: "stair_b", rect: Rect::new(920.0, 355.0, 60.0, 90.0), label: "STAIR B", to: 10, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_9_WALLS: [Rect; 8] = [
@@ -850,21 +1102,24 @@ static FLOOR_9_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_9_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 200.0, y: 160.0, kind: EnemyType::Idle },
-    SpawnDef { x: 420.0, y: 150.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 650.0, y: 160.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 820.0, y: 250.0, kind: EnemyType::Idle },
-    SpawnDef { x: 240.0, y: 420.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 430.0, y: 180.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 640.0, y: 430.0, kind: EnemyType::Idle },
-    SpawnDef { x: 240.0, y: 560.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 430.0, y: 560.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 640.0, y: 560.0, kind: EnemyType::Idle },
-    SpawnDef { x: 780.0, y: 480.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 820.0, y: 620.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(200.0, 160.0, EnemyType::Idle),
+    SpawnDef::hostile(420.0, 150.0, EnemyType::Wandering),
+    SpawnDef::hostile(650.0, 160.0, EnemyType::Patrolling),
+    SpawnDef::hostile(820.0, 250.0, EnemyType::Idle),
+    SpawnDef::hostile(240.0, 420.0, EnemyType::Wandering),
+    SpawnDef::hostile(430.0, 180.0, EnemyType::Patrolling),
+    SpawnDef::hostile(640.0, 430.0, EnemyType::Idle),
+    SpawnDef::hostile(240.0, 560.0, EnemyType::Wandering),
+    SpawnDef::hostile(430.0, 560.0, EnemyType::Patrolling),
+    SpawnDef::hostile(640.0, 560.0, EnemyType::Idle),
+    SpawnDef::hostile(780.0, 480.0, EnemyType::Wandering),
+    SpawnDef::hostile(820.0, 620.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_9_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_9_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_9: FloorDef = FloorDef {
@@ -876,14 +1131,16 @@ pub static FLOOR_9: FloorDef = FloorDef {
     objective: "Purge the wing. STAIR A and STAIR B both go down — whatever the floor tells you.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "WARD DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "WARD DOOR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_9_EXITS,
     walls: &FLOOR_9_WALLS,
     rooms: &FLOOR_9_ROOMS,
     zones: &FLOOR_9_ZONES,
     spawns: &FLOOR_9_SPAWNS,
     pickups: &FLOOR_9_PICKUPS,
+    props: &FLOOR_9_PROPS,
     scenario: &FLOOR_9_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_10.json: FLOOR 10 — SAFETY OVERRIDE ---------------------------------------------
@@ -917,7 +1174,7 @@ static FLOOR_10_SCENARIO: [StepDef; 4] = [
 ];
 
 static FLOOR_10_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(850.0, 720.0, 90.0, 60.0), label: "RESTRAINT LIFT", to: 11, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(850.0, 720.0, 90.0, 60.0), label: "RESTRAINT LIFT", to: 11, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_10_WALLS: [Rect; 8] = [
@@ -942,21 +1199,24 @@ static FLOOR_10_ZONES: [ZoneDef; 2] = [
 ];
 
 static FLOOR_10_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 300.0, y: 250.0, kind: EnemyType::Idle },
-    SpawnDef { x: 330.0, y: 380.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 180.0, y: 300.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 550.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 600.0, y: 480.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 720.0, y: 380.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 450.0, y: 150.0, kind: EnemyType::Idle },
-    SpawnDef { x: 700.0, y: 180.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 150.0, y: 560.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 400.0, y: 620.0, kind: EnemyType::Idle },
-    SpawnDef { x: 650.0, y: 640.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 830.0, y: 560.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(300.0, 250.0, EnemyType::Idle),
+    SpawnDef::hostile(330.0, 380.0, EnemyType::Wandering),
+    SpawnDef::hostile(180.0, 300.0, EnemyType::Patrolling),
+    SpawnDef::hostile(550.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(600.0, 480.0, EnemyType::Wandering),
+    SpawnDef::hostile(720.0, 380.0, EnemyType::Patrolling),
+    SpawnDef::hostile(450.0, 150.0, EnemyType::Idle),
+    SpawnDef::hostile(700.0, 180.0, EnemyType::Wandering),
+    SpawnDef::hostile(150.0, 560.0, EnemyType::Patrolling),
+    SpawnDef::hostile(400.0, 620.0, EnemyType::Idle),
+    SpawnDef::hostile(650.0, 640.0, EnemyType::Wandering),
+    SpawnDef::hostile(830.0, 560.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_10_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_10_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_10: FloorDef = FloorDef {
@@ -968,23 +1228,25 @@ pub static FLOOR_10: FloorDef = FloorDef {
     objective: "Purge the override. The RESTRAINT LIFT unlocks when the pockets are empty.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "REFUSAL DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "REFUSAL DOOR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_10_EXITS,
     walls: &FLOOR_10_WALLS,
     rooms: &FLOOR_10_ROOMS,
     zones: &FLOOR_10_ZONES,
     spawns: &FLOOR_10_SPAWNS,
     pickups: &FLOOR_10_PICKUPS,
+    props: &FLOOR_10_PROPS,
     scenario: &FLOOR_10_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_11.json: FLOOR 11 — WEIGHT SERVER -----------------------------------------------
 
 static FLOOR_11_WAVE_CORE_2: [SpawnDef; 4] = [
-    SpawnDef { x: 300.0, y: 240.0, kind: EnemyType::Idle },
-    SpawnDef { x: 700.0, y: 240.0, kind: EnemyType::Idle },
-    SpawnDef { x: 300.0, y: 560.0, kind: EnemyType::Idle },
-    SpawnDef { x: 700.0, y: 560.0, kind: EnemyType::Idle },
+    SpawnDef::hostile(300.0, 240.0, EnemyType::Idle),
+    SpawnDef::hostile(700.0, 240.0, EnemyType::Idle),
+    SpawnDef::hostile(300.0, 560.0, EnemyType::Idle),
+    SpawnDef::hostile(700.0, 560.0, EnemyType::Idle),
 ];
 
 static FLOOR_11_ACTIONS_INTRO: [Action; 2] = [
@@ -1024,7 +1286,7 @@ static FLOOR_11_SCENARIO: [StepDef; 5] = [
 ];
 
 static FLOOR_11_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "ascent", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "ASCENT LOCK", to: 12, open: false },
+    ElevatorDef { id: "ascent", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "ASCENT LOCK", to: 12, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_11_WALLS: [Rect; 17] = [
@@ -1064,23 +1326,43 @@ static FLOOR_11_ZONES: [ZoneDef; 3] = [
 ];
 
 static FLOOR_11_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 300.0, y: 240.0, kind: EnemyType::Idle },
-    SpawnDef { x: 500.0, y: 220.0, kind: EnemyType::Idle },
-    SpawnDef { x: 700.0, y: 240.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 300.0, y: 560.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 500.0, y: 580.0, kind: EnemyType::Idle },
-    SpawnDef { x: 700.0, y: 560.0, kind: EnemyType::Idle },
-    SpawnDef { x: 250.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 750.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 500.0, y: 400.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 100.0, y: 400.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 900.0, y: 400.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 850.0, y: 720.0, kind: EnemyType::Idle },
+    SpawnDef::hostile(300.0, 240.0, EnemyType::Idle),
+    SpawnDef::hostile(500.0, 220.0, EnemyType::Idle),
+    SpawnDef::hostile(700.0, 240.0, EnemyType::Patrolling),
+    SpawnDef::hostile(300.0, 560.0, EnemyType::Patrolling),
+    SpawnDef::hostile(500.0, 580.0, EnemyType::Idle),
+    SpawnDef::hostile(700.0, 560.0, EnemyType::Idle),
+    SpawnDef::hostile(250.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(750.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(500.0, 400.0, EnemyType::Wandering),
+    SpawnDef::hostile(100.0, 400.0, EnemyType::Wandering),
+    SpawnDef::hostile(900.0, 400.0, EnemyType::Patrolling),
+    SpawnDef::hostile(850.0, 720.0, EnemyType::Idle),
 ];
 
 static FLOOR_11_PICKUPS: [PickupDef; 2] = [
     PickupDef { x: 200.0, y: 720.0, weapon: WeaponType::Shotgun },
     PickupDef { x: 500.0, y: 350.0, weapon: WeaponType::MachineGun },
+];
+
+static FLOOR_11_PROPS: [PropPlacement; 17] = [
+    PropPlacement { kind: 0, x: 200.0, y: 212.0, rot: 0.0, size: 60.0 }, // rack_closed
+    PropPlacement { kind: 1, x: 400.0, y: 212.0, rot: 0.0, size: 60.0 }, // rack_open
+    PropPlacement { kind: 0, x: 600.0, y: 212.0, rot: 0.0, size: 60.0 }, // rack_closed
+    PropPlacement { kind: 2, x: 800.0, y: 212.0, rot: 0.0, size: 60.0 }, // rack_burnt
+    PropPlacement { kind: 0, x: 200.0, y: 590.0, rot: 180.0, size: 60.0 }, // rack_closed
+    PropPlacement { kind: 0, x: 400.0, y: 590.0, rot: 180.0, size: 60.0 }, // rack_closed
+    PropPlacement { kind: 1, x: 600.0, y: 590.0, rot: 180.0, size: 60.0 }, // rack_open
+    PropPlacement { kind: 0, x: 800.0, y: 590.0, rot: 180.0, size: 60.0 }, // rack_closed
+    PropPlacement { kind: 5, x: 200.0, y: 320.0, rot: 90.0, size: 60.0 }, // cable_junction
+    PropPlacement { kind: 12, x: 200.0, y: 480.0, rot: 90.0, size: 60.0 }, // coolant_tank
+    PropPlacement { kind: 9, x: 800.0, y: 320.0, rot: 270.0, size: 60.0 }, // crac_cooler
+    PropPlacement { kind: 14, x: 800.0, y: 480.0, rot: 270.0, size: 60.0 }, // ups_cabinet
+    PropPlacement { kind: 23, x: 500.0, y: 450.0, rot: 45.0, size: 60.0 }, // uplink_obelisk
+    PropPlacement { kind: 7, x: 150.0, y: 80.0, rot: 0.0, size: 70.0 }, // control_console
+    PropPlacement { kind: 22, x: 500.0, y: 110.0, rot: 0.0, size: 70.0 }, // hazard_pad
+    PropPlacement { kind: 19, x: 700.0, y: 720.0, rot: 30.0, size: 50.0 }, // supply_crate
+    PropPlacement { kind: 17, x: 320.0, y: 740.0, rot: 0.0, size: 50.0 }, // cable_coil
 ];
 
 pub static FLOOR_11: FloorDef = FloorDef {
@@ -1092,14 +1374,16 @@ pub static FLOOR_11: FloorDef = FloorDef {
     objective: "Reach the CORE SPINDLE and sever the DISTRIBUTION RING. The ASCENT LOCK unlocks when the ring is silent.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "INGEST LOCK", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "INGEST LOCK", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_11_EXITS,
     walls: &FLOOR_11_WALLS,
     rooms: &FLOOR_11_ROOMS,
     zones: &FLOOR_11_ZONES,
     spawns: &FLOOR_11_SPAWNS,
     pickups: &FLOOR_11_PICKUPS,
+    props: &FLOOR_11_PROPS,
     scenario: &FLOOR_11_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_12.json: FLOOR 12 — ROOT KERNEL -------------------------------------------------
@@ -1127,7 +1411,7 @@ static FLOOR_12_SCENARIO: [StepDef; 3] = [
 ];
 
 static FLOOR_12_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "lift", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "KERNEL LIFT", to: 13, open: false },
+    ElevatorDef { id: "lift", rect: Rect::new(850.0, 20.0, 90.0, 60.0), label: "KERNEL LIFT", to: 13, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_12_WALLS: [Rect; 8] = [
@@ -1150,21 +1434,24 @@ static FLOOR_12_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_12_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 200.0, y: 160.0, kind: EnemyType::Idle },
-    SpawnDef { x: 430.0, y: 150.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 640.0, y: 160.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 820.0, y: 220.0, kind: EnemyType::Idle },
-    SpawnDef { x: 160.0, y: 340.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 830.0, y: 360.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 200.0, y: 560.0, kind: EnemyType::Idle },
-    SpawnDef { x: 440.0, y: 600.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 560.0, y: 600.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 760.0, y: 560.0, kind: EnemyType::Idle },
-    SpawnDef { x: 620.0, y: 400.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 200.0, y: 460.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(200.0, 160.0, EnemyType::Idle),
+    SpawnDef::hostile(430.0, 150.0, EnemyType::Wandering),
+    SpawnDef::hostile(640.0, 160.0, EnemyType::Patrolling),
+    SpawnDef::hostile(820.0, 220.0, EnemyType::Idle),
+    SpawnDef::hostile(160.0, 340.0, EnemyType::Wandering),
+    SpawnDef::hostile(830.0, 360.0, EnemyType::Patrolling),
+    SpawnDef::hostile(200.0, 560.0, EnemyType::Idle),
+    SpawnDef::hostile(440.0, 600.0, EnemyType::Wandering),
+    SpawnDef::hostile(560.0, 600.0, EnemyType::Patrolling),
+    SpawnDef::hostile(760.0, 560.0, EnemyType::Idle),
+    SpawnDef::hostile(620.0, 400.0, EnemyType::Wandering),
+    SpawnDef::hostile(200.0, 460.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_12_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_12_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_12: FloorDef = FloorDef {
@@ -1176,14 +1463,16 @@ pub static FLOOR_12: FloorDef = FloorDef {
     objective: "Purge the kernel. The KERNEL LIFT unlocks when ring zero is silent.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "SYSCALL DOOR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 720.0, 90.0, 60.0), label: "SYSCALL DOOR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_12_EXITS,
     walls: &FLOOR_12_WALLS,
     rooms: &FLOOR_12_ROOMS,
     zones: &FLOOR_12_ZONES,
     spawns: &FLOOR_12_SPAWNS,
     pickups: &FLOOR_12_PICKUPS,
+    props: &FLOOR_12_PROPS,
     scenario: &FLOOR_12_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_13.json: FLOOR 13 — EXTRACTION ELEVATOR -----------------------------------------
@@ -1216,7 +1505,7 @@ static FLOOR_13_SCENARIO: [StepDef; 4] = [
 ];
 
 static FLOOR_13_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "extract", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "EXTRACTION ELEVATOR", to: 14, open: false },
+    ElevatorDef { id: "extract", rect: Rect::new(455.0, 20.0, 90.0, 60.0), label: "EXTRACTION ELEVATOR", to: 14, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_13_WALLS: [Rect; 13] = [
@@ -1244,21 +1533,24 @@ static FLOOR_13_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_13_SPAWNS: [SpawnDef; 12] = [
-    SpawnDef { x: 250.0, y: 230.0, kind: EnemyType::Idle },
-    SpawnDef { x: 500.0, y: 230.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 750.0, y: 230.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 230.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 230.0, y: 560.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 770.0, y: 400.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 770.0, y: 560.0, kind: EnemyType::Idle },
-    SpawnDef { x: 620.0, y: 420.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 400.0, y: 580.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 620.0, y: 580.0, kind: EnemyType::Idle },
-    SpawnDef { x: 500.0, y: 560.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 300.0, y: 560.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(250.0, 230.0, EnemyType::Idle),
+    SpawnDef::hostile(500.0, 230.0, EnemyType::Wandering),
+    SpawnDef::hostile(750.0, 230.0, EnemyType::Patrolling),
+    SpawnDef::hostile(230.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(230.0, 560.0, EnemyType::Wandering),
+    SpawnDef::hostile(770.0, 400.0, EnemyType::Patrolling),
+    SpawnDef::hostile(770.0, 560.0, EnemyType::Idle),
+    SpawnDef::hostile(620.0, 420.0, EnemyType::Wandering),
+    SpawnDef::hostile(400.0, 580.0, EnemyType::Patrolling),
+    SpawnDef::hostile(620.0, 580.0, EnemyType::Idle),
+    SpawnDef::hostile(500.0, 560.0, EnemyType::Wandering),
+    SpawnDef::hostile(300.0, 560.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_13_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_13_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_13: FloorDef = FloorDef {
@@ -1270,14 +1562,16 @@ pub static FLOOR_13: FloorDef = FloorDef {
     objective: "Purge the garrison. The EXTRACTION ELEVATOR unlocks when the fortress is silent.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "SALLY PORT", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(455.0, 720.0, 90.0, 60.0), label: "SALLY PORT", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_13_EXITS,
     walls: &FLOOR_13_WALLS,
     rooms: &FLOOR_13_ROOMS,
     zones: &FLOOR_13_ZONES,
     spawns: &FLOOR_13_SPAWNS,
     pickups: &FLOOR_13_PICKUPS,
+    props: &FLOOR_13_PROPS,
     scenario: &FLOOR_13_SCENARIO,
+    surface: Surface::Checker,
 };
 
 // ---- floor_13h.json: FLOOR 14 — INJECTION POINT ---------------------------------------------
@@ -1323,7 +1617,7 @@ static FLOOR_14_SCENARIO: [StepDef; 5] = [
 ];
 
 static FLOOR_14_EXITS: [ElevatorDef; 1] = [
-    ElevatorDef { id: "car", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "EXTRACTION CAR", to: 0, open: false },
+    ElevatorDef { id: "car", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "EXTRACTION CAR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
 ];
 
 static FLOOR_14_WALLS: [Rect; 10] = [
@@ -1348,15 +1642,18 @@ static FLOOR_14_ZONES: [ZoneDef; 1] = [
 ];
 
 static FLOOR_14_SPAWNS: [SpawnDef; 6] = [
-    SpawnDef { x: 180.0, y: 180.0, kind: EnemyType::Idle },
-    SpawnDef { x: 820.0, y: 180.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 150.0, y: 400.0, kind: EnemyType::Patrolling },
-    SpawnDef { x: 850.0, y: 400.0, kind: EnemyType::Idle },
-    SpawnDef { x: 180.0, y: 650.0, kind: EnemyType::Wandering },
-    SpawnDef { x: 820.0, y: 650.0, kind: EnemyType::Patrolling },
+    SpawnDef::hostile(180.0, 180.0, EnemyType::Idle),
+    SpawnDef::hostile(820.0, 180.0, EnemyType::Wandering),
+    SpawnDef::hostile(150.0, 400.0, EnemyType::Patrolling),
+    SpawnDef::hostile(850.0, 400.0, EnemyType::Idle),
+    SpawnDef::hostile(180.0, 650.0, EnemyType::Wandering),
+    SpawnDef::hostile(820.0, 650.0, EnemyType::Patrolling),
 ];
 
 static FLOOR_14_PICKUPS: [PickupDef; 0] = [
+];
+
+static FLOOR_14_PROPS: [PropPlacement; 0] = [
 ];
 
 pub static FLOOR_14: FloorDef = FloorDef {
@@ -1368,21 +1665,24 @@ pub static FLOOR_14: FloorDef = FloorDef {
     objective: "Crack the mask. The car moves again when the smile stops.",
     width: 1000.0,
     height: 800.0,
-    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "JAMMED CAR", to: 0, open: false },
+    entry: ElevatorDef { id: "entry", rect: Rect::new(60.0, 20.0, 90.0, 60.0), label: "JAMMED CAR", to: SURFACE_EXIT, open: false, kind: ElevatorKind::Lift },
     exits: &FLOOR_14_EXITS,
     walls: &FLOOR_14_WALLS,
     rooms: &FLOOR_14_ROOMS,
     zones: &FLOOR_14_ZONES,
     spawns: &FLOOR_14_SPAWNS,
     pickups: &FLOOR_14_PICKUPS,
+    props: &FLOOR_14_PROPS,
     scenario: &FLOOR_14_SCENARIO,
+    surface: Surface::Checker,
 };
 
-/// Number of floors (13 + the hidden 13½).
-pub const FLOOR_COUNT: usize = 14;
+/// Number of floors (the ground-level cold open, 13 floors, the hidden 13½).
+pub const FLOOR_COUNT: usize = 15;
 
-/// Every floor, in play order (index = floor id - 1).
+/// Every floor, in play order (sorted by id; index 0 = floor 0, the parking lot).
 pub static FLOORS: [&FloorDef; FLOOR_COUNT] = [
+    &FLOOR_0,
     &FLOOR_1,
     &FLOOR_2,
     &FLOOR_3,

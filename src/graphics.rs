@@ -38,6 +38,8 @@ mod op {
     pub const SCALE: f32 = 12.0; // sx sy
     pub const SHOGGOTH: f32 = 13.0; // x y sizePx heading reveal time
     pub const POSTFX: f32 = 14.0; // kind t r g b  (full-screen post pass over the whole frame)
+    pub const PIX_BEGIN: f32 = 15.0; // px w h  (open a pixel-art group: rasterize at art resolution)
+    pub const PIX_END: f32 = 16.0; // x y  (close it: nearest-upscale the group at (x, y))
 }
 
 /// Separator between entries in the per-frame text arena. renderer.js splits
@@ -321,16 +323,83 @@ impl Graphics {
     /// Request a full-screen post-processing pass over THIS frame. When the
     /// command is present anywhere in a frame's stream, renderer.js renders
     /// the whole frame into an offscreen framebuffer and draws it through the
-    /// post shader `kind` with strength `t` (0..1) toward colour `(r, g, b)`:
+    /// post shader `kind` with strength `t` (0..1) toward colour `(r, g, b)`.
+    /// The kinds are a menu of Hotline-Miami-flavoured looks (the mirror of
+    /// this table lives in renderer.js — keep in sync):
     ///   kind 0 = BLUR-OUT: a growing multi-tap blur + dissolve toward the
     ///            colour, with synthwave scanlines and noise grain (t = 0
-    ///            untouched, 1 = fully dissolved into the colour)
+    ///            untouched, 1 = fully dissolved into the colour; the ending)
     ///   kind 1 = SYNTHWAVE CRT: scanlines, slight chromatic split, vignette
-    ///            and grain over the frame; t = intensity (the colour tints
-    ///            the vignette). Used under the credits.
+    ///            and grain; the colour tints the vignette (the credits)
+    ///   kind 2 = VHS TAPE: rolling tracking band, per-scanline jitter,
+    ///            chroma bleed, washed colour, dropout streaks
+    ///   kind 3 = DRUNK SWAY: slow rotation/zoom breathing, wavy warp,
+    ///            orbiting double-vision ghost, hue drift
+    ///   kind 4 = CRT TUBE: barrel distortion over a black bezel, RGB
+    ///            aperture grille, hard scanlines, mains flicker
+    ///   kind 5 = ACID TRIP: radial hue cycling, oversaturation, mild
+    ///            posterize, liquid warp
+    ///   kind 6 = DATAMOSH: horizontal slice/block displacement glitch,
+    ///            channel swaps, digital noise blocks
+    ///   kind 7 = NEON BLOOM: bright-pass glow, shadows lifted toward the
+    ///            colour
+    ///   kind 8 = PIXEL MOSAIC: chunky pixelation + dithered posterize
+    ///   kind 9 = TUNNEL RUSH: radial zoom blur toward the centre, hot core,
+    ///            edge vignette
     /// Only the last POSTFX of a frame applies. Any other kind is a no-op.
     pub fn postfx(&self, kind: u32, t: f32, color: Color) {
         self.push(&[op::POSTFX, kind as f32, t, color.r, color.g, color.b]);
+    }
+
+    /// Open a PIXEL-ART GROUP. Everything drawn until the matching
+    /// [`pixel_end`](Self::pixel_end) is rasterized at ART RESOLUTION —
+    /// renderer.js redirects the batch into a scratch texture of
+    /// `ceil(w / px) x ceil(h / px)` texels and installs a transform so that
+    /// the group's local coordinates `0..w, 0..h` land on those texels (one
+    /// art pixel = `px` local units) — with no anti-aliasing (the scratch
+    /// target has no MSAA, and the batch shader draws hard coverage). Thin
+    /// details survive: inside a group, line / rect-outline thickness is
+    /// clamped to >= 1 texel and circle radius to >= 0.5 texel.
+    ///
+    /// The principle: do NOT draw hi-res and average / point-sample down —
+    /// draw AT the art resolution and upscale NEAREST. Every art pixel is then
+    /// a full pixel, edges are consistent (a shape's edge is either in a texel
+    /// or not, never a soft blend), and the pixel grid is anchored to the
+    /// object rather than to the screen, so an animated / moving prop keeps
+    /// the same crisp look wherever it lands.
+    ///
+    /// The transform stack is saved on entry and restored by `pixel_end`
+    /// (save/restore issued inside the group are balanced away). Groups NEST
+    /// (up to 4 deep): an inner group is rasterized into its own scratch
+    /// target and its `pixel_end` composites the result into the enclosing
+    /// group's texels (then that group's own `pixel_end` upscales the lot).
+    /// Robots / the shoggoth may be drawn inside a group (their tiles are
+    /// composited into the group texels). Groups larger than the renderer's
+    /// scratch cap (1024 texels per side, e.g. a full canvas at `px = 1`) or
+    /// deeper than the nesting cap fall back to pass-through drawing — no
+    /// pixelation, and the matching `pixel_end` is a no-op (so the content
+    /// lands at the current origin, not at the end's `(x, y)`).
+    ///
+    /// `px` is in the CURRENT local units at the time of the call (an art
+    /// pixel is `px` local units wide), which is what anchors the grid to
+    /// the object: open the group inside a scaled / rotated transform and the
+    /// art pixels scale / rotate with it. See `crate::props::draw_prop_ex`
+    /// for the two idioms — pixelate BEFORE a rotation (open the group under
+    /// the rotation: the finished pixel image is rotated as a whole) or AFTER
+    /// it (open the group in the parent frame, rotate inside it: the content
+    /// is re-rasterized on the parent's grid every frame).
+    pub fn pixel_begin(&self, px: f32, w: f32, h: f32) {
+        self.push(&[op::PIX_BEGIN, px, w, h]);
+    }
+
+    /// Close the pixel-art group opened by [`pixel_begin`](Self::pixel_begin):
+    /// the group's texture is drawn as a `(w, h)` quad with its origin at
+    /// `(x, y)` in the CURRENT (outer) transform, NEAREST-filtered, with the
+    /// origin snapped to whole pixels of the target it lands in (device
+    /// pixels, or the enclosing group's texels) so the art pixels stay
+    /// stable frame to frame.
+    pub fn pixel_end(&self, x: f32, y: f32) {
+        self.push(&[op::PIX_END, x, y]);
     }
 
     /// Draw a small 2D-primitive shoggoth icon: a writhing dark mass wearing a

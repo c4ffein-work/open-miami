@@ -27,7 +27,7 @@ test.describe('Open Miami - Floors & scenarios', () => {
     await purgeRogues(page);
     await page.screenshot({ path: 'test-results/scenario-01-cleared.png' });
 
-    // Floor 1: entry SE (895,750) -> exit NW (105,50).
+    // Floor 1: entry bottom centre (500,750) -> through the turnstiles -> exit NW (105,50).
     await walkFloor1ToServiceLift(page);
     await page.waitForTimeout(1200); // dwell (0.6s) + the completion card starts
     await page.screenshot({ path: 'test-results/scenario-02-extracting.png' });

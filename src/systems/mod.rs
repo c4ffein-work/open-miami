@@ -6,6 +6,7 @@ pub mod elevator;
 #[cfg(target_arch = "wasm32")]
 pub mod input;
 pub mod movement;
+pub mod passive;
 pub mod pickup;
 pub mod projectile;
 pub mod stun;

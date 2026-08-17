@@ -10,19 +10,24 @@
 //   * the player never spawns inside a wall,
 //   * no enemy spawns inside a wall,
 //   * no enemy spawns on top of the player,
-//   * every exit leads to an existing floor (or the surface),
+//   * every exit leads to an existing floor (or `SURFACE_EXIT`, the surface),
 //   * every zone / exit / step id a scenario references exists.
 use crate::components::EnemyType;
 use crate::levels_data::{FLOORS, FLOOR_COUNT};
 use crate::math::Vec2;
 use crate::scenario::FloorDef;
 
-/// Number of selectable levels (13 floors plus the hidden boss floor).
+/// Number of selectable levels (the ground-level cold open, 13 floors, and
+/// the hidden boss floor).
 pub const LEVEL_COUNT: usize = FLOOR_COUNT;
 
 /// The hidden final floor (0-based index) where the shoggoth boss waits. The
-/// extraction elevator "jams" after floor 13 and drops the player here.
-pub const BOSS_LEVEL: usize = 13;
+/// extraction elevator "jams" after floor 13 and drops the player here. It
+/// is the last floor in play order.
+pub const BOSS_LEVEL: usize = FLOOR_COUNT - 1;
+
+/// Floor id of the ground-level cold open (the parking lot / main gate).
+pub const GROUND_FLOOR_ID: usize = 0;
 
 /// A wall rectangle: `(x, y, width, height)` with the origin at the top-left.
 pub type WallDef = (f32, f32, f32, f32);
@@ -65,12 +70,16 @@ pub fn player_spawn(level: usize) -> Vec2 {
     floor_def(level).player_spawn()
 }
 
-/// Display name of a level ("FLOOR 13½" for the boss floor).
+/// Display name of a level ("FLOOR 13½" for the boss floor, "FLOOR 00" for
+/// the ground-level cold open).
 pub fn floor_title(level: usize) -> String {
+    let id = floor_def(level).id;
     if level == BOSS_LEVEL {
         "FLOOR 13\u{00BD}".to_string()
+    } else if id == GROUND_FLOOR_ID {
+        "FLOOR 00".to_string()
     } else {
-        format!("FLOOR {}", level + 1)
+        format!("FLOOR {id}")
     }
 }
 
@@ -78,7 +87,7 @@ pub fn floor_title(level: usize) -> String {
 mod tests {
     use super::*;
     use crate::collision::circle_rect_collision;
-    use crate::scenario::{Action, Trigger};
+    use crate::scenario::{Action, Trigger, SURFACE_EXIT};
 
     const PLAYER_RADIUS: f32 = 15.0;
     const ENEMY_RADIUS: f32 = 12.0;
@@ -93,12 +102,53 @@ mod tests {
 
     #[test]
     fn test_floor_ids_are_play_order() {
+        // Floor 0 (the parking lot) first, then 1..13, then 13½ (id 14).
         for (i, f) in FLOORS.iter().enumerate() {
-            assert_eq!(f.id, i + 1, "floor at index {i} has id {}", f.id);
+            assert_eq!(f.id, i, "floor at index {i} has id {}", f.id);
         }
+        assert_eq!(FLOORS[0].id, GROUND_FLOOR_ID);
         assert_eq!(FLOORS[BOSS_LEVEL].id, 14);
+        assert_eq!(level_index_for_floor_id(0), Some(0));
         assert_eq!(level_index_for_floor_id(14), Some(BOSS_LEVEL));
         assert_eq!(level_index_for_floor_id(99), None);
+        assert_eq!(level_index_for_floor_id(SURFACE_EXIT), None);
+    }
+
+    #[test]
+    fn test_floor_titles() {
+        assert_eq!(floor_title(0), "FLOOR 00");
+        assert_eq!(floor_title(level_index_for_floor_id(1).unwrap()), "FLOOR 1");
+        assert_eq!(
+            floor_title(level_index_for_floor_id(13).unwrap()),
+            "FLOOR 13"
+        );
+        assert_eq!(floor_title(BOSS_LEVEL), "FLOOR 13\u{00BD}");
+    }
+
+    #[test]
+    fn test_ground_floor_is_the_cold_open() {
+        // Asphalt lot, a gate to arrive through, a door into the lobby, and a
+        // passive crowd strolling to a zone near the doors.
+        use crate::scenario::{ElevatorKind, Surface};
+        let f = floor_def(0);
+        assert_eq!(f.surface, Surface::Asphalt);
+        assert_eq!(f.entry.kind, ElevatorKind::Gate);
+        assert!(f
+            .exits
+            .iter()
+            .all(|e| e.kind == ElevatorKind::Door && e.to == 1));
+        assert!(f.spawns.iter().all(|s| s.passive));
+        // Every stroll target is a real zone, and most of the crowd strolls.
+        assert!(f
+            .spawns
+            .iter()
+            .filter_map(|s| s.walk_to)
+            .all(|z| f.zone(z).is_some()));
+        assert!(f.spawns.iter().filter(|s| s.walk_to.is_some()).count() >= 2);
+        assert!(f.scenario.iter().any(|s| s
+            .actions
+            .iter()
+            .any(|a| matches!(a, Action::Hold(h) if h.text.is_some()))));
     }
 
     #[test]
@@ -199,7 +249,7 @@ mod tests {
         let mut problems = Vec::new();
         for (i, f) in FLOORS.iter().enumerate() {
             for e in f.exits {
-                if e.to != 0 && level_index_for_floor_id(e.to).is_none() {
+                if e.to != SURFACE_EXIT && level_index_for_floor_id(e.to).is_none() {
                     problems.push(format!(
                         "floor {i}: exit {} -> unknown floor {}",
                         e.id, e.to
@@ -263,10 +313,22 @@ mod tests {
 
     #[test]
     fn test_floor_13_jams_into_the_boss_floor() {
-        let f13 = floor_def(12);
+        let f13 = floor_def(level_index_for_floor_id(13).unwrap());
         assert_eq!(f13.id, 13);
         assert!(f13.exits.iter().all(|e| e.to == 14));
-        // The boss floor's exit is the surface.
-        assert!(floor_def(BOSS_LEVEL).exits.iter().all(|e| e.to == 0));
+        // The boss floor's exit is the surface (`"to": "surface"`), and it is
+        // the only one.
+        assert!(floor_def(BOSS_LEVEL)
+            .exits
+            .iter()
+            .all(|e| e.to == SURFACE_EXIT));
+        for (i, f) in FLOORS.iter().enumerate() {
+            if i != BOSS_LEVEL {
+                assert!(
+                    f.exits.iter().all(|e| e.to != SURFACE_EXIT),
+                    "floor {i} exits to the surface"
+                );
+            }
+        }
     }
 }

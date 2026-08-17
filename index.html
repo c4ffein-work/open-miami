@@ -60,9 +60,31 @@
             box-shadow: -3px 0 16px rgba(0,0,0,0.6);
         }
         #viz-panel.show { display: block; }
-        /* full-pane mode: the LEVELS tab is the level editor, filling the space
-           below the tab bar (the sprite inspector keeps the right-half layout). */
+        /* full-pane mode: the LEVELS tab's SCENARIO (web) editor fills the pane
+           below the native editor's header rows (src/editor_ui.rs MAP_TOP = 150),
+           so the header — incl. the button that closes it — stays reachable (the
+           sprite inspector keeps the right-half layout). */
         #viz-panel.full { left: 0; width: 100%; height: calc(100% - 74px); box-shadow: none; }
+        #viz-panel.full.levels { top: 150px; height: calc(100% - 150px); }
+        /* ?viz PROPS page: result of a SAVE (PUT /props/props.json), shown for a
+           few seconds under the header row (driven from wasm via vizSaveProps). */
+        #viz-toast {
+            position: fixed;
+            top: 122px;
+            right: 40px;
+            max-width: 46%;
+            padding: 8px 14px;
+            font: 15px 'GameFont', monospace;
+            background: #14101c;
+            border: 1px solid #735a80;
+            color: #fff;
+            display: none;
+            z-index: 11;
+            white-space: pre-wrap;
+        }
+        #viz-toast.show { display: block; }
+        #viz-toast.ok { border-color: #3ce08c; color: #9dffc9; }
+        #viz-toast.bad { border-color: #ff2e5a; color: #ff9db3; }
     </style>
 </head>
 <body>
@@ -71,6 +93,7 @@
         <canvas id="glcanvas" tabindex='1'></canvas>
     </div>
     <iframe id="viz-panel" title="asset inspector"></iframe>
+    <div id="viz-toast"></div>
     <script>
         // Bridge the wasm ?viz gallery to the inspector iframe. Defined up-front
         // (plain script) so window.vizInspect exists before the game loop calls it.
@@ -83,10 +106,56 @@
             else src = './tools/inspector.html?embed=1&kind=robot&color=' + encodeURIComponent(kind);
             if (f.getAttribute('data-src') !== src) { f.src = src; f.setAttribute('data-src', src); }
             f.classList.toggle('full', kind === 'levels');
+            f.classList.toggle('levels', kind === 'levels');
             f.classList.add('show');
         };
         window.vizInspectHide = function () {
             document.getElementById('viz-panel').classList.remove('show');
+        };
+        // ?viz SAVE bridges: PUT a JSON document built by wasm through serve.py's
+        // editor API. Same token flow as tools/levels-editor.js: the
+        // X-Editor-Token header from localStorage 'editorToken', prompted for
+        // once (and again if the server rejects it). The result is shown in the
+        // toast, with the generator to re-run afterwards.
+        function vizPutJson(path, json, next) {
+            var toast = document.getElementById('viz-toast');
+            var show = function (text, cls) {
+                toast.textContent = text;
+                toast.className = 'show ' + cls;
+                clearTimeout(toast._hide);
+                toast._hide = setTimeout(function () { toast.className = ''; }, 8000);
+            };
+            var put = function () {
+                return fetch(path, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', 'X-Editor-Token': localStorage.getItem('editorToken') || '' },
+                    body: json,
+                });
+            };
+            show('SAVING ' + path.replace(/^\//, '') + '…', '');
+            put().then(function (r) {
+                if (r.status !== 401) return r;
+                var tok = window.prompt('Editor write token (printed by serve.py at startup):', localStorage.getItem('editorToken') || '');
+                if (tok == null) throw new Error('no token');
+                localStorage.setItem('editorToken', tok.trim());
+                return put();
+            }).then(function (r) {
+                return r.json().catch(function () { return {}; }).then(function (j) {
+                    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+                    show('SAVED ' + j.path + ' (' + j.bytes + ' bytes) — now run: ' + next, 'ok');
+                });
+            }).catch(function (e) {
+                show('SAVE FAILED: ' + e.message + ' — serve via `python3 serve.py`, token from .editor-token', 'bad');
+            });
+        }
+        // ?viz PROPS page SAVE: props/props.json (src/props.rs settings_json);
+        // the generated src/props_data.rs is refreshed by `make gen-props`.
+        window.vizSaveProps = function (json) { vizPutJson('/props/props.json', json, 'make gen-props'); };
+        // ?viz LEVELS tab (native editor, src/editor_ui.rs) SAVE: one floor,
+        // levels/<file> (src/editor.rs to_json); then `make gen-levels`.
+        window.vizSaveLevel = function (file, json) {
+            if (!/^floor_[0-9a-z]+\.json$/.test(file)) { throw new Error('bad level file name ' + file); }
+            vizPutJson('/levels/' + file, json, 'make gen-levels');
         };
     </script>
     <script type="module">

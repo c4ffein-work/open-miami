@@ -45,7 +45,7 @@ test.describe('Open Miami - Level Completion', () => {
     await purgeRogues(page);
     await page.screenshot({ path: 'test-results/02-rogues-purged.png' });
 
-    // Move north a bit (entry lift is SE at (895,750)): the player's world
+    // Move north a bit (the MAIN DOORS entry is bottom centre (500,750)): the player's world
     // position changes and, as the camera follows the player, so does the frame.
     const posBefore = await playerPos(page);
     const before = await canvas.screenshot();
@@ -61,7 +61,7 @@ test.describe('Open Miami - Level Completion', () => {
     expect(Number(hudValue(texts, 'Health:'))).toBeGreaterThan(0);
     expect(hudValue(texts, 'Rogues:')).toBe('0');
 
-    // West along the bottom, then north into the open SERVICE LIFT (NW).
+    // Through the turnstiles, west along the hall, then north into the open SERVICE LIFT (NW).
     await walkFloor1ToServiceLift(page);
     await page.waitForTimeout(1200); // dwell (0.6s) + the extraction card starts
     await page.screenshot({ path: 'test-results/04-extracting.png' });

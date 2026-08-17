@@ -1,5 +1,6 @@
 {
   "floors": [
+    {"id": 0, "file": "floor_00.json", "name": "GATE / PARKING"},
     {"id": 1, "file": "floor_01.json", "name": "RECEPTION CACHE"},
     {"id": 2, "file": "floor_02.json", "name": "COLD STORAGE"},
     {"id": 3, "file": "floor_03.json", "name": "INFERENCE PIT"},

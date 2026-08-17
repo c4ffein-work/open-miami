@@ -70,6 +70,18 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Run clippy (wasm32 target — audio/graphics/input/render/camera/lib are wasm-only)
+        run: cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Check levels data is valid and up to date
+        run: python3 tools/gen_levels.py --check
+
+      - name: Check props settings are valid and up to date
+        run: python3 tools/gen_props.py --check
+
   fmt:
     name: Rustfmt (Code Formatting)
     runs-on: ubuntu-latest

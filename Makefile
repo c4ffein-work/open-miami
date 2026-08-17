@@ -1,4 +1,4 @@
-.PHONY: verify check-test check-clippy check-fmt check-build check-wasm-build check-e2e check-coverage build-wasm gen-levels check-levels help
+.PHONY: verify check-test check-clippy check-fmt check-build check-wasm-build check-e2e check-coverage build-wasm gen-levels check-levels gen-props check-props help
 
 # Colors for output
 RED=\033[0;31m
@@ -20,9 +20,11 @@ help:
 	@echo "  make check-coverage  - Generate code coverage report (requires cargo-tarpaulin)"
 	@echo "  make gen-levels      - Regenerate src/levels_data.rs from levels/*.json"
 	@echo "  make check-levels    - Validate levels/*.json and check levels_data.rs is up to date"
+	@echo "  make gen-props       - Regenerate src/props_data.rs from props/props.json"
+	@echo "  make check-props     - Validate props/props.json and check props_data.rs is up to date"
 
 # Run all verification checks (E2E tests excluded by default due to dependency constraints)
-verify: check-fmt check-clippy check-test check-build check-wasm-build check-levels
+verify: check-fmt check-clippy check-test check-build check-wasm-build check-levels check-props
 	@echo "$(GREEN)✓ All core checks passed!$(NC)"
 	@echo "$(YELLOW)Note: E2E tests skipped (run 'make check-e2e' separately if WASM dependencies are available)$(NC)"
 
@@ -119,6 +121,20 @@ check-levels:
 	@echo "$(YELLOW)Validating levels/*.json...$(NC)"
 	python3 tools/gen_levels.py --check
 	@echo "$(GREEN)✓ Levels valid and up to date$(NC)"
+
+# Props - compile the prop library's saved pixel-art settings
+# (props/props.json, written by the ?viz PROPS page SAVE) into static Rust
+# data. Python 3 stdlib only.
+gen-props:
+	@echo "$(YELLOW)Generating src/props_data.rs from props/props.json...$(NC)"
+	python3 tools/gen_props.py
+	@echo "$(GREEN)✓ Props generated$(NC)"
+
+# Props check - validate the JSON and make sure the generated file is current
+check-props:
+	@echo "$(YELLOW)Validating props/props.json...$(NC)"
+	python3 tools/gen_props.py --check
+	@echo "$(GREEN)✓ Props valid and up to date$(NC)"
 
 # Code Coverage - requires cargo-tarpaulin (optional check)
 check-coverage:

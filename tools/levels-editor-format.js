@@ -27,33 +27,44 @@
     DRIFTER: "feral, static", SWARM: "corruptor cadence", CORRUPTOR: "bleeding through",
     UPLINK: "thread home, restored",
   };
-  const SPAWN_TYPES = ["idle", "wandering", "patrolling"];
-  const SPAWN_LETTER = { idle: "S", wandering: "D", patrolling: "H" };
-  const SPAWN_COLORS = { idle: "#ff2e4d", wandering: "#a86bff", patrolling: "#ff3ac6" };
+  const SPAWN_TYPES = ["idle", "wandering", "patrolling", "passive"];
+  const SPAWN_LETTER = { idle: "S", wandering: "D", patrolling: "H", passive: "P" };
+  const SPAWN_COLORS = { idle: "#ff2e4d", wandering: "#a86bff", patrolling: "#ff3ac6", passive: "#8fd3ff" };
+  /* passive spawns: `look` = palette (a hostile type), optional walk_to zone / face deg / group */
+  const PASSIVE_LOOKS = ["idle", "wandering", "patrolling"];
+  const PORTAL_KINDS = ["lift", "door", "gate"];
+  const SURFACES = ["checker", "asphalt", "marble", "concrete", "grating"];
+  /* exit.to value that ends the run (was 0 before floor 0 became the parking lot) */
+  const SURFACE_TO = "surface";
   const WEAPONS = ["pistol", "shotgun", "machinegun", "melee"];
   const TRIGGER_KINDS = {
     start: [], enter_zone: ["zone"], kills: ["count"], all_dead: [],
     timer: ["seconds", "after"], exit_open: ["exit"], step_done: ["step"],
     boss_dead: [], extracted: [],
   };
-  const ACTION_KINDS = ["say", "spawn", "open_exit", "close_exit", "objective", "sfx"];
+  const ACTION_KINDS = ["say", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at"];
   const SFX_NAMES = ["elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"];
   const MAX_FLOOR = 14;
 
   const ORDER = {
-    floor: ["id", "name", "theme", "accent", "flavor", "objective", "size", "entry", "exits",
-      "walls", "rooms", "zones", "spawns", "pickups", "scenario"],
+    floor: ["id", "name", "theme", "accent", "flavor", "objective", "size", "surface", "entry", "exits",
+      "walls", "rooms", "zones", "spawns", "pickups", "props", "scenario"],
     size: ["w", "h"],
-    entry: ["x", "y", "w", "h", "label"],
-    exit: ["id", "x", "y", "w", "h", "label", "to", "open"],
+    entry: ["x", "y", "w", "h", "label", "kind"],
+    exit: ["id", "x", "y", "w", "h", "label", "to", "open", "kind"],
     wall: ["x", "y", "w", "h"],
     room: ["id", "label", "x", "y", "w", "h"],
     zone: ["id", "x", "y", "w", "h"],
-    spawn: ["x", "y", "type"],
+    spawn: ["x", "y", "type", "walk_to", "face", "look", "group"],
     pickup: ["x", "y", "weapon"],
+    /* placed props (decoration; edited by the NATIVE editor in the ?viz LEVELS
+       tab, not here): kept verbatim, only key-ordered */
+    prop: ["kind", "x", "y", "rot", "size"],
     step: ["id", "trigger", "actions"],
     trigger: ["kind", "zone", "count", "seconds", "after", "exit", "step"],
     say: ["who", "text", "delay"],
+    hold: ["seconds", "until_comms_idle", "text"],
+    look_at: ["x", "y", "seconds"],
   };
 
   /* ---------- helpers ---------- */
@@ -109,8 +120,17 @@
     return extras(t, out, ORDER.trigger);
   }
   function normSpawn(s) {
-    return extras(s, { x: num(s && s.x, 0), y: num(s && s.y, 0), type: SPAWN_TYPES.includes(s && s.type) ? s.type : "idle" }, ORDER.spawn);
+    const out = { x: num(s && s.x, 0), y: num(s && s.y, 0), type: SPAWN_TYPES.includes(s && s.type) ? s.type : "idle" };
+    if (out.type === "passive") {
+      if (s.walk_to != null && s.walk_to !== "") out.walk_to = str(s.walk_to, "");
+      if (s.face != null && s.face !== "" && Number.isFinite(Number(s.face))) out.face = num(s.face, 0);
+      if (PASSIVE_LOOKS.includes(s.look)) out.look = s.look;
+    }
+    if (s && s.group != null && s.group !== "") out.group = str(s.group, "");
+    return extras(s, out, ORDER.spawn);
   }
+  /* exit.to: a floor id, or "surface" (end of run) */
+  function normTo(v, d) { return v === SURFACE_TO ? SURFACE_TO : int(v, d); }
   function normAction(a) {
     if (!isObj(a)) return null;
     if ("say" in a) {
@@ -124,6 +144,26 @@
     if ("close_exit" in a) return { close_exit: str(a.close_exit, "") };
     if ("objective" in a) return { objective: str(a.objective, "") };
     if ("sfx" in a) return { sfx: str(a.sfx, "") };
+    if ("alert" in a) {
+      const t = a.alert;
+      if (t === "all") return { alert: "all" };
+      if (isObj(t) && typeof t.zone === "string") return { alert: { zone: t.zone } };
+      if (isObj(t) && typeof t.group === "string") return { alert: { group: t.group } };
+      return { alert: "all" };
+    }
+    if ("hold" in a) {
+      const h = isObj(a.hold) ? a.hold : {};
+      const hold = {};
+      if (h.seconds != null && h.seconds !== "" && Number.isFinite(Number(h.seconds))) hold.seconds = num(h.seconds, 1);
+      if (h.until_comms_idle) hold.until_comms_idle = true;
+      if (hold.seconds == null && !hold.until_comms_idle) hold.seconds = 1;
+      if (h.text != null && h.text !== "") hold.text = str(h.text, "");
+      return { hold };
+    }
+    if ("look_at" in a) {
+      const l = isObj(a.look_at) ? a.look_at : {};
+      return { look_at: { x: num(l.x, 0), y: num(l.y, 0), seconds: num(l.seconds, 2) } };
+    }
     return null;
   }
   function normStep(s) {
@@ -145,12 +185,14 @@
       flavor: str(raw.flavor, ""),
       objective: str(raw.objective, ""),
       size: { w: num(raw.size && raw.size.w, 1000), h: num(raw.size && raw.size.h, 800) },
-      entry: extras(raw.entry, Object.assign(rect(raw.entry, b.entry), { label: str(raw.entry && raw.entry.label, "ENTRY") }), ORDER.entry),
+      entry: extras(raw.entry, Object.assign(rect(raw.entry, b.entry), { label: str(raw.entry && raw.entry.label, "ENTRY") },
+        raw.entry && PORTAL_KINDS.includes(raw.entry.kind) && raw.entry.kind !== "lift" ? { kind: raw.entry.kind } : {}), ORDER.entry),
       exits: (Array.isArray(raw.exits) ? raw.exits : []).map((e, i) => {
         const o = Object.assign({ id: str(e && e.id, "exit" + (i + 1)) }, rect(e, { w: 90, h: 60 }));
         o.label = str(e && e.label, "EXIT");
-        o.to = int(e && e.to, int(raw.id, 1) + 1);
+        o.to = normTo(e && e.to, int(raw.id, 1) + 1);
         o.open = !!(e && e.open);
+        if (e && PORTAL_KINDS.includes(e.kind) && e.kind !== "lift") o.kind = e.kind;
         return extras(e, o, ORDER.exit);
       }),
       walls: (Array.isArray(raw.walls) ? raw.walls : []).map((w) => extras(w, rect(w), ORDER.wall)),
@@ -160,6 +202,10 @@
       pickups: (Array.isArray(raw.pickups) ? raw.pickups : []).map((p) => extras(p, { x: num(p && p.x, 0), y: num(p && p.y, 0), weapon: WEAPONS.includes(p && p.weapon) ? p.weapon : "pistol" }, ORDER.pickup)),
       scenario: (Array.isArray(raw.scenario) ? raw.scenario : []).map(normStep),
     };
+    if (SURFACES.includes(raw.surface) && raw.surface !== "checker") f.surface = raw.surface;
+    // placed props: this editor does not edit them (the native ?viz LEVELS
+    // editor does) — pass the array through untouched
+    if (Array.isArray(raw.props)) f.props = raw.props;
     // keep unknown top-level keys so we don't destroy the other side's extras
     for (const k of Object.keys(raw)) if (!ORDER.floor.includes(k)) f[k] = raw[k];
     return f;
@@ -177,6 +223,8 @@
     if (!isObj(a)) return a;
     if ("say" in a && isObj(a.say)) return { say: ordered(a.say, ORDER.say) };
     if ("spawn" in a && Array.isArray(a.spawn)) return { spawn: a.spawn.map((s) => ordered(s, ORDER.spawn)) };
+    if ("hold" in a && isObj(a.hold)) return { hold: ordered(a.hold, ORDER.hold) };
+    if ("look_at" in a && isObj(a.look_at)) return { look_at: ordered(a.look_at, ORDER.look_at) };
     return a;
   }
   function canonical(floor) {
@@ -189,6 +237,7 @@
     if (Array.isArray(f.zones)) f.zones = f.zones.map((z) => ordered(z, ORDER.zone));
     if (Array.isArray(f.spawns)) f.spawns = f.spawns.map((s) => ordered(s, ORDER.spawn));
     if (Array.isArray(f.pickups)) f.pickups = f.pickups.map((p) => ordered(p, ORDER.pickup));
+    if (Array.isArray(f.props)) f.props = f.props.map((p) => (isObj(p) ? ordered(p, ORDER.prop) : p));
     if (Array.isArray(f.scenario)) f.scenario = f.scenario.map((s) => {
       const st = ordered(s, ORDER.step);
       if (isObj(st.trigger)) st.trigger = ordered(st.trigger, ORDER.trigger);
@@ -248,7 +297,9 @@
     const err = (path, msg) => errors.push({ path, msg });
     const warn = (path, msg) => warnings.push({ path, msg });
     const f = floor;
-    if (!Number.isInteger(f.id) || f.id < 1 || f.id > MAX_FLOOR) err("id", "id must be an integer 1.." + MAX_FLOOR);
+    if (!Number.isInteger(f.id) || f.id < 0 || f.id > MAX_FLOOR) err("id", "id must be an integer 0.." + MAX_FLOOR + " (0 = the ground-level cold open)");
+    if (f.surface != null && !SURFACES.includes(f.surface)) err("surface", "surface must be one of " + SURFACES.join("|"));
+    if (f.entry && f.entry.kind != null && !PORTAL_KINDS.includes(f.entry.kind)) err("entry.kind", "entry kind must be one of " + PORTAL_KINDS.join("|"));
     if (!f.name || !String(f.name).trim()) err("name", "name is required");
     if (!(f.size && f.size.w > 0 && f.size.h > 0)) err("size", "size.w / size.h must be > 0");
     if (!/^#[0-9a-fA-F]{6}$/.test(f.accent || "")) warn("accent", "accent should be a #rrggbb colour");
@@ -279,15 +330,25 @@
     (f.exits || []).forEach((e, i) => {
       const p = "exits[" + i + "]";
       if (!(e.w > 0 && e.h > 0)) err(p, "exit must have positive size");
-      if (!Number.isInteger(e.to) || e.to < 0 || e.to > MAX_FLOOR) err(p + ".to", "exit \"" + e.id + "\": `to` must be a floor id 1.." + MAX_FLOOR + " (0 = end of run)");
-      else if (e.to > 0) {
+      if (e.kind != null && !PORTAL_KINDS.includes(e.kind)) err(p + ".kind", "exit \"" + e.id + "\": kind must be one of " + PORTAL_KINDS.join("|"));
+      if (e.to === SURFACE_TO) { /* end of the run */ }
+      else if (!Number.isInteger(e.to) || e.to < 0 || e.to > MAX_FLOOR) err(p + ".to", "exit \"" + e.id + "\": `to` must be a floor id 0.." + MAX_FLOOR + " or \"" + SURFACE_TO + "\" (end of run)");
+      else {
         if (e.to === f.id) warn(p + ".to", "exit \"" + e.id + "\" leads to this same floor");
         if (ctx.knownIds && ctx.knownIds.size && !ctx.knownIds.has(e.to)) warn(p + ".to", "exit \"" + e.id + "\": floor " + e.to + " is not in index.json (yet)");
       }
     });
     (f.walls || []).forEach((w, i) => { if (!(w.w > 0 && w.h > 0)) err("walls[" + i + "]", "wall must have positive size"); });
     (f.zones || []).forEach((z, i) => { if (!(z.w > 0 && z.h > 0)) err("zones[" + i + "]", "zone \"" + z.id + "\" must have positive size"); });
-    (f.spawns || []).forEach((s, i) => { if (!SPAWN_TYPES.includes(s.type)) err("spawns[" + i + "]", "unknown spawn type " + s.type); });
+    const checkSpawn = (s, p) => {
+      if (!SPAWN_TYPES.includes(s.type)) err(p, "unknown spawn type " + s.type);
+      if (s.type === "passive") {
+        if (s.walk_to != null && !zoneIds.has(s.walk_to)) err(p + ".walk_to", "passive walk_to zone \"" + s.walk_to + "\" does not exist");
+        if (s.look != null && !PASSIVE_LOOKS.includes(s.look)) err(p + ".look", "passive look must be one of " + PASSIVE_LOOKS.join("|"));
+        if (s.face != null && !Number.isFinite(s.face)) err(p + ".face", "passive face must be a number (degrees)");
+      } else if (s.walk_to != null || s.look != null || s.face != null) warn(p, "walk_to / look / face only apply to passive spawns");
+    };
+    (f.spawns || []).forEach((s, i) => checkSpawn(s, "spawns[" + i + "]"));
     (f.pickups || []).forEach((s, i) => { if (!WEAPONS.includes(s.weapon)) err("pickups[" + i + "]", "unknown weapon " + s.weapon); });
 
     let opensExit = false;
@@ -321,6 +382,21 @@
           if ("open_exit" in a) opensExit = true;
         } else if ("spawn" in a) {
           if (!a.spawn.length) warn(q, label + ": spawn wave is empty");
+          a.spawn.forEach((sp, k) => checkSpawn(sp, q + ".spawn[" + k + "]"));
+        } else if ("alert" in a) {
+          const t = a.alert;
+          if (t === "all") { /* everyone */ }
+          else if (isObj(t) && typeof t.zone === "string") { if (!zoneIds.has(t.zone)) err(q, label + ": alert zone \"" + t.zone + "\" does not exist"); }
+          else if (isObj(t) && typeof t.group === "string") { if (!t.group) err(q, label + ": alert group is empty"); }
+          else err(q, label + ": alert must be \"all\", {zone} or {group}");
+        } else if ("hold" in a) {
+          const h = a.hold || {};
+          if (h.seconds != null && !(h.seconds > 0)) err(q, label + ": hold seconds must be > 0");
+          if (h.seconds == null && !h.until_comms_idle) err(q, label + ": hold needs seconds and/or until_comms_idle");
+        } else if ("look_at" in a) {
+          const l = a.look_at || {};
+          if (!Number.isFinite(l.x) || !Number.isFinite(l.y)) err(q, label + ": look_at needs x / y");
+          if (!(l.seconds > 0)) err(q, label + ": look_at seconds must be > 0");
         } else if ("objective" in a) {
           if (!a.objective.trim()) warn(q, label + ": objective text is empty");
         } else if ("sfx" in a) {
@@ -328,13 +404,14 @@
         } else err(q, label + ": unknown action");
       });
     });
-    if (!opensExit && (f.scenario || []).length) warn("scenario", "no step opens an exit — runtime falls back to all_dead → open all exits");
+    if (!opensExit && (f.scenario || []).length && !(f.exits || []).some((e) => e.open)) warn("scenario", "no step opens an exit — runtime falls back to all_dead → open all exits");
     if ((f.exits || []).length && !(f.exits || []).some((e) => e.open) && !opensExit && !(f.scenario || []).length) warn("exits", "no exit starts open and there is no scenario (all_dead → open all exits)");
     return { errors, warnings };
   }
 
   return {
     SPEAKERS, SPEAKER_COLORS, SPEAKER_TAGS, SPAWN_TYPES, SPAWN_LETTER, SPAWN_COLORS, WEAPONS,
+    PASSIVE_LOOKS, PORTAL_KINDS, SURFACES, SURFACE_TO,
     TRIGGER_KINDS, ACTION_KINDS, SFX_NAMES, MAX_FLOOR, ORDER,
     blankFloor, normalize, canonical, stringify, validate, fileNameFor, floorLabel, pad2,
   };

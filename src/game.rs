@@ -3,7 +3,7 @@ use crate::components::*;
 use crate::ecs::{Entity, World};
 use crate::levels::{floor_def, BOSS_LEVEL};
 use crate::math::Vec2;
-use crate::scenario::spawn_floor_markers;
+use crate::scenario::{spawn_floor_markers, spawn_from_def};
 use crate::systems::boss::{BOSS_ATTACK_RANGE, BOSS_MASK_SPEED, BOSS_MAX_HEALTH, BOSS_RADIUS};
 use crate::systems::combat::CombatSystem;
 
@@ -119,7 +119,7 @@ pub fn initialize_game(world: &mut World, level: usize) {
     }
 
     for s in floor.spawns {
-        spawn_enemy_with_type(world, Vec2::new(s.x, s.y), s.kind);
+        spawn_from_def(world, s);
     }
 
     for p in floor.pickups {
@@ -131,6 +131,17 @@ pub fn initialize_game(world: &mut World, level: usize) {
     // The hidden final floor: the shoggoth waits below.
     if level == BOSS_LEVEL {
         spawn_boss(world, BOSS_SPAWN);
+    }
+}
+
+/// Zero the player's velocity (a scenario `hold` locks movement: the input
+/// system is skipped, so the last frame's velocity must not linger).
+pub fn stop_player(world: &mut World) {
+    if let Some(&p) = world.query::<Player>().first() {
+        if let Some(v) = world.get_component_mut::<Velocity>(p) {
+            v.x = 0.0;
+            v.y = 0.0;
+        }
     }
 }
 
@@ -347,15 +358,25 @@ mod tests {
 
     #[test]
     fn test_initialize_game() {
+        // Level index 0 is the ground-level cold open: a passive crowd only.
         let mut world = World::new();
         initialize_game(&mut world, 0);
+        assert_eq!(world.query::<Player>().len(), 1);
+        let n = world.query::<Enemy>().len();
+        assert!(n >= 2);
+        assert_eq!(crate::systems::passive::count_passives(&world), n);
 
+        // Floor 1 (index 1), the lobby: 4 bots at start (all passive; the
+        // hostiles come as a wave once the desk beat fires).
+        let mut world = World::new();
+        initialize_game(&mut world, 1);
         assert_eq!(world.query::<Player>().len(), 1);
         assert_eq!(world.query::<Enemy>().len(), 4);
+        assert_eq!(crate::systems::passive::count_passives(&world), 4);
 
-        // Test level 2 has 12 enemies
+        // Test floor 2 has 12 enemies
         let mut world2 = World::new();
-        initialize_game(&mut world2, 1);
+        initialize_game(&mut world2, 2);
         assert_eq!(world2.query::<Player>().len(), 1);
         assert_eq!(world2.query::<Enemy>().len(), 12);
     }
@@ -396,7 +417,7 @@ mod tests {
     #[test]
     fn test_count_alive_enemies() {
         let mut world = World::new();
-        initialize_game(&mut world, 0);
+        initialize_game(&mut world, 1);
 
         assert_eq!(count_alive_enemies(&world), 4);
 

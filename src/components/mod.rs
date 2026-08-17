@@ -133,6 +133,10 @@ pub enum AIState {
     SurePlayerSeen,
     /// Looking around for player, then transitions based on initial type
     Confused,
+    /// A civilian bot (cold-open crowd): no vision, no aggro, never attacks;
+    /// strolls to its `walk_to` zone or idles. Flipped hostile by the
+    /// scenario `alert` action (see `systems::passive`).
+    Passive,
     // Legacy states for compatibility (will be removed)
     #[allow(dead_code)]
     Idle,
@@ -175,6 +179,51 @@ pub struct AI {
     pub wander_state: WanderState,
     pub wander_direction: f32,     // Current movement angle in radians
     pub movement_square_size: f32, // 150 pixels from spawn
+
+    /// Civilian (`AIState::Passive`) brief; `None` for a plain rogue. Kept
+    /// after an `alert` flips the bot so its `group` stays addressable.
+    pub passive: Option<PassiveAI>,
+}
+
+/// The brief of a passive (civilian) bot: where it strolls, which way it
+/// faces once there, and the scenario group it answers to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PassiveAI {
+    /// Zone id to stroll into (a random point inside it), if any.
+    pub walk_to: Option<&'static str>,
+    /// Heading (radians) to settle on once inside the zone / when idle.
+    pub face: Option<f32>,
+    /// Scenario `alert` group id.
+    pub group: Option<&'static str>,
+    /// The picked point inside `walk_to` (re-rolled when reached).
+    pub target: Option<Position>,
+    /// Idle fidget: seconds until the next small turn, and the turn's goal.
+    pub fidget_timer: f32,
+    pub fidget_heading: f32,
+    /// True once the bot has arrived inside its zone (it then only fidgets).
+    pub arrived: bool,
+    /// Health at the previous tick: a drop means the bot was hurt, which
+    /// flips every passive on the floor hostile.
+    pub last_health: i32,
+}
+
+impl PassiveAI {
+    pub fn new(
+        walk_to: Option<&'static str>,
+        face: Option<f32>,
+        group: Option<&'static str>,
+    ) -> Self {
+        PassiveAI {
+            walk_to,
+            face,
+            group,
+            target: None,
+            fidget_timer: 0.0,
+            fidget_heading: face.unwrap_or(0.0),
+            arrived: false,
+            last_health: i32::MAX,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -209,6 +258,7 @@ impl AI {
             wander_state: WanderState::Waiting,
             wander_direction: 0.0,
             movement_square_size: 150.0,
+            passive: None,
         }
     }
 
@@ -635,10 +685,13 @@ pub struct Elevator {
     pub is_exit: bool,
     /// Exits only: whether the doors are open (extractable).
     pub open: bool,
-    /// Exits only: floor id this car leads to (`0` = the surface).
+    /// Exits only: floor id this car leads to
+    /// ([`crate::scenario::SURFACE_EXIT`] = the surface / end of the run).
     pub to: usize,
     /// Seconds the player has been standing inside an open exit.
     pub dwell: f32,
+    /// How the portal is drawn: lift car, sliding door, or open gate.
+    pub kind: crate::scenario::ElevatorKind,
 }
 
 impl Elevator {
@@ -654,6 +707,7 @@ impl Elevator {
             open: is_exit && def.open,
             to: def.to,
             dwell: 0.0,
+            kind: def.kind,
         }
     }
 

@@ -297,7 +297,7 @@
     const row = (label, ...inputs) => { body.appendChild(el("label", null, label)); const w = el("div", { class: "row wide" }, ...inputs); body.appendChild(w); return w; };
     // id + name
     body.appendChild(el("label", null, "ID"));
-    const idIn = el("input", { type: "number", min: 1, max: F.MAX_FLOOR, value: f.id, id: "m-id" });
+    const idIn = el("input", { type: "number", min: 0, max: F.MAX_FLOOR, value: f.id, id: "m-id" });
     idIn.addEventListener("change", () => {
       const v = parseInt(idIn.value, 10);
       if (!Number.isInteger(v)) return;
@@ -400,14 +400,24 @@
     body.appendChild(el("span", { class: "kind" }, k.toUpperCase()));
     if (k === "room" || k === "zone" || k === "exit") body.appendChild(textField("id", it, "id", { attrs: { style: "width:110px" } }));
     if (k === "room" || k === "exit" || k === "entry") body.appendChild(textField("label", it, "label"));
+    if (k === "entry") body.appendChild(selectField("kind", it, "kind", F.PORTAL_KINDS));
     body.appendChild(numField("x", it, "x")); body.appendChild(numField("y", it, "y"));
     if (k !== "spawn" && k !== "pickup") { body.appendChild(numField("w", it, "w")); body.appendChild(numField("h", it, "h")); }
-    if (k === "spawn") body.appendChild(selectField("type", it, "type", F.SPAWN_TYPES, ["idle (SENTINEL)", "wandering (DRIFTER)", "patrolling (HUNTER)"]));
+    if (k === "spawn") body.appendChild(selectField("type", it, "type", F.SPAWN_TYPES, ["idle (SENTINEL)", "wandering (DRIFTER)", "patrolling (HUNTER)", "passive (civilian)"]));
+    if (k === "spawn" && it.type === "passive") {
+      // civilian brief: stroll zone / settle heading / palette / alert group
+      const zoneIds = ["", ...floor().zones.map((z) => z.id)];
+      body.appendChild(selectField("walk_to", it, "walk_to", zoneIds, ["(none)", ...zoneIds.slice(1)]));
+      body.appendChild(numField("face °", it, "face"));
+      body.appendChild(selectField("look", it, "look", F.PASSIVE_LOOKS));
+      body.appendChild(textField("group", it, "group", { attrs: { style: "width:90px" } }));
+    }
     if (k === "pickup") body.appendChild(selectField("weapon", it, "weapon", F.WEAPONS));
     if (k === "exit") {
-      const to = el("input", { type: "number", min: 0, max: F.MAX_FLOOR, value: it.to, style: "width:56px", title: "next floor id (0 = end of run)" });
-      to.addEventListener("change", () => { const v = parseInt(to.value, 10); if (Number.isInteger(v)) mutate((f) => { selItem().to = v; }); });
+      const to = el("input", { type: "text", value: it.to, style: "width:64px", title: "next floor id, or \"surface\" (end of run)" });
+      to.addEventListener("change", () => { const v = to.value.trim() === F.SURFACE_TO ? F.SURFACE_TO : parseInt(to.value, 10); if (v === F.SURFACE_TO || Number.isInteger(v)) mutate((f) => { selItem().to = v; }); });
       body.appendChild(el("label", { class: "f" }, "to floor", to));
+      body.appendChild(selectField("kind", it, "kind", F.PORTAL_KINDS));
       const op = el("input", { type: "checkbox", checked: it.open });
       op.addEventListener("change", () => mutate((f) => { selItem().open = op.checked; }));
       body.appendChild(el("label", { class: "f" }, op, "starts open"));
@@ -518,6 +528,9 @@
       case "close_exit": return { close_exit: (fl.exits[0] && fl.exits[0].id) || "" };
       case "objective": return { objective: "" };
       case "sfx": return { sfx: "elevator" };
+      case "alert": return { alert: "all" };
+      case "hold": return { hold: { seconds: 1.5, text: "" } };
+      case "look_at": return { look_at: { x: Math.round(fl.size.w / 2), y: Math.round(fl.size.h / 2), seconds: 2 } };
     }
     return { objective: "" };
   }
@@ -557,6 +570,14 @@
       const inp = live(el("input", { type: "text", class: "txt", list: "sfx-names", placeholder: "sfx name", value: a.sfx, style: "min-width:120px;flex:0 1 160px" }), (x) => { x.sfx = row.querySelector(".txt").value; });
       row.appendChild(inp);
       if (!$("#sfx-names")) { const dl = el("datalist", { id: "sfx-names" }); for (const n of F.SFX_NAMES) dl.appendChild(opt(n)); document.body.appendChild(dl); }
+    } else if (kind === "alert" || kind === "hold" || kind === "look_at") {
+      // payload edited as JSON: "all" | {"zone":id} | {"group":id} / {seconds,text,until_comms_idle} / {x,y,seconds}
+      const hint = { alert: '"all" | {"zone": id} | {"group": id}', hold: '{"seconds": s, "text": "…"} | {"until_comms_idle": true}', look_at: '{"x": 0, "y": 0, "seconds": s}' }[kind];
+      const inp = live(el("input", { type: "text", class: "txt", placeholder: hint, title: hint, value: JSON.stringify(a[kind]) }), (x) => {
+        try { const v = JSON.parse(row.querySelector(".txt").value); x[kind] = v; row.querySelector(".txt").style.borderColor = ""; }
+        catch (e) { row.querySelector(".txt").style.borderColor = "#ff2e4d"; }
+      });
+      row.appendChild(inp);
     } else if (kind === "spawn") {
       const wave = el("div", { class: "wave" });
       a.spawn.forEach((sp, k) => {
@@ -669,6 +690,9 @@
         else if ("close_exit" in a) comms.appendChild(el("div", { class: "sys close" }, "EXIT CLOSED: " + a.close_exit));
         else if ("objective" in a) comms.appendChild(el("div", { class: "sys objv" }, "OBJECTIVE: " + a.objective));
         else if ("sfx" in a) comms.appendChild(el("div", { class: "sys sfx" }, "SFX " + a.sfx));
+        else if ("alert" in a) comms.appendChild(el("div", { class: "sys close" }, "ALERT " + (typeof a.alert === "string" ? a.alert : JSON.stringify(a.alert))));
+        else if ("hold" in a) comms.appendChild(el("div", { class: "sys" }, "HOLD " + (a.hold.until_comms_idle ? "until comms idle" : a.hold.seconds + "s") + (a.hold.text ? " — " + a.hold.text : "")));
+        else if ("look_at" in a) comms.appendChild(el("div", { class: "sys" }, "LOOK AT " + a.look_at.x + "," + a.look_at.y + " (" + a.look_at.seconds + "s)"));
       }
     });
     root.appendChild(comms);
@@ -756,7 +780,7 @@
       const rr = Math.min(pw, ph) * 0.18;
       for (let i = 0; i < 3; i++) { mx.globalAlpha = .8 - i * 0.22; mx.beginPath(); mx.arc(cx, cy, rr * (1 + i * 0.75) * pulse, 0, 7); mx.stroke(); }
       mx.globalAlpha = 1; mx.shadowBlur = 6; mx.font = Math.max(10, Math.round(15 * s)) + "px VT323, monospace"; mx.textAlign = "center"; mx.textBaseline = "top";
-      mx.fillText((e.label || e.id) + " → " + (e.to === 0 ? "END" : F.floorLabel(e.to)) + (e.open ? " (OPEN)" : ""), cx, py + ph + 3);
+      mx.fillText((e.label || e.id) + " → " + (e.to === F.SURFACE_TO || e.to === 0 ? "END" : F.floorLabel(e.to)) + (e.open ? " (OPEN)" : ""), cx, py + ph + 3);
       mx.restore();
     }
     // pickups

@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
-use web_sys::{KeyboardEvent, MouseEvent};
+use web_sys::{KeyboardEvent, MouseEvent, WheelEvent};
 
 thread_local! {
     static PRESSED_KEYS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
@@ -14,6 +14,13 @@ thread_local! {
     static MOUSE_POSITION: RefCell<Vec2> = const { RefCell::new(Vec2::zero()) };
     static MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
     static PREVIOUS_MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    /// Mouse wheel travel accumulated this frame (browser `deltaY`, +down).
+    static WHEEL_DELTA: RefCell<f32> = const { RefCell::new(0.0) };
+    /// Printable characters typed this frame, in order, with the browser's
+    /// own case / layout (Shift-uppercase, symbols) — the raw `key` of every
+    /// single-character keydown, before `normalize_key` lower-cases it for
+    /// the game keys. Consumed by text fields (the level editor).
+    static TYPED_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// Call this at the end of each frame to update the previous input state (used
@@ -29,6 +36,8 @@ pub fn end_frame() {
             *previous.borrow_mut() = current.borrow().clone();
         });
     });
+    WHEEL_DELTA.with(|d| *d.borrow_mut() = 0.0);
+    TYPED_TEXT.with(|t| t.borrow_mut().clear());
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -49,7 +58,11 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
     }
 
     let keydown_closure = Closure::wrap(Box::new(|event: KeyboardEvent| {
-        let key = normalize_key(event.key());
+        let raw = event.key();
+        if raw.chars().count() == 1 && !event.ctrl_key() && !event.meta_key() {
+            TYPED_TEXT.with(|t| t.borrow_mut().push_str(&raw));
+        }
+        let key = normalize_key(raw);
         PRESSED_KEYS.with(|keys| {
             keys.borrow_mut().insert(key);
         });
@@ -114,10 +127,19 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
         contextmenu_closure.as_ref().unchecked_ref(),
     )?;
 
+    // Mouse wheel (the level editor's zoom); the page must not scroll.
+    let wheel_closure = Closure::wrap(Box::new(|event: WheelEvent| {
+        event.prevent_default();
+        let d = event.delta_y() as f32;
+        WHEEL_DELTA.with(|w| *w.borrow_mut() += d);
+    }) as Box<dyn FnMut(_)>);
+    canvas.add_event_listener_with_callback("wheel", wheel_closure.as_ref().unchecked_ref())?;
+
     mousemove_closure.forget();
     mousedown_closure.forget();
     mouseup_closure.forget();
     contextmenu_closure.forget();
+    wheel_closure.forget();
 
     Ok(())
 }
@@ -143,6 +165,17 @@ pub fn any_pressed() -> bool {
 
 pub fn mouse_position() -> Vec2 {
     MOUSE_POSITION.with(|pos| *pos.borrow())
+}
+
+/// Mouse wheel travel this frame (browser `deltaY` units, positive = wheel
+/// down / away); 0 when the wheel did not move.
+pub fn wheel_delta() -> f32 {
+    WHEEL_DELTA.with(|d| *d.borrow())
+}
+
+/// The printable characters typed this frame (see `TYPED_TEXT`).
+pub fn typed_text() -> String {
+    TYPED_TEXT.with(|t| t.borrow().clone())
 }
 
 pub fn is_mouse_button_down(button: u16) -> bool {

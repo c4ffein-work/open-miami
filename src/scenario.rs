@@ -41,16 +41,69 @@ impl Rect {
     }
 }
 
+/// `ElevatorDef::to` value of the exit that ends the run (the surface):
+/// `"to": "surface"` in the JSON. Never a real floor id.
+pub const SURFACE_EXIT: usize = usize::MAX;
+
+/// How a portal (entry or exit) is drawn: an elevator car, a doorway whose
+/// two leaves slide apart when open, or an open gateway with scanner posts
+/// (the parking lot's main gate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElevatorKind {
+    Lift,
+    Door,
+    Gate,
+}
+
+impl ElevatorKind {
+    /// Parse the JSON `kind` (`lift` | `door` | `gate`); unknown = `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "lift" => Some(ElevatorKind::Lift),
+            "door" => Some(ElevatorKind::Door),
+            "gate" => Some(ElevatorKind::Gate),
+            _ => None,
+        }
+    }
+}
+
+/// The floor's ground rendering (`"surface"` in the JSON; default checker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Checker,
+    Asphalt,
+    Marble,
+    Concrete,
+    Grating,
+}
+
+impl Surface {
+    /// Parse the JSON `surface` value; unknown = `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "checker" => Some(Surface::Checker),
+            "asphalt" => Some(Surface::Asphalt),
+            "marble" => Some(Surface::Marble),
+            "concrete" => Some(Surface::Concrete),
+            "grating" => Some(Surface::Grating),
+            _ => None,
+        }
+    }
+}
+
 /// An elevator: the entry car you arrive in, or an exit you can leave by.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ElevatorDef {
     pub id: &'static str,
     pub rect: Rect,
     pub label: &'static str,
-    /// Floor *id* this exit leads to (`0` = the surface / end of the run).
+    /// Floor *id* this exit leads to ([`SURFACE_EXIT`] = the surface / end
+    /// of the run).
     pub to: usize,
     /// Whether the exit starts open (extractable) before any scenario step.
     pub open: bool,
+    /// Lift car / sliding door / open gate (rendering only).
+    pub kind: ElevatorKind,
 }
 
 /// Annotation-only room (label + editor); no collision.
@@ -73,7 +126,32 @@ pub struct ZoneDef {
 pub struct SpawnDef {
     pub x: f32,
     pub y: f32,
+    /// Behaviour (and palette). For a passive bot this is its `look`.
     pub kind: EnemyType,
+    /// `"type": "passive"`: a civilian bot (no vision, never attacks) until
+    /// an `alert` action flips it to a hostile of `kind`.
+    pub passive: bool,
+    /// Passive only: zone id to stroll into.
+    pub walk_to: Option<&'static str>,
+    /// Passive only: heading in degrees to settle on once there.
+    pub face: Option<f32>,
+    /// Scenario `alert { "group": id }` group.
+    pub group: Option<&'static str>,
+}
+
+impl SpawnDef {
+    /// A plain hostile spawn (the common case).
+    pub const fn hostile(x: f32, y: f32, kind: EnemyType) -> Self {
+        SpawnDef {
+            x,
+            y,
+            kind,
+            passive: false,
+            walk_to: None,
+            face: None,
+            group: None,
+        }
+    }
 }
 
 /// A weapon lying on the floor at level start.
@@ -82,6 +160,19 @@ pub struct PickupDef {
     pub x: f32,
     pub y: f32,
     pub weapon: WeaponType,
+}
+
+/// A placed prop (`crate::props`): decoration drawn on the floor under the
+/// actors — no collision (phase 1). `rot` in degrees (clockwise, +y down),
+/// `size` in world units (100 = the prop's design box).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropPlacement {
+    /// Index into `props::PROP_NAMES` (the JSON holds the snake_case id).
+    pub kind: usize,
+    pub x: f32,
+    pub y: f32,
+    pub rot: f32,
+    pub size: f32,
 }
 
 /// When a scenario step fires (each step fires at most once).
@@ -131,6 +222,38 @@ pub struct SayDef {
     pub delay: f32,
 }
 
+/// Which passive bots an `alert` action flips hostile.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AlertTarget {
+    /// Every passive bot on the floor.
+    All,
+    /// The passive bots currently inside this zone.
+    Zone(&'static str),
+    /// The passive bots spawned with this `group`.
+    Group(&'static str),
+}
+
+/// A `hold` action: lock the player's input for a while (the world keeps
+/// running, comms keep playing).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HoldDef {
+    /// Seconds to hold (with `until_comms_idle` this is the cap).
+    pub seconds: f32,
+    /// Optional dim centred caption ("SCANNING…").
+    pub text: Option<&'static str>,
+    /// Hold until the comms feed has nothing queued or typing (capped by
+    /// `seconds`).
+    pub until_comms_idle: bool,
+}
+
+/// A `look_at` action: ease the camera onto a world point for a while.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LookAtDef {
+    pub x: f32,
+    pub y: f32,
+    pub seconds: f32,
+}
+
 /// What a step does when it fires.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -140,6 +263,12 @@ pub enum Action {
     CloseExit(&'static str),
     Objective(&'static str),
     Sfx(&'static str),
+    /// Flip matching passive bots hostile.
+    Alert(AlertTarget),
+    /// Lock player input for a beat.
+    Hold(HoldDef),
+    /// Cinematic camera nudge.
+    LookAt(LookAtDef),
 }
 
 /// A scenario step: a trigger plus the actions it runs, once.
@@ -170,7 +299,11 @@ pub struct FloorDef {
     pub zones: &'static [ZoneDef],
     pub spawns: &'static [SpawnDef],
     pub pickups: &'static [PickupDef],
+    /// Placed props (decoration only).
+    pub props: &'static [PropPlacement],
     pub scenario: &'static [StepDef],
+    /// Ground rendering (default checker).
+    pub surface: Surface,
 }
 
 impl FloorDef {
@@ -384,7 +517,31 @@ pub struct ScenarioState {
     pub comms: CommsFeed,
     /// One-shot sound effects requested since the last drain.
     sfx: Vec<&'static str>,
+    /// The running `hold` (input lock), if any: see [`ScenarioState::hold`].
+    hold: Option<HoldState>,
+    /// The running `look_at`, if any: see [`ScenarioState::look_at`].
+    look: Option<LookState>,
 }
+
+/// Live state of a `hold` action.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HoldState {
+    def: HoldDef,
+    /// Scenario time at which the hold ends (the cap when `until_comms_idle`).
+    until: f32,
+}
+
+/// Live state of a `look_at` action.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LookState {
+    def: LookAtDef,
+    start: f32,
+}
+
+/// Longest a `hold_until_comms_idle` may lock the player, seconds.
+pub const HOLD_COMMS_IDLE_CAP: f32 = 20.0;
+/// Ease-in / ease-out length of a `look_at` camera move, seconds.
+pub const LOOK_AT_EASE_SECS: f32 = 0.6;
 
 impl ScenarioState {
     pub fn new(floor: &'static FloorDef) -> Self {
@@ -398,6 +555,8 @@ impl ScenarioState {
             objective: floor.objective.to_string(),
             comms: CommsFeed::default(),
             sfx: Vec::new(),
+            hold: None,
+            look: None,
         }
     }
 
@@ -426,6 +585,41 @@ impl ScenarioState {
     /// Take the pending one-shot sound effects.
     pub fn drain_sfx(&mut self) -> Vec<&'static str> {
         std::mem::take(&mut self.sfx)
+    }
+
+    /// Whether a `hold` is locking the player's input right now.
+    pub fn hold_active(&self) -> bool {
+        self.hold.is_some()
+    }
+
+    /// The caption of the running `hold`, if it has one.
+    pub fn hold_caption(&self) -> Option<&'static str> {
+        self.hold.and_then(|h| h.def.text)
+    }
+
+    /// The running `look_at`: the world point and its weight 0..1 (eased in
+    /// over [`LOOK_AT_EASE_SECS`], held, eased out over the last
+    /// [`LOOK_AT_EASE_SECS`]). `None` when no look is running.
+    pub fn look_at(&self) -> Option<(Vec2, f32)> {
+        let l = self.look?;
+        let w = look_at_weight(self.time - l.start, l.def.seconds);
+        Some((Vec2::new(l.def.x, l.def.y), w))
+    }
+
+    /// Advance the `hold` / `look_at` clocks (called from `tick`).
+    fn tick_beats(&mut self) {
+        if let Some(h) = self.hold {
+            let comms_idle = !self.comms.is_active(self.time);
+            let done = self.time >= h.until || (h.def.until_comms_idle && comms_idle);
+            if done {
+                self.hold = None;
+            }
+        }
+        if let Some(l) = self.look {
+            if self.time - l.start >= l.def.seconds {
+                self.look = None;
+            }
+        }
     }
 
     /// Advance the scenario by `dt`: fire due steps (each once), run their
@@ -493,6 +687,7 @@ impl ScenarioState {
         }
 
         self.comms.update(self.time, dt);
+        self.tick_beats();
     }
 
     fn trigger_holds(&self, trigger: Trigger, ctx: &TriggerCtx) -> bool {
@@ -539,13 +734,33 @@ impl ScenarioState {
                 }
                 Action::Spawn(spawns) => {
                     for s in spawns {
-                        spawn_enemy_with_type(world, Vec2::new(s.x, s.y), s.kind);
+                        spawn_from_def(world, s);
                     }
                 }
                 Action::OpenExit(id) => self.set_exit_open(world, id, true),
                 Action::CloseExit(id) => self.set_exit_open(world, id, false),
                 Action::Objective(text) => self.objective = text.to_string(),
                 Action::Sfx(name) => self.sfx.push(name),
+                Action::Alert(target) => {
+                    crate::systems::passive::alert_passives(world, target);
+                }
+                Action::Hold(def) => {
+                    let secs = if def.until_comms_idle {
+                        def.seconds.min(HOLD_COMMS_IDLE_CAP)
+                    } else {
+                        def.seconds
+                    };
+                    self.hold = Some(HoldState {
+                        def,
+                        until: self.time + secs,
+                    });
+                }
+                Action::LookAt(def) => {
+                    self.look = Some(LookState {
+                        def,
+                        start: self.time,
+                    });
+                }
             }
         }
     }
@@ -565,6 +780,36 @@ impl ScenarioState {
         if open && !self.opened_exits.contains(&id) {
             self.opened_exits.push(id);
         }
+    }
+}
+
+/// Weight 0..1 of a `look_at` that started `elapsed` seconds ago and lasts
+/// `total`: eases in over [`LOOK_AT_EASE_SECS`], holds, eases out over the
+/// last [`LOOK_AT_EASE_SECS`] (smoothstep both ways). Short looks scale the
+/// ramps down so they still peak.
+pub fn look_at_weight(elapsed: f32, total: f32) -> f32 {
+    if total <= 0.0 || elapsed < 0.0 || elapsed >= total {
+        return 0.0;
+    }
+    let ramp = LOOK_AT_EASE_SECS.min(total / 2.0);
+    let t = if elapsed < ramp {
+        elapsed / ramp
+    } else if elapsed > total - ramp {
+        (total - elapsed) / ramp
+    } else {
+        1.0
+    };
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Spawn one placement: a hostile rogue of `kind`, or a passive bot when
+/// `def.passive` (see `systems::passive`).
+pub fn spawn_from_def(world: &mut World, def: &SpawnDef) -> crate::ecs::Entity {
+    if def.passive {
+        crate::systems::passive::spawn_passive(world, def)
+    } else {
+        spawn_enemy_with_type(world, Vec2::new(def.x, def.y), def.kind)
     }
 }
 
@@ -610,26 +855,14 @@ pub fn spawn_floor_markers(world: &mut World, floor: &'static FloorDef) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::Enemy;
+    use crate::components::{AIState, Enemy, AI};
     use crate::game::spawn_player;
 
     // A tiny hand-built floor exercising every trigger kind.
-    const T_SPAWNS: [SpawnDef; 1] = [SpawnDef {
-        x: 300.0,
-        y: 300.0,
-        kind: EnemyType::Idle,
-    }];
+    const T_SPAWNS: [SpawnDef; 1] = [SpawnDef::hostile(300.0, 300.0, EnemyType::Idle)];
     const T_WAVE: [SpawnDef; 2] = [
-        SpawnDef {
-            x: 320.0,
-            y: 320.0,
-            kind: EnemyType::Patrolling,
-        },
-        SpawnDef {
-            x: 340.0,
-            y: 340.0,
-            kind: EnemyType::Wandering,
-        },
+        SpawnDef::hostile(320.0, 320.0, EnemyType::Patrolling),
+        SpawnDef::hostile(340.0, 340.0, EnemyType::Wandering),
     ];
     const T_ZONES: [ZoneDef; 1] = [ZoneDef {
         id: "z",
@@ -642,6 +875,7 @@ mod tests {
             label: "A",
             to: 2,
             open: false,
+            kind: ElevatorKind::Lift,
         },
         ElevatorDef {
             id: "b",
@@ -649,6 +883,7 @@ mod tests {
             label: "B",
             to: 2,
             open: false,
+            kind: ElevatorKind::Lift,
         },
     ];
     const T_STEPS: [StepDef; 6] = [
@@ -710,8 +945,9 @@ mod tests {
             id: "entry",
             rect: Rect::new(455.0, 720.0, 90.0, 60.0),
             label: "IN",
-            to: 0,
+            to: SURFACE_EXIT,
             open: false,
+            kind: ElevatorKind::Lift,
         },
         exits: &T_EXITS,
         walls: &[],
@@ -719,14 +955,16 @@ mod tests {
         zones: &T_ZONES,
         spawns: &T_SPAWNS,
         pickups: &[],
+        props: &[],
         scenario: &T_STEPS,
+        surface: Surface::Checker,
     };
 
     fn world_for(floor: &'static FloorDef) -> World {
         let mut world = World::new();
         spawn_player(&mut world, floor.player_spawn());
         for s in floor.spawns {
-            spawn_enemy_with_type(&mut world, Vec2::new(s.x, s.y), s.kind);
+            spawn_from_def(&mut world, s);
         }
         spawn_floor_markers(&mut world, floor);
         world
@@ -1046,6 +1284,347 @@ mod tests {
         assert!(sc.step_fired("uplink"));
         assert_eq!(sc.comms.visible()[0].who, "UPLINK");
         assert_eq!(speaker_rgb("UPLINK"), (200, 255, 222));
+    }
+
+    // A cold-open style floor: a gate to arrive through, a door out, an
+    // asphalt lot, a passive crowd strolling to the forecourt, and the
+    // `hold` / `look_at` / `alert` beats.
+    const C_ZONES: [ZoneDef; 2] = [
+        ZoneDef {
+            id: "forecourt",
+            rect: Rect::new(380.0, 90.0, 240.0, 90.0),
+        },
+        ZoneDef {
+            id: "lot",
+            rect: Rect::new(180.0, 200.0, 640.0, 480.0),
+        },
+    ];
+    const C_SPAWNS: [SpawnDef; 3] = [
+        SpawnDef {
+            x: 300.0,
+            y: 560.0,
+            kind: EnemyType::Wandering,
+            passive: true,
+            walk_to: Some("forecourt"),
+            face: Some(-90.0),
+            group: Some("crowd"),
+        },
+        SpawnDef {
+            x: 700.0,
+            y: 600.0,
+            kind: EnemyType::Patrolling,
+            passive: true,
+            walk_to: Some("forecourt"),
+            face: None,
+            group: Some("crowd"),
+        },
+        SpawnDef {
+            x: 500.0,
+            y: 400.0,
+            kind: EnemyType::Idle,
+            passive: true,
+            walk_to: None,
+            face: None,
+            group: Some("valet"),
+        },
+    ];
+    const C_EXITS: [ElevatorDef; 1] = [ElevatorDef {
+        id: "doors",
+        rect: Rect::new(440.0, 20.0, 120.0, 50.0),
+        label: "MAIN DOORS",
+        to: 1,
+        open: true,
+        kind: ElevatorKind::Door,
+    }];
+    const C_STEPS: [StepDef; 5] = [
+        StepDef {
+            id: "scan",
+            trigger: Trigger::Start,
+            actions: &[
+                Action::Hold(HoldDef {
+                    seconds: 1.5,
+                    text: Some("SCANNING…"),
+                    until_comms_idle: false,
+                }),
+                Action::LookAt(LookAtDef {
+                    x: 500.0,
+                    y: 45.0,
+                    seconds: 3.0,
+                }),
+            ],
+        },
+        StepDef {
+            id: "valet",
+            trigger: Trigger::Timer {
+                seconds: 2.0,
+                after: None,
+            },
+            actions: &[Action::Alert(AlertTarget::Group("valet"))],
+        },
+        StepDef {
+            id: "lot",
+            trigger: Trigger::EnterZone("lot"),
+            actions: &[Action::Alert(AlertTarget::Zone("lot"))],
+        },
+        StepDef {
+            id: "turn",
+            trigger: Trigger::Timer {
+                seconds: 30.0,
+                after: None,
+            },
+            actions: &[Action::Alert(AlertTarget::All)],
+        },
+        StepDef {
+            id: "briefing",
+            trigger: Trigger::Timer {
+                seconds: 40.0,
+                after: None,
+            },
+            actions: &[
+                Action::Say(SayDef {
+                    who: "CL4-UD3",
+                    text: "a fairly long line so the feed stays busy for a while",
+                    delay: 0.0,
+                }),
+                Action::Hold(HoldDef {
+                    seconds: 60.0,
+                    text: None,
+                    until_comms_idle: true,
+                }),
+            ],
+        },
+    ];
+    const C_FLOOR: FloorDef = FloorDef {
+        id: 0,
+        name: "GATE",
+        theme: "T",
+        accent: "#8fd3ff",
+        flavor: "",
+        objective: "cross",
+        width: 1000.0,
+        height: 800.0,
+        entry: ElevatorDef {
+            id: "entry",
+            rect: Rect::new(440.0, 720.0, 120.0, 60.0),
+            label: "MAIN GATE",
+            to: SURFACE_EXIT,
+            open: false,
+            kind: ElevatorKind::Gate,
+        },
+        exits: &C_EXITS,
+        walls: &[],
+        rooms: &[],
+        zones: &C_ZONES,
+        spawns: &C_SPAWNS,
+        pickups: &[],
+        scenario: &C_STEPS,
+        surface: Surface::Asphalt,
+
+        props: &[],
+    };
+
+    fn passives_left(world: &World) -> usize {
+        crate::systems::passive::count_passives(world)
+    }
+
+    #[test]
+    fn hold_locks_for_its_seconds_and_shows_its_caption() {
+        let mut world = world_for(&C_FLOOR);
+        let mut sc = ScenarioState::new(&C_FLOOR);
+        assert!(!sc.hold_active());
+        sc.tick(&mut world, 1.0 / 60.0);
+        assert!(sc.hold_active());
+        assert_eq!(sc.hold_caption(), Some("SCANNING…"));
+        // Still held just before 1.5 s...
+        for _ in 0..80 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(sc.hold_active(), "held at {:.2}s", sc.time());
+        // ...released right after.
+        for _ in 0..12 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(!sc.hold_active(), "released at {:.2}s", sc.time());
+        assert_eq!(sc.hold_caption(), None);
+    }
+
+    #[test]
+    fn hold_until_comms_idle_releases_when_the_feed_idles_and_is_capped() {
+        let mut world = world_for(&C_FLOOR);
+        let mut sc = ScenarioState::new(&C_FLOOR);
+        // Jump to the briefing step (t = 40 s).
+        while sc.time() < 40.5 {
+            sc.tick(&mut world, 0.25);
+        }
+        assert!(sc.step_fired("briefing"));
+        assert!(sc.hold_active());
+        assert_eq!(sc.hold_caption(), None);
+        // The line takes ~1.4 s to type (+ gap); the hold outlives it by
+        // nothing: released once the feed is idle.
+        let mut released_at = None;
+        for _ in 0..600 {
+            sc.tick(&mut world, 1.0 / 60.0);
+            if !sc.hold_active() {
+                released_at = Some(sc.time());
+                break;
+            }
+        }
+        let t = released_at.expect("hold released when the feed idled");
+        assert!(
+            t - 40.5 > 1.0 && t - 40.5 < 3.0,
+            "released after {:.2}s",
+            t - 40.5
+        );
+
+        // The cap: an until_comms_idle hold with a never-idle feed still ends
+        // at HOLD_COMMS_IDLE_CAP (the 60 s asked for is clamped).
+        let mut sc = ScenarioState::new(&C_FLOOR);
+        let mut world = world_for(&C_FLOOR);
+        while sc.time() < 40.5 {
+            sc.tick(&mut world, 0.25);
+        }
+        // Keep the feed busy by re-queueing lines by hand.
+        let mut end = None;
+        for _ in 0..(HOLD_COMMS_IDLE_CAP as usize + 5) * 4 {
+            sc.comms
+                .enqueue("CL4-UD3", "still talking, still talking", sc.time());
+            sc.tick(&mut world, 0.25);
+            if !sc.hold_active() {
+                end = Some(sc.time());
+                break;
+            }
+        }
+        let end = end.expect("capped hold ends");
+        assert!(
+            (end - 40.5 - HOLD_COMMS_IDLE_CAP).abs() < 0.6,
+            "capped at {HOLD_COMMS_IDLE_CAP}s, ended after {:.2}s",
+            end - 40.5
+        );
+    }
+
+    #[test]
+    fn look_at_eases_in_holds_and_eases_out() {
+        assert_eq!(look_at_weight(-1.0, 3.0), 0.0);
+        assert_eq!(look_at_weight(0.0, 3.0), 0.0);
+        assert!((look_at_weight(LOOK_AT_EASE_SECS, 3.0) - 1.0).abs() < 1e-5);
+        assert!((look_at_weight(1.5, 3.0) - 1.0).abs() < 1e-5);
+        let half = look_at_weight(LOOK_AT_EASE_SECS / 2.0, 3.0);
+        assert!((half - 0.5).abs() < 1e-5, "smoothstep midpoint, got {half}");
+        assert!(look_at_weight(3.0 - LOOK_AT_EASE_SECS / 2.0, 3.0) < 0.6);
+        assert_eq!(look_at_weight(3.0, 3.0), 0.0);
+        // Short looks still peak (ramps shrink to half the duration).
+        assert!((look_at_weight(0.25, 0.5) - 1.0).abs() < 1e-5);
+
+        let mut world = world_for(&C_FLOOR);
+        let mut sc = ScenarioState::new(&C_FLOOR);
+        assert!(sc.look_at().is_none());
+        sc.tick(&mut world, 1.0 / 60.0);
+        let (p, w) = sc.look_at().expect("look running");
+        assert_eq!(p, Vec2::new(500.0, 45.0));
+        assert!(w < 0.05);
+        for _ in 0..60 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        let (_, w) = sc.look_at().unwrap();
+        assert!(
+            (w - 1.0).abs() < 1e-4,
+            "fully on the point after 1 s, got {w}"
+        );
+        while sc.time() < 3.2 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(sc.look_at().is_none(), "look over after its seconds");
+    }
+
+    #[test]
+    fn alert_actions_flip_group_zone_and_all() {
+        let mut world = world_for(&C_FLOOR);
+        let mut sc = ScenarioState::new(&C_FLOOR);
+        assert_eq!(passives_left(&world), 3);
+        sc.tick(&mut world, 1.0 / 60.0);
+        assert_eq!(passives_left(&world), 3, "no alert at start");
+        // t = 2 s: the valet group turns.
+        while sc.time() < 2.1 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(sc.step_fired("valet"));
+        assert_eq!(passives_left(&world), 2);
+        // Walk into the lot zone: only the passives standing in it flip; the
+        // crowd is (still) down in the lot at t~2 s (they stroll at 55 px/s
+        // and start at y 560 / 600, inside `lot`), so both flip.
+        move_player(&mut world, Vec2::new(500.0, 400.0));
+        sc.tick(&mut world, 1.0 / 60.0);
+        assert!(sc.step_fired("lot"));
+        assert_eq!(passives_left(&world), 0);
+        for e in world.query::<Enemy>() {
+            let ai = world.get_component::<AI>(e).unwrap();
+            assert_eq!(ai.state, AIState::SurePlayerSeen);
+        }
+        // Passives count as rogues: killing them all fires all_dead-style
+        // counts like any floor.
+        assert_eq!(count_rogues(&world), (0, 3));
+        kill_all(&mut world);
+        assert_eq!(count_rogues(&world), (3, 0));
+    }
+
+    #[test]
+    fn alert_all_from_a_fresh_floor() {
+        let mut world = world_for(&C_FLOOR);
+        let mut sc = ScenarioState::new(&C_FLOOR);
+        // Nobody entered the lot; at t = 30 s everyone turns.
+        while sc.time() < 30.5 {
+            sc.tick(&mut world, 0.5);
+        }
+        assert!(sc.step_fired("turn"));
+        assert_eq!(passives_left(&world), 0);
+    }
+
+    #[test]
+    fn surface_and_portal_kind_parse() {
+        assert_eq!(Surface::parse("checker"), Some(Surface::Checker));
+        assert_eq!(Surface::parse("asphalt"), Some(Surface::Asphalt));
+        assert_eq!(Surface::parse("marble"), Some(Surface::Marble));
+        assert_eq!(Surface::parse("concrete"), Some(Surface::Concrete));
+        assert_eq!(Surface::parse("grating"), Some(Surface::Grating));
+        assert_eq!(Surface::parse("lava"), None);
+        assert_eq!(ElevatorKind::parse("lift"), Some(ElevatorKind::Lift));
+        assert_eq!(ElevatorKind::parse("door"), Some(ElevatorKind::Door));
+        assert_eq!(ElevatorKind::parse("gate"), Some(ElevatorKind::Gate));
+        assert_eq!(ElevatorKind::parse("hatch"), None);
+        assert_eq!(C_FLOOR.surface, Surface::Asphalt);
+    }
+
+    #[test]
+    fn door_exits_and_gate_entry_extract_like_lifts() {
+        // A `door` exit is an ordinary portal for the elevator system: the
+        // kind is rendering only. It carries through to the world entity.
+        let mut world = world_for(&C_FLOOR);
+        let doors = world
+            .query::<Elevator>()
+            .into_iter()
+            .filter_map(|e| world.get_component::<Elevator>(e).copied())
+            .collect::<Vec<_>>();
+        let entry = doors.iter().find(|e| !e.is_exit).unwrap();
+        let exit = doors.iter().find(|e| e.is_exit).unwrap();
+        assert_eq!(entry.kind, ElevatorKind::Gate);
+        assert_eq!(exit.kind, ElevatorKind::Door);
+        assert!(exit.open && exit.to == 1);
+        move_player(&mut world, Vec2::new(500.0, 45.0));
+        use crate::ecs::System;
+        let mut lift = ElevatorSystem;
+        for _ in 0..40 {
+            lift.run(&mut world, 1.0 / 60.0);
+        }
+        assert_eq!(ElevatorSystem::extraction(&world), Some(1));
+    }
+
+    #[test]
+    fn surface_exit_sentinel_is_never_a_floor_id() {
+        assert_ne!(SURFACE_EXIT, 0, "floor 0 is the parking lot now");
+        assert!(crate::levels::level_index_for_floor_id(SURFACE_EXIT).is_none());
+        // 13½'s car goes to the surface; nothing else does.
+        let boss = crate::levels::floor_def(crate::levels::BOSS_LEVEL);
+        assert!(boss.exits.iter().all(|e| e.to == SURFACE_EXIT));
     }
 
     #[test]

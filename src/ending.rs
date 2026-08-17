@@ -1,7 +1,7 @@
 //! The ending — everything that happens once the last car goes up.
 //!
 //! Timeline (all driven from `update_game` in lib.rs):
-//!   1. the player extracts through a `to: 0` exit → the EXFILTRATE card
+//!   1. the player extracts through a `"to": "surface"` exit (`scenario::SURFACE_EXIT`) → the EXFILTRATE card
 //!      ([`draw_extract_card`], also used on every ordinary floor)
 //!   2. the [`Outro`] takes over: the card fades, the floor's `extracted`
 //!      scenario step talks (13½: the UPLINK epilogue) until the comms feed

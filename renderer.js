@@ -23,6 +23,8 @@
     12 SCALE      sx sy
     13 SHOGGOTH   x y sizePx heading reveal time
     14 POSTFX     kind t r g b                        (full-screen post pass)
+    15 PIX_BEGIN  px w h                              (open a pixel-art group)
+    16 PIX_END    x y                                 (close it, draw at x y)
 
    Everything is drawn as vertex-colored, textured triangles in one
    interleaved dynamic buffer (a 1x1 white texture stands in for solid
@@ -51,10 +53,50 @@
    POSTFX: when a frame's stream contains opcode 14 (found by a cheap pre-scan
    over the opcode table), the whole frame is rendered into an offscreen scene
    framebuffer instead of the canvas, then drawn through a full-screen post
-   shader — kind 0 = BLUR-OUT (growing multi-tap blur + dissolve toward the
-   colour, scanlines, grain; the ending), kind 1 = SYNTHWAVE CRT (scanlines,
-   chromatic split, vignette, grain; under the credits). Only the last POSTFX
-   of a frame applies.
+   shader. The kinds are a menu of Hotline-Miami-flavoured looks:
+     0 BLUR-OUT      growing multi-tap blur + dissolve toward the colour (the ending)
+     1 SYNTHWAVE CRT scanlines, chromatic split, vignette, grain (the credits)
+     2 VHS TAPE      tracking band, per-line jitter, chroma bleed, dropouts
+     3 DRUNK SWAY    slow rotation/zoom breathing, wavy warp, ghosting, hue drift
+     4 CRT TUBE      barrel distortion, aperture grille, hard scanlines, flicker
+     5 ACID TRIP     radial hue cycling, oversaturation, posterize, liquid warp
+     6 DATAMOSH      slice/block displacement glitch, channel swaps, noise blocks
+     7 NEON BLOOM    bright-pass glow, shadow tint toward the colour
+     8 PIXEL MOSAIC  chunky pixelation + dithered posterize
+     9 TUNNEL RUSH   radial zoom blur toward the centre (adrenaline)
+   All kinds share the args `kind t r g b` (t = 0..1 strength, rgb = the
+   effect's colour where it uses one). Only the last POSTFX of a frame applies.
+
+   PIXEL-ART GROUPS (opcodes 15/16): the clean way to pixelate primitive-drawn
+   content is not to average or point-sample a hi-res image but to RASTERIZE
+   AT THE ART RESOLUTION and upscale nearest. PIX_BEGIN `px w h` flushes,
+   points the batch at a scratch framebuffer (a region of ceil(w/px) x
+   ceil(h/px) texels of a 1024x1024 NEAREST-filtered texture, cleared
+   transparent) and installs the transform scale(1/px), so the group's local
+   0..w x 0..h maps onto those texels; everything until PIX_END is drawn there
+   with hard coverage (FBOs carry no MSAA; the batch shader has no smoothing),
+   so a shape's edge either owns a texel or it does not — every art pixel is a
+   full pixel and the grid is anchored to the object. Inside a group line /
+   outline thickness is clamped to >= 1 texel and circle radius to >= 0.5
+   texel so hairlines survive. PIX_END `x y` flushes, restores the outer
+   target + transform, and draws the group texture as a (w, h) quad at (x, y)
+   in the outer transform (through it: a rotation in force at PIX_BEGIN
+   rotates the finished pixel image), origin snapped to whole pixels of the
+   target it lands in. Groups NEST up to PIX_DEPTH (4) deep: each depth owns
+   its own scratch texture + FBO, an inner PIX_END composites its texels into
+   the enclosing group's target (premultiplied, NEAREST), whose grid the
+   origin snaps to. A group over the 1024-texel cap or beyond the depth cap
+   is drawn pass-through (no pixelation; its PIX_END is a no-op). Robots /
+   the boss can be drawn inside a group (their tiles composite into the
+   group's texels). Inside a group primitives obey the PIXEL-ART RULE at
+   rasterization time (see solidRect / circle / line): axis-aligned rects
+   get a whole-texel size (rounded once, min 1) and a whole-texel origin,
+   circles of radius <= 2 texels a half-texel radius and a grid-snapped
+   centre (texel centre for odd diameters, corner for even), lines a
+   whole-texel thickness and texel-centre endpoints — so a moving shape keeps
+   one constant stamp and hops texel by texel. Circles are always tessellated
+   in target space (fixed polygon phase), so a circle under a rotating
+   transform (a fan's well / hub) never changes its rasterization.
    ========================================================================= */
 
 import { createRobotPipeline } from "./robot-core.js";
@@ -106,8 +148,12 @@ void main(){
 
 /* ---- opcode argument counts (mirror of the table above); used by the POSTFX
    pre-scan, which has to walk the stream without executing it ---- */
-const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5];
+const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2];
 const OP_POSTFX = 14;
+
+/* ---- pixel-art group scratch target ---- */
+const PIX_MAX = 1024; // texels per side of a scratch texture (= the group cap)
+const PIX_DEPTH = 4; // max nesting depth of pixel-art groups (one scratch target each)
 
 const POST_VS = `
 attribute vec2 aPos;
@@ -118,7 +164,9 @@ void main(){
 }
 `;
 
-// Full-screen post pass. Kept deliberately small and dependency-free.
+// Full-screen post pass. One shader, one uniform selecting the look — the
+// kinds are all cheap single-pass tricks (a few extra taps at most), kept
+// deliberately dependency-free. See the header table for the kind list.
 const POST_FS = `
 precision mediump float;
 varying vec2 vUv;
@@ -133,6 +181,26 @@ float hash(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+// Hue rotation: Rodrigues rotation of the rgb vector about the gray axis.
+vec3 hueShift(vec3 color, float a) {
+  const vec3 k = vec3(0.57735);
+  float ca = cos(a);
+  return color * ca + cross(k, color) * sin(a) + k * dot(k, color) * (1.0 - ca);
+}
+
+float luma(vec3 c) {
+  return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+// Chromatic split sample: r/b pulled apart along +-off.
+vec3 splitSample(vec2 uv, vec2 off) {
+  return vec3(
+    texture2D(uScene, uv + off).r,
+    texture2D(uScene, uv).g,
+    texture2D(uScene, uv - off).b
+  );
+}
+
 void main(){
   vec2 uv = vUv;
   vec3 c;
@@ -141,7 +209,7 @@ void main(){
   float n = hash(floor(uv * uRes / 3.0) + floor(uTime * 24.0) * 0.371);
   float scan = 0.5 + 0.5 * sin(uv.y * uRes.y * 3.14159);
   if (uKind < 0.5) {
-    // ---- BLUR-OUT: two rings of taps whose radius grows with t ----
+    // ---- 0 BLUR-OUT: two rings of taps whose radius grows with t ----
     float radPx = t * t * 34.0 + t * 2.0;
     vec2 px = radPx / uRes;
     vec3 acc = texture2D(uScene, uv).rgb * 2.0;
@@ -159,16 +227,142 @@ void main(){
     c = mix(c, uColor, k);
     c *= 1.0 - 0.22 * t * scan;
     c += (n - 0.5) * 0.12 * t;
-  } else {
-    // ---- SYNTHWAVE CRT: chromatic split, scanlines, vignette, grain ----
-    vec2 split = vec2(1.6 * t / uRes.x, 0.0);
-    c.r = texture2D(uScene, uv + split).r;
-    c.g = texture2D(uScene, uv).g;
-    c.b = texture2D(uScene, uv - split).b;
+  } else if (uKind < 1.5) {
+    // ---- 1 SYNTHWAVE CRT: chromatic split, scanlines, vignette, grain ----
+    c = splitSample(uv, vec2(1.6 * t / uRes.x, 0.0));
     c *= 1.0 - 0.28 * t * scan;
     vec2 q = uv * (1.0 - uv);
     float vig = pow(clamp(q.x * q.y * 18.0, 0.0, 1.0), 0.28 * t);
     c = c * vig + uColor * 0.10 * t * (1.0 - vig);
+    c += (n - 0.5) * 0.06 * t;
+  } else if (uKind < 2.5) {
+    // ---- 2 VHS TAPE: tracking band, line jitter, chroma bleed, dropouts ----
+    // A tracking band rolls up the screen; lines inside it tear hard.
+    float yb = fract(uTime * 0.13);
+    float db = abs(uv.y - yb);
+    float band = smoothstep(0.045, 0.0, min(db, 1.0 - db));
+    float ln = floor(uv.y * uRes.y);
+    float jit = (hash(vec2(ln, floor(uTime * 24.0))) - 0.5)
+      * (4.0 + band * 90.0) * t / uRes.x;
+    vec2 suv = vec2(uv.x + jit + band * 0.02 * t * sin(uTime * 43.0 + uv.y * 61.0), uv.y);
+    c = splitSample(suv, vec2(2.5 * t / uRes.x, 0.0));
+    // Washed-out tape colour, whitened noise inside the band.
+    c = mix(c, vec3(luma(c)), 0.25 * t);
+    c += band * t * (0.18 + 0.45 * n);
+    // Rare white dropout streaks.
+    float drop = step(0.994, hash(vec2(ln, floor(uTime * 60.0) + 7.0)));
+    c = mix(c, vec3(0.9), drop * 0.8 * t);
+    // Head-switch noise bar pinned to the bottom edge.
+    c = mix(c, vec3(n), step(0.972, uv.y) * 0.5 * t);
+    c *= 1.0 - 0.18 * t * scan;
+    c += (n - 0.5) * 0.10 * t;
+  } else if (uKind < 3.5) {
+    // ---- 3 DRUNK SWAY: rotation/zoom breathing, wavy warp, ghost, hue ----
+    float asp = uRes.x / uRes.y;
+    vec2 p = uv - 0.5;
+    p.x *= asp;
+    float ang = (sin(uTime * 0.8) * 0.045 + sin(uTime * 0.47 + 1.7) * 0.030) * t;
+    float ca = cos(ang), sa = sin(ang);
+    p = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca);
+    p /= 1.0 + (0.05 + 0.03 * sin(uTime * 1.1)) * t;
+    p.x /= asp;
+    vec2 wuv = p + 0.5;
+    wuv += vec2(sin(wuv.y * 7.0 + uTime * 1.3), cos(wuv.x * 6.0 + uTime * 1.1)) * 0.006 * t;
+    vec3 base = texture2D(uScene, wuv).rgb;
+    // Double-vision ghost slowly orbiting the true image.
+    vec2 gof = vec2(cos(uTime * 0.6), sin(uTime * 0.45)) * 9.0 * t / uRes;
+    vec3 ghost = texture2D(uScene, wuv + gof).rgb;
+    c = mix(base, max(base, ghost), 0.5 * t);
+    c = hueShift(c, 0.5 * t * sin(uTime * 0.5));
+    c *= 1.0 - 0.10 * t * scan;
+    c += (n - 0.5) * 0.05 * t;
+  } else if (uKind < 4.5) {
+    // ---- 4 CRT TUBE: barrel distortion, aperture grille, flicker ----
+    vec2 p = uv * 2.0 - 1.0;
+    float r2 = dot(p, p);
+    p *= 1.0 + 0.12 * t * r2;
+    vec2 cuv = p * 0.5 + 0.5;
+    // Off-tube pixels go black (the bezel).
+    float inb = step(0.0, cuv.x) * step(cuv.x, 1.0) * step(0.0, cuv.y) * step(cuv.y, 1.0);
+    c = splitSample(cuv, vec2(1.2 * t * (1.0 + r2) / uRes.x, 0.0));
+    // Aperture grille: RGB phosphor triads across x.
+    float px3 = mod(floor(cuv.x * uRes.x), 3.0);
+    vec3 tri = vec3(step(px3, 0.5), step(0.5, px3) * step(px3, 1.5), step(1.5, px3));
+    c *= mix(vec3(1.0), tri * 1.9 + 0.25, 0.7 * t);
+    float scan2 = 0.5 + 0.5 * sin(cuv.y * uRes.y * 3.14159);
+    c *= 1.0 - 0.35 * t * scan2;
+    c *= 1.0 - 0.04 * t * (0.5 + 0.5 * sin(uTime * 87.0)); // mains flicker
+    vec2 q = cuv * (1.0 - cuv);
+    c *= pow(clamp(q.x * q.y * 25.0, 0.0, 1.0), 0.45 * t) * inb;
+    c += (n - 0.5) * 0.05 * t * inb;
+  } else if (uKind < 5.5) {
+    // ---- 5 ACID TRIP: radial hue cycling, oversaturate, posterize ----
+    vec2 wuv = uv + vec2(sin(uv.y * 12.0 + uTime * 1.7), cos(uv.x * 11.0 + uTime * 1.3)) * 0.004 * t;
+    c = texture2D(uScene, wuv).rgb;
+    float r = length(uv - 0.5);
+    c = hueShift(c, t * (uTime * 1.2 + r * 6.0));
+    c = mix(vec3(luma(c)), c, 1.0 + 0.9 * t); // oversaturate
+    c = mix(c, floor(c * 6.0 + 0.5) / 6.0, 0.5 * t); // mild posterize
+    c *= 1.0 - 0.10 * t * scan;
+    c += (n - 0.5) * 0.05 * t;
+  } else if (uKind < 6.5) {
+    // ---- 6 DATAMOSH: slice/block displacement, channel swap, noise ----
+    float rt = floor(uTime * 12.0);
+    float seg = floor(uv.y * 28.0);
+    float r1 = hash(vec2(seg, rt));
+    float tear = step(0.72, r1);
+    float shift = (r1 - 0.5) * 0.22 * t * tear;
+    vec2 blk = floor(uv * vec2(12.0, 8.0));
+    float br = hash(blk + rt * 0.13);
+    shift += (hash(blk + rt) - 0.5) * 0.2 * t * step(0.93, br);
+    vec2 guv = vec2(fract(uv.x + shift), uv.y);
+    c = splitSample(guv, vec2((4.0 + 10.0 * tear) * t / uRes.x, 0.0));
+    // Corrupted blocks: swapped channels or raw digital noise.
+    c = mix(c, c.gbr, step(0.965, br) * t);
+    vec3 noiseCol = vec3(hash(blk + rt * 3.7), hash(blk + rt * 5.1), hash(blk + rt * 7.3));
+    c = mix(c, noiseCol, step(1.0 - 0.06 * t, hash(blk + rt + 31.0)));
+    c *= 1.0 - 0.12 * t * scan;
+    c += (n - 0.5) * 0.08 * t;
+  } else if (uKind < 7.5) {
+    // ---- 7 NEON BLOOM: bright-pass glow + shadow tint toward the colour ----
+    c = texture2D(uScene, uv).rgb;
+    vec3 glow = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * 0.785398;
+      vec2 d = vec2(cos(a), sin(a)) * (6.0 / uRes);
+      glow += max(texture2D(uScene, uv + d).rgb - 0.45, 0.0);
+      glow += max(texture2D(uScene, uv + d * 2.5).rgb - 0.45, 0.0) * 0.6;
+    }
+    glow /= 12.8;
+    c += glow * 2.2 * t * (0.92 + 0.08 * sin(uTime * 9.0));
+    c += uColor * 0.12 * t * (1.0 - luma(c)); // lift the shadows into neon
+    c *= 1.0 - 0.10 * t * scan;
+    c += (n - 0.5) * 0.04 * t;
+  } else if (uKind < 8.5) {
+    // ---- 8 PIXEL MOSAIC: chunky pixelation + dithered posterize ----
+    float cell = 1.0 + 6.0 * t;
+    vec2 id = floor(uv * uRes / cell);
+    c = texture2D(uScene, (id + 0.5) * cell / uRes).rgb;
+    float levels = 5.0;
+    float dith = (hash(id) - 0.5) / levels;
+    c = mix(c, floor((c + dith) * levels + 0.5) / levels, t);
+    c *= 1.0 - 0.08 * t * scan;
+  } else {
+    // ---- 9 TUNNEL RUSH: radial zoom blur toward the centre ----
+    vec2 p = uv - 0.5;
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < 10; i++) {
+      float k = float(i) / 10.0;
+      float w = 1.0 - k * 0.8;
+      acc += texture2D(uScene, p * (1.0 - 0.22 * t * k) + 0.5).rgb * w;
+      wsum += w;
+    }
+    c = acc / wsum;
+    float rr = length(p);
+    c *= 1.0 + 0.25 * t * (1.0 - smoothstep(0.0, 0.45, rr)); // hot centre
+    vec2 q = uv * (1.0 - uv);
+    c *= pow(clamp(q.x * q.y * 18.0, 0.0, 1.0), 0.4 * t);
     c += (n - 0.5) * 0.06 * t;
   }
   gl_FragColor = vec4(c, 1.0);
@@ -344,8 +538,11 @@ export function initRenderer(canvas) {
     sceneH = h;
   }
   // The framebuffer the batch draws into: null (the canvas) normally, the
-  // scene FBO on frames that end in a post pass.
+  // scene FBO on frames that end in a post pass, the pixel-group scratch
+  // target inside a PIX_BEGIN/PIX_END group — plus the target's size (the
+  // viewport and the vertex shader's uRes).
   let batchFbo = null;
+  let batchW = 1, batchH = 1;
   // The POSTFX request of the current frame (kind, t, r, g, b) or null.
   const postfx = { kind: 0, t: 0, r: 0, g: 0, b: 0 };
   let postfxActive = false;
@@ -398,9 +595,132 @@ export function initRenderer(canvas) {
     gl.bindTexture(gl.TEXTURE_2D, null);
     if (postLoc.aPos !== loc.aPos) gl.disableVertexAttribArray(postLoc.aPos);
     batchFbo = null;
+    batchW = w;
+    batchH = h;
     bindBatchState();
-    gl.uniform2f(loc.uRes, w, h);
     gl.uniform1i(loc.uTex, 0);
+  }
+
+  /* ---- pixel-art groups: a NEAREST scratch target per nesting depth ---- */
+  // Groups nest (depth <= PIX_DEPTH): each depth owns its own 1024x1024
+  // scratch texture + FBO (an inner group's texture is sampled while the
+  // outer group's texture is the render target, so they cannot share one),
+  // created lazily — the plain game only ever touches depth 0.
+  const pixTargets = [];
+  function pixTarget(depth) {
+    let t = pixTargets[depth];
+    if (t) return t;
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, PIX_MAX, PIX_MAX, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error("Pixel-group framebuffer is incomplete; the game cannot render.");
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    t = { tex, fbo };
+    pixTargets[depth] = t;
+    return t;
+  }
+  pixTarget(0);
+  // The open groups, innermost last. A real entry holds the group's size and
+  // the state its PIX_END restores (`outer*`: the enclosing target — the
+  // canvas / scene FBO or an outer group's texture — and transform); a
+  // PIX_BEGIN that fell back to pass-through (too big, too deep) pushes the
+  // SKIP marker so its PIX_END is skipped too. `pix` is the innermost open
+  // group or null.
+  const PIX_SKIP = { skip: true };
+  const pixStack = [];
+  let pix = null;
+  let pixDepth = 0; // number of REAL open groups
+  // Size of one texel of the open group in current LOCAL units (the min
+  // thickness / min diameter clamps). 1/sqrt(|det m|) = local units per texel.
+  function pixTexelLocal() {
+    const det = m[0] * m[3] - m[1] * m[2];
+    const s = Math.sqrt(Math.abs(det));
+    return s > 1e-9 ? 1 / s : 1;
+  }
+  function pixBegin(px, w, h) {
+    px = Math.max(1, px || 1);
+    const tw = Math.ceil(w / px), th = Math.ceil(h / px);
+    if (pixDepth >= PIX_DEPTH || !(tw > 0 && th > 0) || tw > PIX_MAX || th > PIX_MAX) {
+      pixStack.push(PIX_SKIP);
+      return;
+    }
+    flush();
+    const tgt = pixTarget(pixDepth);
+    const g = {
+      px, w, h, tw, th, tex: tgt.tex, fbo: tgt.fbo,
+      outer: pix, outerM: m, outerStack: stack.length,
+      outerFbo: batchFbo, outerW: batchW, outerH: batchH,
+    };
+    pixStack.push(g);
+    pix = g;
+    pixDepth++;
+    m = [1 / px, 0, 0, 1 / px, 0, 0];
+    batchFbo = g.fbo;
+    batchW = tw;
+    batchH = th;
+    bindBatchState();
+    // Clear just the region this group uses (scissored; clears ignore the viewport).
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, tw, th);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.SCISSOR_TEST);
+  }
+  function pixEnd(x, y) {
+    const g = pixStack.pop();
+    if (!g || g.skip) return;
+    flush(); // the group's content, into its scratch region
+    pix = g.outer;
+    pixDepth--;
+    m = g.outerM;
+    stack.length = g.outerStack; // balance away any unmatched SAVEs inside
+    batchFbo = g.outerFbo;
+    batchW = g.outerW;
+    batchH = g.outerH;
+    bindBatchState();
+    // The group texels are premultiplied (drawn with straight-alpha colour
+    // over transparent black, coverage accumulated), so composite them with
+    // (ONE, 1-a) — into the canvas or into an outer group's texels alike.
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    setTexture(g.tex);
+    // Snap the on-screen origin to whole pixels of the CURRENT target (device
+    // pixels, or the outer group's texels) so the art pixels do not shimmer
+    // as the object drifts by fractions of a pixel.
+    const sx = m[0] * x + m[2] * y + m[4];
+    const sy = m[1] * x + m[3] * y + m[5];
+    const dx = Math.round(sx) - sx, dy = Math.round(sy) - sy;
+    m[4] += dx;
+    m[5] += dy;
+    // Row 0 of the region is the group's bottom (GL's bottom-up window
+    // coordinates through the same VS), so v is flipped like the sprite tiles.
+    const u1 = g.w / g.px / PIX_MAX;
+    const v0 = g.h / g.px / PIX_MAX;
+    quad(x, y, g.w, g.h, 0, v0, u1, 0, 1, 1, 1, 1);
+    m[4] -= dx;
+    m[5] -= dy;
+    flush();
+    pixBlend();
+  }
+  // The batch blend for the current target: straight alpha onto the canvas /
+  // scene; into a transparent group target straight alpha for colour but
+  // accumulated coverage (a = sa + da * (1 - sa)) so the texels come out
+  // premultiplied and PIX_END can composite them correctly.
+  function pixBlend() {
+    if (pix) {
+      gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    } else {
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    }
   }
 
   // Re-establish everything the batched pipeline relies on. The robot passes
@@ -408,13 +728,14 @@ export function initRenderer(canvas) {
   // runs after them (and it is cheap enough to be defensive about it).
   function bindBatchState() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, batchFbo);
-    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.viewport(0, 0, batchW, batchH);
     gl.useProgram(prog);
+    gl.uniform2f(loc.uRes, batchW, batchH);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
     gl.disable(gl.SCISSOR_TEST);
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    pixBlend();
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.enableVertexAttribArray(loc.aPos);
     gl.vertexAttribPointer(loc.aPos, 2, gl.FLOAT, false, STRIDE, 0);
@@ -537,13 +858,72 @@ export function initRenderer(canvas) {
     vert(x, y + h, u0, v1, r, g, b, a);
   }
 
+  // Vertex already in TARGET space (device pixels, or the open group's
+  // texels): bypasses the transform.
+  function vertRaw(tx, ty, u, v, r, g, b, a) {
+    if (vCount >= MAX_VERTS) flush();
+    const o = vCount * FLOATS_PER_VERT;
+    verts[o] = tx;
+    verts[o + 1] = ty;
+    verts[o + 2] = u;
+    verts[o + 3] = v;
+    verts[o + 4] = r;
+    verts[o + 5] = g;
+    verts[o + 6] = b;
+    verts[o + 7] = a;
+    vCount++;
+  }
+  function quadRaw(x0, y0, x1, y1, r, g, b, a) {
+    vertRaw(x0, y0, 0.5, 0.5, r, g, b, a);
+    vertRaw(x1, y0, 0.5, 0.5, r, g, b, a);
+    vertRaw(x1, y1, 0.5, 0.5, r, g, b, a);
+    vertRaw(x0, y0, 0.5, 0.5, r, g, b, a);
+    vertRaw(x1, y1, 0.5, 0.5, r, g, b, a);
+    vertRaw(x0, y1, 0.5, 0.5, r, g, b, a);
+  }
+  // Uniform scale of the transform (local unit -> target pixels), or 0 when
+  // the axes are not (near) equal length (non-uniform scale: no snapping).
+  function uniformScale() {
+    const sx = Math.hypot(m[0], m[1]), sy = Math.hypot(m[2], m[3]);
+    return Math.abs(sx - sy) <= 1e-3 * (sx + sy) ? sx : 0;
+  }
+  const AXIS_ALIGNED = () => Math.abs(m[1]) < 1e-6 && Math.abs(m[2]) < 1e-6;
+
+  // ---- THE PIXEL-ART RULE INSIDE GROUPS ----
+  // Inside a pixel-art group primitives are snapped to the texel grid at
+  // rasterization time so a moving / animated shape keeps ONE constant stamp
+  // and hops texel by texel instead of deforming with the grid phase:
+  //   rects  (axis-aligned) size rounded ONCE to whole texels (min 1), then
+  //          the origin rounded to whole texels;
+  //   circles of radius <= 2 texels: radius rounded to a half-texel, centre
+  //          snapped to a texel centre (odd diameter) / corner (even);
+  //          bigger circles stay continuous (fans, wells);
+  //   lines  thickness rounded to whole texels (min 1), endpoints snapped to
+  //          texel centres.
+  // Circles are always tessellated in TARGET space (polygon phase fixed to
+  // the target axes, segment count from the on-target radius) so a circle
+  // drawn under a rotating transform never changes its rasterization: the
+  // well / hub of a spinning fan is frame-stable, only the blades move.
+
   function solidRect(x, y, w, h, r, g, b, a) {
     setTexture(whiteTex);
+    if (pix && AXIS_ALIGNED()) {
+      let x0 = m[0] * x + m[4], y0 = m[3] * y + m[5];
+      let x1 = m[0] * (x + w) + m[4], y1 = m[3] * (y + h) + m[5];
+      if (x1 < x0) { const t = x0; x0 = x1; x1 = t; }
+      if (y1 < y0) { const t = y0; y0 = y1; y1 = t; }
+      const ws = Math.max(1, Math.round(x1 - x0)), hs = Math.max(1, Math.round(y1 - y0));
+      x0 = Math.round(x0);
+      y0 = Math.round(y0);
+      quadRaw(x0, y0, x0 + ws, y0 + hs, r, g, b, a);
+      return;
+    }
     quad(x, y, w, h, 0.5, 0.5, 0.5, 0.5, r, g, b, a);
   }
 
   // Stroke centered on the rect edges, matching canvas strokeRect.
   function rectLines(x, y, w, h, t, r, g, b, a) {
+    if (pix) t = Math.max(t, pixTexelLocal()); // >= 1 texel
     const ht = t / 2;
     solidRect(x - ht, y - ht, w + t, t, r, g, b, a); // top
     solidRect(x - ht, y + h - ht, w + t, t, r, g, b, a); // bottom
@@ -553,6 +933,36 @@ export function initRenderer(canvas) {
 
   function circle(x, y, radius, r, g, b, a) {
     setTexture(whiteTex);
+    const sc = uniformScale();
+    if (sc > 0) {
+      // Target-space tessellation (rotation-invariant).
+      let tx = m[0] * x + m[2] * y + m[4], ty = m[1] * x + m[3] * y + m[5];
+      let rt = radius * sc;
+      if (pix) {
+        rt = Math.max(rt, 0.5); // >= 1 texel across
+        if (rt <= 2) {
+          const d = Math.max(1, Math.round(2 * rt)); // diameter in whole texels
+          rt = d / 2;
+          if (d & 1) {
+            tx = Math.floor(tx) + 0.5;
+            ty = Math.floor(ty) + 0.5;
+          } else {
+            tx = Math.round(tx);
+            ty = Math.round(ty);
+          }
+        }
+      }
+      const segs = Math.max(12, Math.min(96, Math.ceil(rt)));
+      for (let i = 0; i < segs; i++) {
+        const a0 = (i / segs) * Math.PI * 2;
+        const a1 = ((i + 1) / segs) * Math.PI * 2;
+        vertRaw(tx, ty, 0.5, 0.5, r, g, b, a);
+        vertRaw(tx + Math.cos(a0) * rt, ty + Math.sin(a0) * rt, 0.5, 0.5, r, g, b, a);
+        vertRaw(tx + Math.cos(a1) * rt, ty + Math.sin(a1) * rt, 0.5, 0.5, r, g, b, a);
+      }
+      return;
+    }
+    if (pix) radius = Math.max(radius, 0.5 * pixTexelLocal()); // >= 1 texel across
     const segs = Math.max(12, Math.min(48, Math.ceil(radius)));
     for (let i = 0; i < segs; i++) {
       const a0 = (i / segs) * Math.PI * 2;
@@ -581,6 +991,33 @@ export function initRenderer(canvas) {
   // Butt-capped line segment as a quad (canvas default lineCap).
   function line(x1, y1, x2, y2, t, r, g, b, a) {
     setTexture(whiteTex);
+    const sc = pix ? uniformScale() : 0;
+    if (sc > 0) {
+      // In a group: endpoints to texel centres, whole-texel thickness, in
+      // target space.
+      const ax = Math.floor(m[0] * x1 + m[2] * y1 + m[4]) + 0.5;
+      const ay = Math.floor(m[1] * x1 + m[3] * y1 + m[5]) + 0.5;
+      const bx = Math.floor(m[0] * x2 + m[2] * y2 + m[4]) + 0.5;
+      const by = Math.floor(m[1] * x2 + m[3] * y2 + m[5]) + 0.5;
+      const tt = Math.max(1, Math.round(t * sc));
+      const dx = bx - ax, dy = by - ay;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) {
+        // Degenerate after snapping: one texel-sized dot.
+        const h = tt / 2;
+        quadRaw(ax - h, ay - h, ax + h, ay + h, r, g, b, a);
+        return;
+      }
+      const nx = (-dy / len) * (tt / 2), ny = (dx / len) * (tt / 2);
+      vertRaw(ax + nx, ay + ny, 0.5, 0.5, r, g, b, a);
+      vertRaw(bx + nx, by + ny, 0.5, 0.5, r, g, b, a);
+      vertRaw(bx - nx, by - ny, 0.5, 0.5, r, g, b, a);
+      vertRaw(ax + nx, ay + ny, 0.5, 0.5, r, g, b, a);
+      vertRaw(bx - nx, by - ny, 0.5, 0.5, r, g, b, a);
+      vertRaw(ax - nx, ay - ny, 0.5, 0.5, r, g, b, a);
+      return;
+    }
+    if (pix) t = Math.max(t, pixTexelLocal()); // >= 1 texel
     const dx = x2 - x1, dy = y2 - y1;
     const len = Math.hypot(dx, dy);
     if (len < 1e-6) return;
@@ -741,12 +1178,14 @@ export function initRenderer(canvas) {
     postfxActive = scanPostfx(cmds);
     if (postfxActive) ensureSceneTarget(w, h);
     batchFbo = postfxActive ? sceneFbo : null;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, batchFbo);
-    gl.viewport(0, 0, w, h);
-    gl.useProgram(prog);
-    gl.uniform2f(loc.uRes, w, h);
+    batchW = w;
+    batchH = h;
+    // A group left open by a truncated stream must not leak into this frame.
+    pix = null;
+    pixDepth = 0;
+    pixStack.length = 0;
+    bindBatchState();
     gl.uniform1i(loc.uTex, 0);
-    gl.activeTexture(gl.TEXTURE0);
 
     const texts = textArena.length ? textArena.split(TEXT_SEP) : [];
     m = [1, 0, 0, 1, 0, 0];
@@ -764,7 +1203,15 @@ export function initRenderer(canvas) {
         case 0: { // CLEAR
           flush();
           gl.clearColor(cmds[i], cmds[i + 1], cmds[i + 2], 1.0);
-          gl.clear(gl.COLOR_BUFFER_BIT);
+          if (pix) {
+            // Only the open group's region of the scratch texture.
+            gl.enable(gl.SCISSOR_TEST);
+            gl.scissor(0, 0, pix.tw, pix.th);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.disable(gl.SCISSOR_TEST);
+          } else {
+            gl.clear(gl.COLOR_BUFFER_BIT);
+          }
           i += 4;
           break;
         }
@@ -831,6 +1278,14 @@ export function initRenderer(canvas) {
         case 14: // POSTFX (already picked up by the pre-scan)
           i += 5;
           break;
+        case 15: // PIX_BEGIN
+          pixBegin(cmds[i], cmds[i + 1], cmds[i + 2]);
+          i += 3;
+          break;
+        case 16: // PIX_END
+          pixEnd(cmds[i], cmds[i + 1]);
+          i += 2;
+          break;
         default:
           // Unknown opcode: the stream is corrupt; stop rather than
           // misinterpret the remaining floats.
@@ -839,6 +1294,7 @@ export function initRenderer(canvas) {
           break;
       }
     }
+    while (pixStack.length) pixEnd(0, 0); // unterminated groups: close them where they are
     flush();
     if (postfxActive) runPostPass(w, h);
   }
