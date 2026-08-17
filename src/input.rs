@@ -11,7 +11,7 @@ use web_sys::{KeyboardEvent, MouseEvent};
 thread_local! {
     static PRESSED_KEYS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     static PREVIOUS_PRESSED_KEYS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    static MOUSE_POSITION: RefCell<Vec2> = RefCell::new(Vec2::zero());
+    static MOUSE_POSITION: RefCell<Vec2> = const { RefCell::new(Vec2::zero()) };
     static MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
     static PREVIOUS_MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
 }
@@ -37,15 +37,26 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
     let document = window.document().ok_or("No document")?;
 
     // Keyboard handlers
+    // Single-character keys are stored lowercase: with Shift held (the camera
+    // look-ahead) `w` arrives as "W", which would otherwise stop movement and
+    // leave "w" stuck pressed after a keyup with Shift still down.
+    fn normalize_key(key: String) -> String {
+        if key.chars().count() == 1 {
+            key.to_lowercase()
+        } else {
+            key
+        }
+    }
+
     let keydown_closure = Closure::wrap(Box::new(|event: KeyboardEvent| {
-        let key = event.key();
+        let key = normalize_key(event.key());
         PRESSED_KEYS.with(|keys| {
             keys.borrow_mut().insert(key);
         });
     }) as Box<dyn FnMut(_)>);
 
     let keyup_closure = Closure::wrap(Box::new(|event: KeyboardEvent| {
-        let key = event.key();
+        let key = normalize_key(event.key());
         PRESSED_KEYS.with(|keys| {
             keys.borrow_mut().remove(&key);
         });

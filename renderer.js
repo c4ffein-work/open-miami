@@ -21,12 +21,13 @@
     10 ROTATE     angle
     11 ROBOT      colorIdx poseIdx weaponIdx x y angle sizePx time
     12 SCALE      sx sy
+    13 SHOGGOTH   x y sizePx heading reveal time
 
    Everything is drawn as vertex-colored, textured triangles in one
    interleaved dynamic buffer (a 1x1 white texture stands in for solid
    geometry), so a frame typically costs a handful of draw calls: the batch
    only breaks when the bound texture changes (solids -> robot atlas ->
-   solids -> glyph atlas).
+   solids -> glyph atlas -> shoggoth atlas).
 
    Text: VT323 ("GameFont") glyphs are rasterized lazily into a glyph-atlas
    texture via a scratch 2D canvas, then drawn as quads like everything
@@ -39,9 +40,16 @@
    queued renders run inside this same GL context right before the batch that
    samples them is drawn, so a robot costs two tiny passes plus one textured
    quad, with no tile cache, no quantization and no CPU readback.
+
+   Shoggoth (the boss): the same mechanism through shoggoth-core.js — a SHOGGOTH
+   command reserves a bigger tile in its own scratch atlas and queues a live
+   render of the mass / mask / tentacles at (heading, reveal, time); the tile is
+   drawn as an axis-aligned quad through the transform stack (its facing is
+   baked into the render itself, not a quad rotation).
    ========================================================================= */
 
 import { createRobotPipeline } from "./robot-core.js";
+import { createShoggothPipeline } from "./shoggoth-core.js";
 
 const TEXT_SEP = "\u001f";
 
@@ -52,6 +60,11 @@ const ROBOT_WEAPONS = ["fist", "pistol", "machinegun", "shotgun"];
 const ROBOT_TILE = 128; // per-robot tile resolution (px) in the scratch atlas
 const ROBOT_PX = 3; // robot-core pixelation block size at this tile size
 const ROBOT_ATLAS_SIZE = 1024; // 8x8 = 64 robots per batch; more just flush early
+
+/* ---- shoggoth (boss) scratch tiles ---- */
+const SHOG_TILE = 384; // the boss is large (and drawn ~1:1 at the camera zoom)
+const SHOG_PX = 4; // shoggoth-core pixelation block size at this tile size
+const SHOG_ATLAS_SIZE = 768; // 2x2 = 4 bosses per batch (one is the norm)
 
 /* ---- glyph atlas config ------------------------------------------------- */
 const GLYPH_FS = 48; // rasterization font size; quads scale from this
@@ -191,6 +204,26 @@ export function initRenderer(canvas) {
   };
   const robotTarget = { fbo: robotFbo, x: 0, y: 0, w: ROBOT_TILE, h: ROBOT_TILE };
 
+  /* ---- shoggoth scratch atlas: same scheme, bigger tiles, its own pipeline ---- */
+  const shogTex = makeTexture(SHOG_ATLAS_SIZE);
+  const shogCols = Math.floor(SHOG_ATLAS_SIZE / SHOG_TILE);
+  const shogSlots = shogCols * shogCols;
+  const shogFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, shogFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, shogTex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    throw new Error("Shoggoth atlas framebuffer is incomplete; the game cannot render.");
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  const shogPipe = createShoggothPipeline(gl, { rt: SHOG_TILE });
+  // Bosses queued for the current batch: (heading, reveal, time) per slot.
+  const shogQueue = new Float32Array(shogSlots * 3);
+  let shogUsed = 0;
+  const shogOpts = {
+    reveal: 0, time: 0, heading: 0, wander: false, px: SHOG_PX, transparent: true,
+  };
+  const shogTarget = { fbo: shogFbo, x: 0, y: 0, w: SHOG_TILE, h: SHOG_TILE };
+
   // Re-establish everything the batched pipeline relies on. The robot passes
   // rebind program/buffers/attribs/framebuffer/viewport/blend/depth, so this
   // runs after them (and it is cheap enough to be defensive about it).
@@ -213,11 +246,11 @@ export function initRenderer(canvas) {
     gl.activeTexture(gl.TEXTURE0);
   }
 
-  // Run the queued robot renders into their atlas tiles. Leaves the batch
-  // state rebound (and TEXTURE0 unbound — flush binds what it needs).
-  function renderQueuedRobots() {
+  // Run the queued robot / shoggoth renders into their atlas tiles. Leaves the
+  // batch state rebound (and TEXTURE0 unbound — flush binds what it needs).
+  function renderQueuedSprites() {
     // Our attrib arrays would otherwise stay enabled (pointing at the batch
-    // VBO) while the robot programs draw; keep the two pipelines disjoint.
+    // VBO) while the sprite programs draw; keep the pipelines disjoint.
     gl.disableVertexAttribArray(loc.aPos);
     gl.disableVertexAttribArray(loc.aUv);
     gl.disableVertexAttribArray(loc.aColor);
@@ -231,7 +264,16 @@ export function initRenderer(canvas) {
       robotTarget.y = Math.floor(i / robotCols) * ROBOT_TILE;
       robotPipe.render(robotOpts, robotTarget);
     }
-    // The pipeline sampled its own scene texture on TEXTURE0; drop it so the
+    for (let i = 0; i < shogUsed; i++) {
+      const q = i * 3;
+      shogOpts.heading = shogQueue[q];
+      shogOpts.reveal = shogQueue[q + 1];
+      shogOpts.time = shogQueue[q + 2];
+      shogTarget.x = (i % shogCols) * SHOG_TILE;
+      shogTarget.y = Math.floor(i / shogCols) * SHOG_TILE;
+      shogPipe.render(shogOpts, shogTarget);
+    }
+    // The pipelines sampled their own scene texture on TEXTURE0; drop it so an
     // atlas is never both bound for sampling and attached to a framebuffer.
     gl.bindTexture(gl.TEXTURE_2D, null);
     bindBatchState();
@@ -242,9 +284,11 @@ export function initRenderer(canvas) {
 
   let boundTex = null;
   function flush() {
-    if (robotUsed > 0) renderQueuedRobots(); // before the batch that samples them
+    // before the batch that samples them
+    if (robotUsed > 0 || shogUsed > 0) renderQueuedSprites();
     if (vCount === 0) {
       robotUsed = 0;
+      shogUsed = 0;
       return;
     }
     gl.bindTexture(gl.TEXTURE_2D, boundTex || whiteTex);
@@ -253,6 +297,7 @@ export function initRenderer(canvas) {
     gl.drawArrays(gl.TRIANGLES, 0, vCount);
     vCount = 0;
     robotUsed = 0; // the quads sampling this batch's tiles are submitted: recycle
+    shogUsed = 0;
   }
 
   function setTexture(tex) {
@@ -484,6 +529,31 @@ export function initRenderer(canvas) {
     vert(x3, y3, u0, v1, 1, 1, 1, 1);
   }
 
+  /* ---- shoggoth: queue a live boss render into a scratch tile, draw it as a quad ---- */
+  // Axis-aligned quad of sizePx centered on (x, y), through the transform
+  // stack. `heading` (radians, screen convention: 0 = +x, PI/2 = +y/down) is
+  // what the mask leans toward; `reveal` 0..1 is the mask-off progress (0 =
+  // masked, 1 = raw form); `time` is the engine's continuous clock.
+  function drawShoggoth(x, y, sizePx, heading, reveal, time) {
+    setTexture(shogTex);
+    if (shogUsed >= shogSlots || vCount + 6 > MAX_VERTS) flush();
+    const slot = shogUsed++;
+    const q = slot * 3;
+    shogQueue[q] = heading;
+    shogQueue[q + 1] = reveal;
+    shogQueue[q + 2] = time;
+    const inset = 0.5;
+    const tx = (slot % shogCols) * SHOG_TILE;
+    const ty = Math.floor(slot / shogCols) * SHOG_TILE;
+    // v flipped: pass 2 renders bottom-up (see drawRobot)
+    const u0 = (tx + inset) / SHOG_ATLAS_SIZE;
+    const v0 = (ty + SHOG_TILE - inset) / SHOG_ATLAS_SIZE;
+    const u1 = (tx + SHOG_TILE - inset) / SHOG_ATLAS_SIZE;
+    const v1 = (ty + inset) / SHOG_ATLAS_SIZE;
+    const h = sizePx / 2;
+    quad(x - h, y - h, sizePx, sizePx, u0, v0, u1, v1, 1, 1, 1, 1);
+  }
+
   /* ---- frame execution ---- */
   function frameRender(cmds, textArena) {
     const w = canvas.width, h = canvas.height;
@@ -499,6 +569,7 @@ export function initRenderer(canvas) {
     boundTex = null;
     vCount = 0;
     robotUsed = 0;
+    shogUsed = 0;
 
     let i = 0;
     const n = cmds.length;
@@ -566,6 +637,11 @@ export function initRenderer(canvas) {
         case 12: // SCALE
           tScale(cmds[i], cmds[i + 1]);
           i += 2;
+          break;
+        case 13: // SHOGGOTH
+          drawShoggoth(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4],
+            cmds[i + 5]);
+          i += 6;
           break;
         default:
           // Unknown opcode: the stream is corrupt; stop rather than

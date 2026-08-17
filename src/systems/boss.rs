@@ -16,6 +16,9 @@ pub const BOSS_ATTACK_RANGE: f32 = 62.0;
 /// Fraction of max health at which the smiley mask cracks off and the shoggoth
 /// enrages.
 const MASK_CRACK_FRACTION: f32 = 0.5;
+/// Seconds the mask-off animation takes (`Boss::reveal` 0 -> 1) once the mask
+/// cracks. Mirrors `MASK_OFF_SECS` in shoggoth-core.js.
+pub const BOSS_MASK_OFF_SECS: f32 = 3.4;
 
 /// System that drives the shoggoth boss: relentless pursuit (ignoring the normal
 /// vision-cone rules), a mask that cracks off at half health to enrage it, and
@@ -33,7 +36,7 @@ impl BossSystem {
 }
 
 impl System for BossSystem {
-    fn run(&mut self, world: &mut World, _dt: f32) {
+    fn run(&mut self, world: &mut World, dt: f32) {
         let player_pos = match Self::player_position(world) {
             Some(p) => p,
             None => return,
@@ -77,6 +80,12 @@ impl System for BossSystem {
                     s.value = BOSS_ENRAGED_SPEED;
                 }
             }
+            // The mask-off animation runs its course once cracked.
+            if enraged {
+                if let Some(b) = world.get_component_mut::<Boss>(boss) {
+                    b.reveal = (b.reveal + dt / BOSS_MASK_OFF_SECS).min(1.0);
+                }
+            }
 
             let speed = world
                 .get_component::<Speed>(boss)
@@ -111,6 +120,20 @@ impl System for BossSystem {
                 ai.last_known_player_position = Some(player_pos);
                 ai.attack_range = BOSS_ATTACK_RANGE;
                 ai.detection_range = 5000.0;
+            }
+        }
+    }
+}
+
+/// Debug helper: drop every living boss to the mask-crack threshold so the
+/// mask-off transition (and the raw form) can be previewed without the fight
+/// (the debug **B** key; the next `BossSystem` tick flips `enraged`).
+pub fn crack_boss_masks(world: &mut World) {
+    for boss in world.query::<Boss>() {
+        if let Some(h) = world.get_component_mut::<Health>(boss) {
+            let crack_at = (h.max as f32 * MASK_CRACK_FRACTION) as i32;
+            if h.current > crack_at {
+                h.current = crack_at;
             }
         }
     }
@@ -193,6 +216,32 @@ mod tests {
             BOSS_ENRAGED_SPEED
         );
         assert!(any_boss_enraged(&world));
+
+        // The mask-off animation then runs 0 -> 1 over BOSS_MASK_OFF_SECS.
+        let r0 = world.get_component::<Boss>(boss).unwrap().reveal;
+        assert!(r0 > 0.0 && r0 < 1.0);
+        for _ in 0..400 {
+            BossSystem.run(&mut world, 0.016);
+        }
+        assert_eq!(world.get_component::<Boss>(boss).unwrap().reveal, 1.0);
+    }
+
+    #[test]
+    fn test_debug_crack_boss_masks_enrages_without_killing() {
+        let mut world = World::new();
+        spawn_test_player(&mut world, Vec2::new(0.0, 0.0));
+        let boss = spawn_test_boss(&mut world, Vec2::new(100.0, 0.0));
+
+        crack_boss_masks(&mut world);
+        BossSystem.run(&mut world, 0.016);
+
+        let b = world.get_component::<Boss>(boss).unwrap();
+        assert!(b.enraged);
+        assert!(world.get_component::<Health>(boss).unwrap().is_alive());
+        // Idempotent: cracking again does not take more health.
+        let hp = world.get_component::<Health>(boss).unwrap().current;
+        crack_boss_masks(&mut world);
+        assert_eq!(world.get_component::<Health>(boss).unwrap().current, hp);
     }
 
     #[test]

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OPEN MIAMI // Inspector</title>
+<script>
+  // Embedded mode (?embed=1): the SPRITES-tab inspector panel. Decided before
+  // first paint so the page title never flashes. The kind is also stamped
+  // here so kind-specific controls never flash either.
+  (function(){
+    var q = new URLSearchParams(location.search);
+    var h = document.documentElement;
+    if (q.has("embed")) h.classList.add("embed");
+    h.classList.add("kind-" + (q.get("kind") === "shoggoth" ? "shoggoth" : "robot"));
+  })();
+</script>
+<style>
+  :root{ --bg:#0b0e13; --panel:#12161d; --line:#2a3340; --fg:#cdd; --accent:#7cc; }
+  html,body{margin:0;background:var(--bg);color:var(--fg);font-family:monospace;}
+  h1{font-size:14px;letter-spacing:2px;margin:0;padding:12px 16px;border-bottom:1px solid var(--line);opacity:.85;}
+  h1 a{color:var(--fg);opacity:.5;text-decoration:none;margin-left:14px;font-weight:normal;}
+  h1 a.on{opacity:1;color:var(--accent);}
+  #stage{display:flex;flex-wrap:wrap;gap:24px;justify-content:center;padding:20px;}
+  .view{display:flex;flex-direction:column;align-items:center;gap:8px;}
+  .view h2{font-size:12px;margin:0;opacity:.7;font-weight:normal;letter-spacing:1px;}
+  canvas{image-rendering:pixelated;background:var(--panel);box-shadow:0 0 0 1px var(--line);touch-action:none;}
+  #orbit{cursor:grab;}
+  #orbit:active{cursor:grabbing;}
+  .cap{font-size:11px;opacity:.55;max-width:360px;text-align:center;line-height:1.5;}
+  #controls{display:flex;flex-wrap:wrap;gap:20px;justify-content:center;
+            padding:16px;border-top:1px solid var(--line);}
+  .ctl{display:flex;flex-direction:column;gap:6px;font-size:11px;}
+  .ctl label{opacity:.7;letter-spacing:1px;text-transform:uppercase;}
+  .row{display:flex;gap:6px;}
+  button{font-family:monospace;font-size:12px;background:var(--panel);color:var(--fg);
+         border:1px solid var(--line);padding:6px 10px;cursor:pointer;border-radius:3px;}
+  button.on{border-color:var(--accent);color:#fff;box-shadow:0 0 0 1px var(--accent) inset;}
+  button:hover{border-color:var(--accent);}
+  .swatch{width:26px;height:26px;padding:0;border-radius:4px;}
+  input[type=range]{width:200px;}
+  .val{opacity:.6;}
+  code{color:var(--accent);}
+  /* the mask-off trigger */
+  #trigger{font-weight:bold;letter-spacing:1px;color:#ffe07a;background:#241a06;border-color:#7a5a12;text-transform:uppercase;}
+  #trigger:hover{background:#3a2c0a;color:#fff2b0;}
+  #trigger.raw{color:#ff8a7a;background:#2a0e0a;border-color:#7a2412;}
+  /* per-kind controls: only the current kind's are shown */
+  .robot-only, .shoggoth-only { display:none; }
+  html.kind-robot .robot-only { display:flex; }
+  html.kind-shoggoth .shoggoth-only { display:flex; }
+  html.kind-robot span.robot-only, html.kind-shoggoth span.shoggoth-only { display:inline; }
+  /* Embedded mode: this page is iframed as the ?viz inspector panel. */
+  html.embed h1, html.embed .cap { display:none; }
+  html.embed #colorCtl { display:none; } /* Color is set by the gallery */
+  html.embed #stage{ flex-direction:column; gap:10px; padding:10px 0; }
+  html.embed .view h2{ font-size:10px; }
+  html.embed canvas{ width:300px; height:300px; }
+  html.embed #controls{ padding:10px; gap:12px; }
+</style>
+</head>
+<body>
+<h1>OPEN MIAMI &nbsp;//&nbsp; INSPECTOR
+  <a id="linkRobot" href="?kind=robot">ROBOT</a>
+  <a id="linkShog" href="?kind=shoggoth">SHOGGOTH</a>
+</h1>
+
+<div id="stage">
+  <div class="view">
+    <h2>3D ORBIT &mdash; inspect from any angle</h2>
+    <canvas id="orbit" width="384" height="384" tabindex="0"></canvas>
+    <div class="cap">drag to orbit (yaw + pitch) &middot; arrow keys also rotate &middot; this is the sculpt/inspect view</div>
+  </div>
+  <div class="view">
+    <h2>IN-GAME 2D &mdash; baked top-down sprite</h2>
+    <canvas id="game" width="384" height="384"></canvas>
+    <div class="cap">exactly what the game camera renders (<code>bakeSprite()</code> / <code>bakeShoggoth()</code>) &middot; turns on ONE axis (facing / heading) only</div>
+  </div>
+</div>
+
+<div id="controls">
+  <!-- robot -->
+  <div class="ctl robot-only">
+    <label>Pose</label>
+    <div class="row" id="poseRow"></div>
+  </div>
+  <div class="ctl robot-only" id="colorCtl">
+    <label>Color</label>
+    <div class="row" id="colorRow"></div>
+  </div>
+  <div class="ctl robot-only">
+    <label>Weapon</label>
+    <div class="row" id="weaponRow"></div>
+  </div>
+  <!-- shoggoth -->
+  <div class="ctl shoggoth-only">
+    <label>Phase</label>
+    <div class="row" id="phaseRow"></div>
+  </div>
+  <div class="ctl shoggoth-only">
+    <label>Mask-off &mdash; <span class="val" id="revealVal"></span></label>
+    <div class="row"><button id="trigger">Become Raw &#9654;</button></div>
+  </div>
+  <!-- shared -->
+  <div class="ctl">
+    <label>Pixelation &mdash; <span class="val" id="pxVal"></span></label>
+    <input type="range" id="pxSlider" min="1" max="12" step="1" value="5">
+  </div>
+  <div class="ctl">
+    <label><span class="robot-only">Facing</span><span class="shoggoth-only">Heading</span> (2D view) &mdash; <span class="val" id="faceVal"></span></label>
+    <input type="range" id="faceSlider" min="0" max="360" step="1" value="0">
+  </div>
+</div>
+
+<script type="module">
+import { createRenderer, bakeSprite, PALETTES, POSES, WEAPONS } from "../robot-core.js";
+import { createShoggothRenderer, bakeShoggoth, MASK_OFF_SECS } from "../shoggoth-core.js";
+
+/* ---------- URL params: which character, and its initial setup ---------- */
+const _p = new URLSearchParams(location.search);
+const KIND = _p.get("kind") === "shoggoth" ? "shoggoth" : "robot";
+document.getElementById("linkRobot").classList.toggle("on", KIND==="robot");
+document.getElementById("linkShog").classList.toggle("on", KIND==="shoggoth");
+// keep ?embed on the kind links so the panel stays a panel
+if(_p.has("embed")){
+  for(const a of document.querySelectorAll("h1 a")) a.href += "&embed=1";
+}
+
+/* ---------- state ---------- */
+const state = {
+  kind: KIND,
+  // robot
+  pose: "idle",
+  color: "coral",
+  weapon: "pistol",
+  // shoggoth
+  phase: "masked",          // "masked" | "enraged" (the transition is the trigger)
+  maskOffAt: null,          // seconds (page time) the mask-off was triggered, or null
+  // shared
+  px: KIND==="shoggoth" ? 4 : 5,   // the game's live pixelation for each kind
+  facingDeg: 0,             // robot facing / shoggoth heading (2D view)
+  // orbit camera: gentle angled top-down by default
+  yaw: 0.6,
+  pitch: 0.95,
+};
+const COLORS = Object.keys(PALETTES);
+if (_p.get("color") && PALETTES[_p.get("color")]) state.color = _p.get("color");
+if (_p.get("pose") && POSES.includes(_p.get("pose"))) state.pose = _p.get("pose");
+if (_p.get("weapon") && WEAPONS.includes(_p.get("weapon"))) state.weapon = _p.get("weapon");
+if (_p.get("phase") === "enraged") state.phase = "enraged";
+if (_p.get("px")) state.px = Math.max(1, Math.min(12, parseInt(_p.get("px"),10) || state.px));
+// (embed / kind classes are applied in <head>, before first paint)
+
+/* ---------- renderers ---------- */
+const orbitCanvas = document.getElementById("orbit");
+const gameCanvas  = document.getElementById("game");
+const gameCtx     = gameCanvas.getContext("2d");
+const orbit = KIND==="shoggoth" ? createShoggothRenderer(orbitCanvas) : createRenderer(orbitCanvas);
+// gameCanvas is a plain 2D surface we blit the baked sprite onto, proving the
+// bake path (what the game camera sees, top-down).
+
+/* ---------- build control widgets ---------- */
+function buttonRow(id, names, get, set){
+  const row = document.getElementById(id);
+  const btns = {};
+  for(const n of names){
+    const b=document.createElement("button");
+    b.textContent=n; b.onclick=()=>{ set(n); refresh(); };
+    row.appendChild(b); btns[n]=b;
+  }
+  function refresh(){ for(const n in btns) btns[n].classList.toggle("on", n===get()); }
+  refresh();
+  return refresh;
+}
+const refreshPose   = buttonRow("poseRow", POSES, ()=>state.pose, v=>{ state.pose=v; });
+const refreshWeapon = buttonRow("weaponRow", WEAPONS, ()=>state.weapon, v=>{ state.weapon=v; });
+const refreshPhase  = buttonRow("phaseRow", ["masked","enraged"], ()=>state.phase,
+                                v=>{ state.phase=v; state.maskOffAt=null; refreshTrigger(); });
+
+const colorRow = document.getElementById("colorRow");
+const colorBtns = {};
+for(const c of COLORS){
+  const b=document.createElement("button");
+  b.className="swatch"; b.title=c;
+  const col=PALETTES[c].body;
+  b.style.background=`rgb(${col.map(v=>Math.round(v*255)).join(",")})`;
+  b.onclick=()=>{ state.color=c; refreshColor(); };
+  colorRow.appendChild(b); colorBtns[c]=b;
+}
+function refreshColor(){ for(const c in colorBtns) colorBtns[c].classList.toggle("on", c===state.color); }
+refreshColor();
+
+const pxSlider=document.getElementById("pxSlider"), pxVal=document.getElementById("pxVal");
+pxSlider.value = state.px;
+pxSlider.oninput=()=>{ state.px=parseInt(pxSlider.value,10); pxVal.textContent=state.px+" px"; };
+const faceSlider=document.getElementById("faceSlider"), faceVal=document.getElementById("faceVal");
+faceSlider.oninput=()=>{ state.facingDeg=parseInt(faceSlider.value,10); faceVal.textContent=state.facingDeg+"°"; };
+pxVal.textContent=state.px+" px"; faceVal.textContent=state.facingDeg+"°";
+
+/* mask-off trigger: masked -> plays the consume-inward transition from the
+   moment of the press -> raw; press again to reset to the wandering mask */
+const triggerBtn = document.getElementById("trigger");
+const revealVal = document.getElementById("revealVal");
+let liveT = 0;
+function refreshTrigger(){
+  const on = state.maskOffAt!==null;
+  triggerBtn.innerHTML = on ? "Reset &#8635;" : "Become Raw &#9654;";
+  triggerBtn.classList.toggle("raw", on);
+}
+triggerBtn.addEventListener("click", ()=>{
+  if(state.maskOffAt===null){ state.phase="masked"; state.maskOffAt=liveT; }
+  else { state.maskOffAt=null; }
+  refreshPhase(); refreshTrigger();
+});
+refreshTrigger();
+// current mask-off progress 0..1 (from the phase or the trigger)
+function currentReveal(t){
+  if(state.maskOffAt!==null) return Math.min(1, Math.max(0, (t-state.maskOffAt)/MASK_OFF_SECS));
+  return state.phase==="enraged" ? 1 : 0;
+}
+
+/* ---------- orbit drag (yaw + pitch) ---------- */
+let dragging=false, lastX=0, lastY=0;
+orbitCanvas.addEventListener("pointerdown", e=>{
+  dragging=true; lastX=e.clientX; lastY=e.clientY;
+  orbitCanvas.setPointerCapture(e.pointerId); orbitCanvas.focus();
+});
+orbitCanvas.addEventListener("pointermove", e=>{
+  if(!dragging) return;
+  state.yaw   += (e.clientX-lastX)*0.01;
+  state.pitch += (e.clientY-lastY)*0.01;
+  state.pitch = Math.max(-1.45, Math.min(1.45, state.pitch));
+  lastX=e.clientX; lastY=e.clientY;
+});
+orbitCanvas.addEventListener("pointerup",  ()=>{ dragging=false; });
+orbitCanvas.addEventListener("pointercancel", ()=>{ dragging=false; });
+
+/* keyboard fallback (drivable without a real mouse) — window-level so it works
+   even if the canvas isn't focused, but never steals from the sliders */
+window.addEventListener("keydown", e=>{
+  if(document.activeElement===faceSlider || document.activeElement===pxSlider) return;
+  const step=0.08;
+  if(e.key==="ArrowLeft")  state.yaw-=step;
+  else if(e.key==="ArrowRight") state.yaw+=step;
+  else if(e.key==="ArrowUp")   state.pitch=Math.min(1.45,state.pitch+step);
+  else if(e.key==="ArrowDown") state.pitch=Math.max(-1.45,state.pitch-step);
+  else return;
+  e.preventDefault();
+});
+
+/* ---------- render loop ---------- */
+const t0=performance.now();
+window.__ready=false;
+function frame(){
+  const t=(performance.now()-t0)/1000;
+  liveT=t;
+  let sprite;
+  if(KIND==="shoggoth"){
+    const reveal = currentReveal(t);
+    revealVal.textContent = reveal.toFixed(2);
+    const common = { reveal, time:t, px:state.px, wander:true };
+    // LEFT: live 3D orbit view (two-axis rotation of the camera)
+    orbit.render({ ...common, orbit:{yaw:state.yaw, pitch:state.pitch} });
+    // RIGHT: the in-game top-down frame via bakeShoggoth() (one-axis heading)
+    sprite = bakeShoggoth({ ...common, heading:state.facingDeg*Math.PI/180, size:gameCanvas.width });
+  } else {
+    // LEFT: live 3D orbit view (two-axis rotation of the camera)
+    orbit.render({
+      pose:state.pose, color:state.color, weapon:state.weapon, px:state.px, time:t,
+      orbit:{yaw:state.yaw, pitch:state.pitch},
+    });
+    // RIGHT: the in-game baked sprite (top-down, one-axis facing) via bakeSprite()
+    sprite = bakeSprite({
+      pose:state.pose, color:state.color, weapon:state.weapon, facingDeg:state.facingDeg,
+      px:state.px, time:t, size:gameCanvas.width,
+    });
+  }
+  gameCtx.clearRect(0,0,gameCanvas.width,gameCanvas.height);
+  gameCtx.drawImage(sprite,0,0);
+
+  window.__ready=true;
+  requestAnimationFrame(frame);
+}
+frame();
+
+// expose a couple hooks for the screenshot harness / manual poking
+window.__editor = {
+  set:(patch)=>{ Object.assign(state,patch); refreshPose(); refreshColor(); refreshWeapon(); refreshPhase(); refreshTrigger(); },
+  bake:(o)=>bakeSprite(o),
+  bakeShoggoth:(o)=>bakeShoggoth(o),
+  state,
+};
+</script>
+</body>
+</html>

@@ -733,17 +733,16 @@ mod wasm_entry {
             let violet = Color::from_rgba(150, 70, 210, 255);
             let magenta = Color::from_rgba(224, 40, 160, 255);
 
-            // (inspector kind, label). Shoggoth ships as two rival bosses: v1 and
-            // v2 are separate inspectable enemies so we can A/B them in-panel.
-            let items: [(&str, &str); 8] = [
+            // (inspector kind, label): the four robots and the boss's two phases.
+            // Thumbnails are the small 2D-primitive icons; the iframe shows the
+            // live 3D character (tools/inspector.html).
+            let items: [(&str, &str); 6] = [
                 ("coral", "CL4-UD3"),
                 ("red", "SENTINEL"),
                 ("violet", "DRIFTER"),
                 ("magenta", "HUNTER"),
-                ("shoggoth_masked", "SHOG v1 mask"),
-                ("shoggoth_enraged", "SHOG v1 raw"),
-                ("shoggoth_v2_masked", "SHOG v2 mask"),
-                ("shoggoth_v2_enraged", "SHOG v2 raw"),
+                ("shoggoth_masked", "SHOGGOTH mask"),
+                ("shoggoth_enraged", "SHOGGOTH raw"),
             ];
 
             // Two columns on the LEFT half; the right half is the inspector iframe.
@@ -770,12 +769,8 @@ mod wasm_entry {
                 graphics.draw_rectangle_lines(Vec2::new(bx, by), bw, bh, 1.5, border);
 
                 match kind {
-                    "shoggoth_masked" | "shoggoth_v2_masked" => {
-                        graphics.draw_shoggoth(c, 30.0, false)
-                    }
-                    "shoggoth_enraged" | "shoggoth_v2_enraged" => {
-                        graphics.draw_shoggoth(c, 30.0, true)
-                    }
+                    "shoggoth_masked" => graphics.draw_shoggoth(c, 30.0, false),
+                    "shoggoth_enraged" => graphics.draw_shoggoth(c, 30.0, true),
                     _ => {
                         let color = match kind {
                             "coral" => coral,
@@ -1351,23 +1346,22 @@ mod wasm_entry {
             let screen_height = graphics.height();
 
             // Handle input - Left (Arrow, A for QWERTY, Q for AZERTY)
-            if input::is_key_pressed("ArrowLeft")
+            if (input::is_key_pressed("ArrowLeft")
                 || input::is_key_pressed("a")
-                || input::is_key_pressed("q")
+                || input::is_key_pressed("q"))
+                && self.selected_menu_option == MenuOption::Play
             {
-                if self.selected_menu_option == MenuOption::Play {
-                    self.selected_level = if self.selected_level == 0 {
-                        LEVEL_COUNT - 1
-                    } else {
-                        self.selected_level - 1
-                    };
-                }
+                self.selected_level = if self.selected_level == 0 {
+                    LEVEL_COUNT - 1
+                } else {
+                    self.selected_level - 1
+                };
             }
             // Handle input - Right (Arrow, D)
-            if input::is_key_pressed("ArrowRight") || input::is_key_pressed("d") {
-                if self.selected_menu_option == MenuOption::Play {
-                    self.selected_level = (self.selected_level + 1) % LEVEL_COUNT;
-                }
+            if (input::is_key_pressed("ArrowRight") || input::is_key_pressed("d"))
+                && self.selected_menu_option == MenuOption::Play
+            {
+                self.selected_level = (self.selected_level + 1) % LEVEL_COUNT;
             }
             // Handle input - Down (Arrow, S)
             if input::is_key_pressed("ArrowDown") || input::is_key_pressed("s") {
@@ -1698,6 +1692,7 @@ mod wasm_entry {
             }
             self.camera
                 .set_viewport(graphics.width(), graphics.height());
+            self.camera.update_sway(self.last_time as f32 / 1000.0);
 
             // Shift = look-ahead: ease the view toward the mouse while held.
             let mouse_screen_pos = input::mouse_position();
@@ -1740,6 +1735,11 @@ mod wasm_entry {
             // the all-dead scenario steps / exit doors when testing a floor).
             if self.debug_enabled && self.show_infos && input::is_key_pressed("k") {
                 purge_all_enemies(&mut self.world);
+            }
+            // Debug: B cracks the boss's mask (drops it to the enrage threshold)
+            // to preview the mask-off transition / raw form without the fight.
+            if self.debug_enabled && self.show_infos && input::is_key_pressed("b") {
+                crate::systems::boss::crack_boss_masks(&mut self.world);
             }
 
             // Run game systems
@@ -1800,7 +1800,7 @@ mod wasm_entry {
                 let phase = ((KILL_FLASH_SECS - self.kill_flash) / KILL_FLASH_SECS
                     * KILL_FLASH_STROBES as f32) as u32;
                 let fade = self.kill_flash / KILL_FLASH_SECS; // 1 -> 0
-                Some(if phase % 2 == 0 {
+                Some(if phase.is_multiple_of(2) {
                     Color::new(0.85, 0.08, 0.16, 0.55 * fade)
                 } else {
                     Color::new(0.10, 0.25, 0.95, 0.55 * fade)
@@ -1827,7 +1827,13 @@ mod wasm_entry {
 
             // Render all entities except the player/rogue bots themselves
             // (bullets, pickups, boss, debug overlays...).
-            render_entities(&self.world, graphics, self.show_infos, false);
+            render_entities(
+                &self.world,
+                graphics,
+                self.show_infos,
+                false,
+                self.last_time as f32 / 1000.0,
+            );
 
             // The player and rogues are the live 3D robot sprites, drawn while
             // the camera transform (incl. zoom) is still applied so world-space

@@ -7,8 +7,15 @@ use crate::math::{Color, Vec2};
 /// Render all entities in the world
 /// `draw_bots` selects whether the player/rogue sprites are drawn here; the
 /// game passes false and draws them as live 3D robots instead (the boss is
-/// always drawn here).
-pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool, draw_bots: bool) {
+/// always drawn here, live too). `now` is the continuous animation clock in
+/// seconds (drives the boss's writhing).
+pub fn render_entities(
+    world: &World,
+    graphics: &Graphics,
+    show_infos: bool,
+    draw_bots: bool,
+    now: f32,
+) {
     // Render debug pathfinding info first (behind everything)
     if show_infos {
         render_debug_pathfinding(world, graphics);
@@ -37,7 +44,7 @@ pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool, dra
     }
 
     // Render the boss (big; under the player)
-    render_bosses(world, graphics);
+    render_bosses(world, graphics, now);
 
     // Render player (on top)
     if draw_bots {
@@ -45,8 +52,16 @@ pub fn render_entities(world: &World, graphics: &Graphics, show_infos: bool, dra
     }
 }
 
-/// Render the shoggoth boss (drawn specially, not as a regular sprite).
-fn render_bosses(world: &World, graphics: &Graphics) {
+/// On-screen size (px) of the boss's live tile relative to its hitbox radius.
+/// shoggoth-core frames 3.8 world units per half-tile and the mass core is
+/// 1.65 units, so 4.6x the radius puts the core right over the hitbox and
+/// leaves the rest of the tile to the lobes and tentacles.
+const BOSS_TILE_PER_RADIUS: f32 = 4.6;
+
+/// Render the shoggoth boss: a LIVE 3D render through shoggoth-core (see
+/// `Graphics::draw_shoggoth_live`) — mask on while `Boss::reveal` is 0, the
+/// consume-inward mask-off as it runs to 1, the raw tentacled form after.
+fn render_bosses(world: &World, graphics: &Graphics, now: f32) {
     for entity in world.query::<Boss>() {
         let (pos, boss, health) = match (
             world.get_component::<Position>(entity),
@@ -63,7 +78,19 @@ fn render_bosses(world: &World, graphics: &Graphics) {
             .get_component::<Radius>(entity)
             .map(|r| r.value)
             .unwrap_or(42.0);
-        graphics.draw_shoggoth(Vec2::new(pos.x, pos.y), radius, boss.enraged);
+        // The mask leans toward where it is heading (the boss always turns to
+        // face its prey, so its rotation is its movement direction).
+        let heading = world
+            .get_component::<Rotation>(entity)
+            .map(|r| r.angle)
+            .unwrap_or(0.0);
+        graphics.draw_shoggoth_live(
+            Vec2::new(pos.x, pos.y),
+            radius * BOSS_TILE_PER_RADIUS,
+            heading,
+            boss.reveal,
+            now,
+        );
     }
 }
 
@@ -543,7 +570,7 @@ pub fn render_ui(
         );
         if show_infos {
             graphics.draw_text(
-                "K: purge all rogues (debug)",
+                "K: purge all rogues / B: crack boss mask (debug)",
                 Vec2::new(screen_width - 280.0, 50.0),
                 14.0,
                 Color::GRAY,

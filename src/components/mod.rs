@@ -295,11 +295,18 @@ impl ThrownWeapon {
 pub struct Boss {
     /// False while the smiley mask is intact; true once cracked (enraged phase).
     pub enraged: bool,
+    /// Mask-off progress for the live render, 0..1: stays 0 while masked, runs
+    /// 0 -> 1 over `BOSS_MASK_OFF_SECS` once `enraged` flips (the mask cracks
+    /// and is consumed inward while the tentacles grow), then holds at 1.
+    pub reveal: f32,
 }
 
 impl Boss {
     pub fn new() -> Self {
-        Boss { enraged: false }
+        Boss {
+            enraged: false,
+            reveal: 0.0,
+        }
     }
 }
 

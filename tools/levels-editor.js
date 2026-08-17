@@ -83,7 +83,9 @@
   /* ---------------- font ---------------- */
   async function loadFont() {
     try {
-      const ff = new FontFace("VT323", "url(data:font/ttf;base64," + window.__VT323_B64 + ")");
+      // The game font, served from assets/ (same file index.html uses); loaded via
+      // the JS FontFace API because CSS @font-face fails in headless Chromium.
+      const ff = new FontFace("VT323", "url(" + new URL("../assets/fonts/VT323-Regular.ttf", location.href).href + ")");
       await ff.load(); document.fonts.add(ff);
     } catch (e) { /* fallback metrics */ }
     try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) { /* ignore */ }

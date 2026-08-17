@@ -152,7 +152,29 @@ def write_index(idx_path, idx):
     os.replace(tmp, idx_path)
 
 
+# Paths that must never be served: dotfiles/dirs (.editor-token, .git, .claude…),
+# local-only reference audio, build output and session screenshots.
+PRIVATE_TOP = {"inspirations", ".audio-ref", "target", "shots", "node_modules"}
+
+
+def is_private_path(url_path):
+    parts = [p for p in url_path.split("?", 1)[0].split("/") if p]
+    if any(p.startswith(".") for p in parts):
+        return True
+    return bool(parts) and parts[0] in PRIVATE_TOP
+
+
 class NoCache(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if is_private_path(self.path):
+            return self.send_error(404, "Not found")
+        return super().do_GET()
+
+    def do_HEAD(self):
+        if is_private_path(self.path):
+            return self.send_error(404, "Not found")
+        return super().do_HEAD()
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")

@@ -44,8 +44,9 @@
             font-size: 24px;
             color: #ff1744;
         }
-        /* ?viz right-panel inspector: an iframe of the character editor / shoggoth,
-           opened when a gallery item is clicked (driven from wasm via vizInspect). */
+        /* ?viz right-panel inspector: an iframe of tools/inspector.html (robot or
+           shoggoth), opened when a gallery item is clicked (driven from wasm via
+           vizInspect). */
         #viz-panel {
             position: fixed;
             top: 74px;
@@ -76,12 +77,10 @@
         window.vizInspect = function (kind) {
             var f = document.getElementById('viz-panel');
             var src;
-            if (kind === 'shoggoth_masked')          src = './tools/shoggoth.html?phase=masked';
-            else if (kind === 'shoggoth_enraged')    src = './tools/shoggoth.html?phase=enraged';
-            else if (kind === 'shoggoth_v2_masked')  src = './tools/shoggoth-v2.html?phase=masked';
-            else if (kind === 'shoggoth_v2_enraged') src = './tools/shoggoth-v2.html?phase=enraged';
-            else if (kind === 'levels')              src = './tools/levels.html?embed=1';
-            else src = './tools/editor.html?embed=1&color=' + encodeURIComponent(kind);
+            if (kind === 'shoggoth_masked')       src = './tools/inspector.html?embed=1&kind=shoggoth&phase=masked';
+            else if (kind === 'shoggoth_enraged') src = './tools/inspector.html?embed=1&kind=shoggoth&phase=enraged';
+            else if (kind === 'levels')           src = './tools/levels.html?embed=1';
+            else src = './tools/inspector.html?embed=1&kind=robot&color=' + encodeURIComponent(kind);
             if (f.getAttribute('data-src') !== src) { f.src = src; f.setAttribute('data-src', src); }
             f.classList.toggle('full', kind === 'levels');
             f.classList.add('show');

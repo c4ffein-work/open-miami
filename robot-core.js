@@ -1,22 +1,34 @@
 "use strict";
 /* =========================================================================
    OPEN MIAMI - reusable 3D -> stylized 2D sprite renderer.
-   Vanilla WebGL 1, no libraries. Shared by robot.html and editor.html.
+   Vanilla WebGL 1, no libraries. Shared by renderer.js (the game),
+   tools/inspector.html and shoggoth-core.js (the boss, which builds on the
+   same two-pass pipeline).
 
    Exports:
      PALETTES                       - color name -> {body,accent,trim}
      POSES                          - list of pose names
      WEAPONS                        - list of weapon names (fist/pistol/machinegun/shotgun)
      WEAPON_MODELS                  - name -> array of box parts (the 3D weapon models)
+     M4                             - the pooled column-major mat4 helpers
+     orbitVP / topDownVP            - camera builders (view-projection matrices)
+     SpritePipeline                 - the pass-1 target + post pass base class that
+                                      RobotPipeline (here) and ShoggothPipeline
+                                      (shoggoth-core.js) extend: it owns the shared
+                                      "inked" post-process, the FBO and the compile
+                                      helpers, so no scene duplicates them
      createRobotPipeline(gl, {rt})  - the two-pass pipeline on an EXISTING WebGL
                                       context: .render(opts, target) draws one
                                       robot into a caller-provided framebuffer
                                       rect (or the canvas). This is what the game
                                       renderer uses to draw robots live, every
                                       frame, inside its own GL context.
-     createRenderer(canvas)         - a RobotRenderer bound to one canvas
-                                      (owns a context + a pipeline)
-                                      .render({...,weapon}) draws the held weapon
+     CanvasRenderer / makeBaker     - a pipeline bound to a canvas of its own /
+                                      a "one frame -> fresh canvas" baker factory
+                                      (both generic: shoggoth-core.js reuses them)
+     createRenderer(canvas)         - a robot CanvasRenderer (owns a context +
+                                      a pipeline); .render({...,weapon}) draws
+                                      the held weapon
      bakeSprite({pose,color,facingDeg,px,time,size,weapon}) -> HTMLCanvasElement
                                       renders ONE baked top-down sprite frame.
 
@@ -92,7 +104,7 @@ function m4alloc(){
   return m;
 }
 const _n3scratch = new Float32Array(9);
-const M4 = {
+export const M4 = {
   reset(){ _m4used = 0; },
   ident(){const m=m4alloc();m.fill(0);m[0]=m[5]=m[10]=m[15]=1;return m;},
   mul(a,b){ // a*b
@@ -184,6 +196,7 @@ uniform vec2 uTexel;   // 1/size
 uniform float uPx;     // pixel block size in px
 uniform vec2 uSize;    // texture size
 uniform float uTransparent; // 1.0 -> background blocks output alpha 0
+uniform float uEdge;   // luma-gradient threshold that inks an edge
 float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
 vec4 samp(vec2 uv){ return texture2D(uTex, uv); }
 void main(){
@@ -218,7 +231,7 @@ void main(){
     silh = near>0.02 ? 1.0 : 0.0;
   }
 
-  float edge = max(max(step(0.25, lumEdge), step(0.03, ai)), silh);
+  float edge = max(max(step(uEdge, lumEdge), step(0.03, ai)), silh);
 
   float levels = 4.0;
   col = floor(col*levels + 0.5)/levels;
@@ -256,16 +269,16 @@ function makeCube(){
 // TRUE straight-down top-down — the eye is directly over the character (no tilt),
 // so a facing rotation is just the same sprite spun in-plane (identical from every
 // direction, one bake per pose). This is exactly what the in-game camera sees.
-function topDownVP(halfV){
+export function topDownVP(halfV){
   halfV = halfV || 2.05;
   const proj = M4.ortho(-halfV,halfV,-halfV,halfV,0.1,40);
   const eye=[0, 9, 0], center=[0,0.9,0], up=[0,0,-1];
   return M4.mul(proj, M4.lookAt(eye,center,up));
 }
 // free orbit: yaw + pitch around the character, ortho so scale is stable.
-function orbitVP(yaw, pitch, halfV){
+export function orbitVP(yaw, pitch, halfV, center){
   halfV = halfV || 2.35;
-  const center=[0,0.95,0];
+  center = center || [0,0.95,0];
   const dist=12;
   pitch = Math.max(-1.45, Math.min(1.45, pitch));
   const cp=Math.cos(pitch), sp=Math.sin(pitch);
@@ -346,38 +359,34 @@ function part(parent, tx,ty,tz, rx,ry,rz, sx,sy,sz){
   return {node:parent?M4.mul(parent,m):m, draw:parent?M4.mul(parent,withScale):withScale};
 }
 
-/* ---------- the RobotPipeline: two passes on an existing GL context ----------
-   Owns the programs, the unit-cube buffers, the fullscreen-quad buffer and the
-   pass-1 scene target (an rt x rt RGBA texture + depth renderbuffer). It does
-   NOT own the context: it can live on a canvas of its own (RobotRenderer) or
-   inside a bigger renderer that draws many robots per frame into its own
-   framebuffers (the game's renderer.js).
+/* ---------- SpritePipeline: the shared two-pass skeleton ----------
+   Owns everything that is NOT scene-specific: the shader compile helpers, the
+   fullscreen-quad buffer, the pass-1 scene target (an rt x rt RGBA texture +
+   depth renderbuffer, alpha = part id) and the pass-2 "inked" post-process
+   (edge-detect + posterize + pixelate) that resamples the scene into a target
+   rect. RobotPipeline (below) and ShoggothPipeline (shoggoth-core.js) extend
+   it with their own scene program + geometry and call:
+     _beginScene()                      bind + clear the scene target, depth on
+     _postPass(target, px, transparent) run pass 2 into `target` (see render())
+   It does NOT own the context: it can live on a canvas of its own or inside a
+   bigger renderer that draws many sprites per frame into its own framebuffers
+   (the game's renderer.js).
 
-   render() leaves these GL states behind, and restores nothing — the caller
-   re-establishes whatever it needs afterwards:
-     current program, ARRAY_BUFFER binding, the vertex-attrib arrays of its two
-     programs (enabled + pointed at its buffers), FRAMEBUFFER binding, viewport,
-     clearColor, active texture unit (TEXTURE0) and the TEXTURE_2D bound on it,
-     BLEND (disabled: pass 1 stores a part id in alpha, pass 2 writes straight
-     RGBA), DEPTH_TEST (disabled on exit; enabled during pass 1),
-     CULL_FACE / SCISSOR_TEST (disabled). */
-class RobotPipeline {
-  constructor(gl, rt){
+   render() implementations leave these GL states behind, and restore nothing —
+   the caller re-establishes whatever it needs afterwards:
+     current program, ARRAY_BUFFER binding, the vertex-attrib arrays of the
+     programs (enabled + pointed at their buffers), FRAMEBUFFER binding,
+     viewport, clearColor, active texture unit (TEXTURE0) and the TEXTURE_2D
+     bound on it, BLEND (disabled: pass 1 stores a part id in alpha, pass 2
+     writes straight RGBA), DEPTH_TEST (disabled on exit; enabled during
+     pass 1), CULL_FACE / SCISSOR_TEST (disabled). */
+export class SpritePipeline {
+  constructor(gl, rt, {edge=0.25} = {}){
     if(!gl) throw new Error("WebGL unavailable");
     this.gl = gl;
+    this.edge = edge; // post-pass luma-gradient ink threshold
 
-    this.sceneProg = this._program(sceneVS, sceneFS);
-    this.postProg  = this._program(postVS, postFS);
-
-    this.sLoc = {
-      aPos: gl.getAttribLocation(this.sceneProg,"aPos"),
-      aNormal: gl.getAttribLocation(this.sceneProg,"aNormal"),
-      uMVP: gl.getUniformLocation(this.sceneProg,"uMVP"),
-      uNormalMat: gl.getUniformLocation(this.sceneProg,"uNormalMat"),
-      uColor: gl.getUniformLocation(this.sceneProg,"uColor"),
-      uAccent: gl.getUniformLocation(this.sceneProg,"uAccent"),
-      uId: gl.getUniformLocation(this.sceneProg,"uId"),
-    };
+    this.postProg = this._program(postVS, postFS);
     this.pLoc = {
       aPos: gl.getAttribLocation(this.postProg,"aPos"),
       uTex: gl.getUniformLocation(this.postProg,"uTex"),
@@ -385,11 +394,8 @@ class RobotPipeline {
       uPx: gl.getUniformLocation(this.postProg,"uPx"),
       uSize: gl.getUniformLocation(this.postProg,"uSize"),
       uTransparent: gl.getUniformLocation(this.postProg,"uTransparent"),
+      uEdge: gl.getUniformLocation(this.postProg,"uEdge"),
     };
-
-    this.cube = makeCube();
-    this.posBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,this.posBuf); gl.bufferData(gl.ARRAY_BUFFER,this.cube.pos,gl.STATIC_DRAW);
-    this.nrmBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,this.nrmBuf); gl.bufferData(gl.ARRAY_BUFFER,this.cube.nrm,gl.STATIC_DRAW);
     this.quadBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER,this.quadBuf);
     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]),gl.STATIC_DRAW);
@@ -412,6 +418,12 @@ class RobotPipeline {
     if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     return p;
   }
+  // Static geometry buffer helper (positions / normals).
+  _staticBuffer(data){
+    const gl=this.gl;
+    const b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
+    return b;
+  }
 
   _buildTarget(RT){
     const gl=this.gl;
@@ -433,6 +445,75 @@ class RobotPipeline {
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.depthRB);
     if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) console.warn("FBO incomplete");
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  // Pass 1 prologue: the scene target is bound, cleared to (0,0,0,0) (alpha 0
+  // = background id), depth test on, blending off. The subclass then binds its
+  // scene program + geometry and draws.
+  _beginScene(){
+    const gl=this.gl;
+    M4.reset();
+    gl.disable(gl.BLEND);        // pass 1 alpha is a part id, pass 2 writes straight RGBA
+    gl.disable(gl.CULL_FACE);
+    gl.disable(gl.SCISSOR_TEST);
+    // (unbind TEXTURE0 first: the previous pass 2 left our scene texture there,
+    //  and it is this pass's color attachment — never sample-and-render at once)
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.viewport(0,0,this.RT,this.RT);
+    gl.clearColor(0,0,0,0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+  }
+
+  // Pass 2: post -> target rect (or the whole canvas).
+  //   target (optional): {fbo, x, y, w, h} — the post pass is drawn into that
+  //   viewport rect of `fbo` (null = the canvas). Every pixel of the rect is
+  //   overwritten (background comes out as the dark floor color, or as
+  //   (0,0,0,0) when transparent), so the caller never needs to clear it.
+  //   Omitted -> the whole canvas (default framebuffer), cleared first.
+  _postPass(target, px, transparent){
+    const gl=this.gl;
+    gl.disable(gl.DEPTH_TEST);
+    if(target){
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo || null);
+      gl.viewport(target.x|0, target.y|0, target.w|0, target.h|0);
+    } else {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);
+      if(transparent){ gl.clearColor(0,0,0,0); } else { gl.clearColor(0.03,0.04,0.05,1); }
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    gl.useProgram(this.postProg);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.rtTex);
+    gl.uniform1i(this.pLoc.uTex,0);
+    gl.uniform2f(this.pLoc.uTexel, 1/this.RT, 1/this.RT);
+    gl.uniform2f(this.pLoc.uSize, this.RT, this.RT);
+    gl.uniform1f(this.pLoc.uPx, Math.max(1, px || 5));
+    gl.uniform1f(this.pLoc.uTransparent, transparent ? 1.0 : 0.0);
+    gl.uniform1f(this.pLoc.uEdge, this.edge);
+    gl.bindBuffer(gl.ARRAY_BUFFER,this.quadBuf); gl.enableVertexAttribArray(this.pLoc.aPos); gl.vertexAttribPointer(this.pLoc.aPos,2,gl.FLOAT,false,0,0);
+    gl.drawArrays(gl.TRIANGLES,0,6);
+  }
+}
+
+/* ---------- the RobotPipeline: box-built robot on the shared skeleton ---------- */
+class RobotPipeline extends SpritePipeline {
+  constructor(gl, rt){
+    super(gl, rt);
+    this.sceneProg = this._program(sceneVS, sceneFS);
+    this.sLoc = {
+      aPos: gl.getAttribLocation(this.sceneProg,"aPos"),
+      aNormal: gl.getAttribLocation(this.sceneProg,"aNormal"),
+      uMVP: gl.getUniformLocation(this.sceneProg,"uMVP"),
+      uNormalMat: gl.getUniformLocation(this.sceneProg,"uNormalMat"),
+      uColor: gl.getUniformLocation(this.sceneProg,"uColor"),
+      uAccent: gl.getUniformLocation(this.sceneProg,"uAccent"),
+      uId: gl.getUniformLocation(this.sceneProg,"uId"),
+    };
+    this.cube = makeCube();
+    this.posBuf = this._staticBuffer(this.cube.pos);
+    this.nrmBuf = this._staticBuffer(this.cube.nrm);
   }
 
   // `accent` is the same palette accent for every part of one robot: it is
@@ -461,7 +542,6 @@ class RobotPipeline {
       this._drawPart(VP, local, col, accent, b.id);
     }
   }
-
   _renderRobot(VP, pal, plan, facingRad, weapon){
     const body=pal.body, accent=pal.accent, trim=pal.trim;
     const recoil = plan.recoil || 0.0;
@@ -531,41 +611,21 @@ class RobotPipeline {
             orbit:{yaw,pitch,halfV}, halfV}
        weapon: one of WEAPONS ("fist" | "pistol" | "machinegun" | "shotgun")
        time:   continuous seconds — every value renders a distinct frame
-     target (optional): {fbo, x, y, w, h} — the post pass is drawn into that
-       viewport rect of `fbo` (null = the canvas). Every pixel of the rect is
-       overwritten (background comes out as the dark floor color, or as
-       (0,0,0,0) when transparent), so the caller never needs to clear it.
-       Omitted -> the whole canvas (default framebuffer), cleared first. */
+     target (optional): {fbo, x, y, w, h} — see SpritePipeline._postPass. */
   render(opts, target){
     const gl=this.gl;
-    M4.reset();
     const pose = (opts.pose || "idle");
     const pal  = opts.pal || PALETTES[(opts.color||"coral")] || PALETTES.coral;
-    const px   = Math.max(1, opts.px || 5);
     const time = opts.time || 0;
     const weapon = (opts.weapon in WEAPON_MODELS) ? opts.weapon : "fist";
     const facingRad = (opts.facingDeg || 0) * Math.PI/180;
-    const transparent = !!opts.transparent;
 
+    // pass 1: scene -> FBO
+    this._beginScene();
     const VP = opts.orbit
       ? orbitVP(opts.orbit.yaw||0, opts.orbit.pitch||0, opts.orbit.halfV)
       : topDownVP(opts.halfV);
-
     const plan = posePlan(pose, time);
-
-    gl.disable(gl.BLEND);        // pass 1 alpha is a part id, pass 2 writes straight RGBA
-    gl.disable(gl.CULL_FACE);
-    gl.disable(gl.SCISSOR_TEST);
-
-    // pass 1: scene -> FBO
-    // (unbind TEXTURE0 first: the previous pass 2 left our scene texture there,
-    //  and it is this pass's color attachment — never sample-and-render at once)
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, null);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.viewport(0,0,this.RT,this.RT);
-    gl.clearColor(0,0,0,0); // alpha 0 = background id
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    gl.enable(gl.DEPTH_TEST);
     gl.useProgram(this.sceneProg);
     gl.bindBuffer(gl.ARRAY_BUFFER,this.posBuf); gl.enableVertexAttribArray(this.sLoc.aPos); gl.vertexAttribPointer(this.sLoc.aPos,3,gl.FLOAT,false,0,0);
     gl.bindBuffer(gl.ARRAY_BUFFER,this.nrmBuf); gl.enableVertexAttribArray(this.sLoc.aNormal); gl.vertexAttribPointer(this.sLoc.aNormal,3,gl.FLOAT,false,0,0);
@@ -574,25 +634,7 @@ class RobotPipeline {
     gl.disableVertexAttribArray(this.sLoc.aNormal);
 
     // pass 2: post -> target rect (or the whole canvas)
-    gl.disable(gl.DEPTH_TEST);
-    if(target){
-      gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo || null);
-      gl.viewport(target.x|0, target.y|0, target.w|0, target.h|0);
-    } else {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);
-      if(transparent){ gl.clearColor(0,0,0,0); } else { gl.clearColor(0.03,0.04,0.05,1); }
-      gl.clear(gl.COLOR_BUFFER_BIT);
-    }
-    gl.useProgram(this.postProg);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.rtTex);
-    gl.uniform1i(this.pLoc.uTex,0);
-    gl.uniform2f(this.pLoc.uTexel, 1/this.RT, 1/this.RT);
-    gl.uniform2f(this.pLoc.uSize, this.RT, this.RT);
-    gl.uniform1f(this.pLoc.uPx, px);
-    gl.uniform1f(this.pLoc.uTransparent, transparent ? 1.0 : 0.0);
-    gl.bindBuffer(gl.ARRAY_BUFFER,this.quadBuf); gl.enableVertexAttribArray(this.pLoc.aPos); gl.vertexAttribPointer(this.pLoc.aPos,2,gl.FLOAT,false,0,0);
-    gl.drawArrays(gl.TRIANGLES,0,6);
+    this._postPass(target, opts.px, !!opts.transparent);
   }
 }
 
@@ -602,40 +644,47 @@ class RobotPipeline {
    output size. */
 export function createRobotPipeline(gl, {rt=128} = {}){ return new RobotPipeline(gl, rt); }
 
-/* ---------- the RobotRenderer, bound to one canvas ---------- */
-class RobotRenderer {
-  constructor(canvas){
+/* ---------- CanvasRenderer: a pipeline bound to one canvas of its own ----------
+   makePipeline(gl, rt) builds the pipeline (square target at canvas res). */
+export class CanvasRenderer {
+  constructor(canvas, makePipeline){
     this.canvas = canvas;
     const gl = canvas.getContext("webgl", {antialias:false, preserveDrawingBuffer:true});
     if(!gl) throw new Error("WebGL unavailable");
     this.gl = gl;
-    this.pipeline = new RobotPipeline(gl, canvas.width); // square target at canvas res
+    this.pipeline = makePipeline(gl, canvas.width);
   }
-  /* render one frame to this canvas — see RobotPipeline.render for opts. */
+  /* render one frame to this canvas — see the pipeline's render for opts. */
   render(opts){ this.pipeline.render(opts, null); }
 }
+const makeRobotPipeline = (gl, rt) => new RobotPipeline(gl, rt);
+export function createRenderer(canvas){ return new CanvasRenderer(canvas, makeRobotPipeline); }
 
-export function createRenderer(canvas){ return new RobotRenderer(canvas); }
+/* ---------- makeBaker: "one baked frame as a standalone canvas" factory ----------
+   Returns bake(opts, size) -> HTMLCanvasElement: renders one frame through a
+   shared internal canvas renderer (so repeated calls do not leak GL contexts)
+   and copies it into a fresh canvas the caller owns. */
+export function makeBaker(makePipeline){
+  let renderer = null, rSize = 0;
+  return function bake(opts, size){
+    if(!renderer || rSize !== size){
+      const c = document.createElement("canvas");
+      c.width = c.height = size;
+      renderer = new CanvasRenderer(c, makePipeline);
+      rSize = size;
+    }
+    renderer.render(opts);
+    const out = document.createElement("canvas");
+    out.width = out.height = size;
+    out.getContext("2d").drawImage(renderer.canvas, 0, 0);
+    return out;
+  };
+}
 
-/* ---------- bakeSprite: one baked frame as a standalone canvas ----------
-   Renders ONE baked, top-down, inked/pixelated sprite frame and returns a
-   fresh HTMLCanvasElement holding it. Uses a shared internal WebGL renderer
-   so calling it repeatedly does not leak GL contexts. (The game itself does
-   not bake: it runs createRobotPipeline() live inside its own context.) */
-let _bakeRenderer = null;
-let _bakeSize = 0;
+/* ---------- bakeSprite: one baked robot frame as a standalone canvas ----------
+   Renders ONE baked, top-down, inked/pixelated sprite frame. (The game itself
+   does not bake: it runs createRobotPipeline() live inside its own context.) */
+const _bakeRobot = makeBaker(makeRobotPipeline);
 export function bakeSprite({pose="idle", color="coral", facingDeg=0, px=5, time=0, size=384, weapon="fist", transparent=false} = {}){
-  if(!_bakeRenderer || _bakeSize !== size){
-    const c = document.createElement("canvas");
-    c.width = c.height = size;
-    _bakeRenderer = new RobotRenderer(c);
-    _bakeSize = size;
-  }
-  _bakeRenderer.render({pose, color, px, time, facingDeg, weapon, transparent}); // top-down (no orbit)
-
-  // copy into an independent canvas the caller owns
-  const out = document.createElement("canvas");
-  out.width = out.height = size;
-  out.getContext("2d").drawImage(_bakeRenderer.canvas, 0, 0);
-  return out;
+  return _bakeRobot({pose, color, px, time, facingDeg, weapon, transparent}, size); // top-down (no orbit)
 }

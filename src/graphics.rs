@@ -36,6 +36,7 @@ mod op {
     pub const ROTATE: f32 = 10.0; // angle
     pub const ROBOT: f32 = 11.0; // colorIdx poseIdx weaponIdx x y angle sizePx time
     pub const SCALE: f32 = 12.0; // sx sy
+    pub const SHOGGOTH: f32 = 13.0; // x y sizePx heading reveal time
 }
 
 /// Separator between entries in the per-frame text arena. renderer.js splits
@@ -288,9 +289,39 @@ impl Graphics {
         ]);
     }
 
-    /// Draw the shoggoth boss: a writhing dark mass. While `enraged` is false it
-    /// wears a friendly yellow smiley mask; once the mask cracks off it shows the
-    /// horror beneath (red eyes, mask shards flung outward).
+    /// Draw the LIVE 3D shoggoth boss. The JS renderer runs the shoggoth-core
+    /// 3D->2D pipeline (mass, smiley mask, tentacles + dot eyes) at continuous
+    /// time `time` — every frame, no caching — into a scratch tile and draws it
+    /// as an axis-aligned quad of `size_px` px centered on `center`.
+    ///   heading: radians in screen convention (0 = +x, PI/2 = +y/down); the
+    ///            mask leans toward it (the direction the boss is moving)
+    ///   reveal:  0..1 mask-off progress — 0 = mask intact, (0,1) = the mask
+    ///            cracking and being consumed inward while the tentacles grow,
+    ///            1 = raw enraged form
+    pub fn draw_shoggoth_live(
+        &self,
+        center: Vec2,
+        size_px: f32,
+        heading: f32,
+        reveal: f32,
+        time: f32,
+    ) {
+        self.push(&[
+            op::SHOGGOTH,
+            center.x,
+            center.y,
+            size_px,
+            heading,
+            reveal,
+            time,
+        ]);
+    }
+
+    /// Draw a small 2D-primitive shoggoth icon: a writhing dark mass wearing a
+    /// friendly yellow smiley mask (`enraged` false) or showing the horror
+    /// beneath (red eyes, tentacles, mask shards). Only used for thumbnails
+    /// (the `?viz` gallery / level map); the in-game boss is
+    /// `draw_shoggoth_live` (a fallback if the live pipeline were ever missing).
     pub fn draw_shoggoth(&self, center: Vec2, radius: f32, enraged: bool) {
         let dark = Color::new(0.11, 0.04, 0.15, 1.0);
         let dark2 = Color::new(0.22, 0.09, 0.28, 1.0);

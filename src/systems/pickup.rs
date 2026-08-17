@@ -74,9 +74,12 @@ impl PickupSystem {
                 continue;
             }
 
-            // Give the player the new weapon, fully loaded.
+            // Give the player the new weapon, fully loaded (an unarmed player —
+            // e.g. right after a throw — has no Weapon component: add it).
             if let Some(weapon) = world.get_component_mut::<Weapon>(player) {
                 *weapon = Weapon::new(new_weapon);
+            } else {
+                world.add_component(player, Weapon::new(new_weapon));
             }
 
             match current_weapon {
@@ -238,8 +241,13 @@ mod tests {
         let swapped = PickupSystem::swap_for_player(&mut world);
 
         assert_eq!(swapped, Some(WeaponType::Shotgun));
-        // Nothing to drop, so the pickup is consumed.
+        // Nothing to drop, so the pickup is consumed…
         assert_eq!(world.query::<WeaponPickup>().len(), 0);
+        // …and the player now actually holds it (regression: it used to vanish).
+        assert_eq!(
+            world.get_component::<Weapon>(player).map(|w| w.weapon_type),
+            Some(WeaponType::Shotgun)
+        );
     }
 
     #[test]

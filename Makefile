@@ -22,7 +22,7 @@ help:
 	@echo "  make check-levels    - Validate levels/*.json and check levels_data.rs is up to date"
 
 # Run all verification checks (E2E tests excluded by default due to dependency constraints)
-verify: check-fmt check-clippy check-test check-build check-wasm-build
+verify: check-fmt check-clippy check-test check-build check-wasm-build check-levels
 	@echo "$(GREEN)✓ All core checks passed!$(NC)"
 	@echo "$(YELLOW)Note: E2E tests skipped (run 'make check-e2e' separately if WASM dependencies are available)$(NC)"
 
@@ -41,6 +41,8 @@ check-test:
 check-clippy:
 	@echo "$(YELLOW)Running clippy (linting)...$(NC)"
 	cargo clippy --all-targets --all-features -- -D warnings
+	@echo "$(YELLOW)Running clippy for the wasm32 target (audio/graphics/input/render/camera/lib are wasm-only)...$(NC)"
+	cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
 	@echo "$(GREEN)✓ Clippy passed$(NC)"
 
 # Rustfmt - code formatting check
