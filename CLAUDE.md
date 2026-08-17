@@ -19,8 +19,12 @@
   `Graphics::draw_shoggoth` is only the `?viz` gallery / level-map thumbnail
 - Opcode 14 = `POSTFX kind t r g b`: when present anywhere in a frame,
   renderer.js renders the whole frame into an offscreen scene FBO and draws it
-  through a full-screen post shader (kind 0 = blur-out/dissolve toward the
-  colour, kind 1 = synthwave CRT). Only the last POSTFX of a frame applies
+  through a full-screen post shader. Kinds 0-9 (table mirrored in renderer.js
+  and `Graphics::postfx`): 0 blur-out/dissolve toward the colour, 1 synthwave
+  CRT, 2 VHS tape, 3 drunk sway, 4 CRT tube (barrel + grille), 5 acid trip
+  (hue cycling), 6 datamosh glitch, 7 neon bloom, 8 pixel mosaic, 9 tunnel
+  rush; the `?viz` EFFECTS tab previews them all. Only the last POSTFX of a
+  frame applies
 - The command opcode tables in src/graphics.rs (`mod op`) and renderer.js
   (incl. its `OP_ARGS` arity table used by the POSTFX pre-scan) must stay in
   sync
@@ -32,7 +36,11 @@
 - `src/levels_data.rs` is GENERATED from `levels/*.json` by `make gen-levels`; `make check-levels` validates + checks it is current. Never hand-edit it.
 
 ## `?viz` toolbox (one entry point)
-- `/?viz` tabs: SPRITES (click a character → 3D/2D inspector iframe), MUSICS (tracker + SFX), LEVELS (the level + scenario editor iframe, full pane), EFFECTS
+- `/?viz` tabs: SPRITES (two pages: CHARACTERS — click one → 3D/2D inspector
+  iframe — and PROPS — the animated datacenter prop library from
+  `src/props.rs`, wasm-drawn grid + big preview), MUSICS (tracker + SFX),
+  LEVELS (the level + scenario editor iframe, full pane), EFFECTS (previews
+  every POSTFX shader kind + the 2D shoggoth glitch)
 - `/?floor=N` starts the game directly on floor N (14 = 13½); music starts on the first key/click. Add `&debug` (`/?floor=14&debug`) to enable the debug tooling: with debug overlays on (I), **K** purges all rogues (incl. the boss; debug/e2e helper) and **B** cracks the boss's mask (drops it to the enrage threshold so the live mask-off / raw form can be previewed)
 - The ending (`src/ending.rs`): extracting through a `to: 0` exit (13½'s car) → EXFILTRATED card → the `extracted` scenario step's UPLINK comms until the feed idles → 2.5 s blur-out (POSTFX 0) → `GameScreen::Ending` credits (the `CREDITS` const list) with POSTFX 1; Enter/Esc → level select
 - Level editor SAVE = `PUT /levels/<file>.json` to serve.py, guarded by the `X-Editor-Token` header (token from `$EDITOR_TOKEN` or the gitignored `.editor-token`, printed at server start). COPY DIFF gives a `patch -p1` unified diff.

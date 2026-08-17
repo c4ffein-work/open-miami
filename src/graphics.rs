@@ -321,13 +321,29 @@ impl Graphics {
     /// Request a full-screen post-processing pass over THIS frame. When the
     /// command is present anywhere in a frame's stream, renderer.js renders
     /// the whole frame into an offscreen framebuffer and draws it through the
-    /// post shader `kind` with strength `t` (0..1) toward colour `(r, g, b)`:
+    /// post shader `kind` with strength `t` (0..1) toward colour `(r, g, b)`.
+    /// The kinds are a menu of Hotline-Miami-flavoured looks (the mirror of
+    /// this table lives in renderer.js — keep in sync):
     ///   kind 0 = BLUR-OUT: a growing multi-tap blur + dissolve toward the
     ///            colour, with synthwave scanlines and noise grain (t = 0
-    ///            untouched, 1 = fully dissolved into the colour)
+    ///            untouched, 1 = fully dissolved into the colour; the ending)
     ///   kind 1 = SYNTHWAVE CRT: scanlines, slight chromatic split, vignette
-    ///            and grain over the frame; t = intensity (the colour tints
-    ///            the vignette). Used under the credits.
+    ///            and grain; the colour tints the vignette (the credits)
+    ///   kind 2 = VHS TAPE: rolling tracking band, per-scanline jitter,
+    ///            chroma bleed, washed colour, dropout streaks
+    ///   kind 3 = DRUNK SWAY: slow rotation/zoom breathing, wavy warp,
+    ///            orbiting double-vision ghost, hue drift
+    ///   kind 4 = CRT TUBE: barrel distortion over a black bezel, RGB
+    ///            aperture grille, hard scanlines, mains flicker
+    ///   kind 5 = ACID TRIP: radial hue cycling, oversaturation, mild
+    ///            posterize, liquid warp
+    ///   kind 6 = DATAMOSH: horizontal slice/block displacement glitch,
+    ///            channel swaps, digital noise blocks
+    ///   kind 7 = NEON BLOOM: bright-pass glow, shadows lifted toward the
+    ///            colour
+    ///   kind 8 = PIXEL MOSAIC: chunky pixelation + dithered posterize
+    ///   kind 9 = TUNNEL RUSH: radial zoom blur toward the centre, hot core,
+    ///            edge vignette
     /// Only the last POSTFX of a frame applies. Any other kind is a no-op.
     pub fn postfx(&self, kind: u32, t: f32, color: Color) {
         self.push(&[op::POSTFX, kind as f32, t, color.r, color.g, color.b]);

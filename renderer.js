@@ -51,10 +51,19 @@
    POSTFX: when a frame's stream contains opcode 14 (found by a cheap pre-scan
    over the opcode table), the whole frame is rendered into an offscreen scene
    framebuffer instead of the canvas, then drawn through a full-screen post
-   shader — kind 0 = BLUR-OUT (growing multi-tap blur + dissolve toward the
-   colour, scanlines, grain; the ending), kind 1 = SYNTHWAVE CRT (scanlines,
-   chromatic split, vignette, grain; under the credits). Only the last POSTFX
-   of a frame applies.
+   shader. The kinds are a menu of Hotline-Miami-flavoured looks:
+     0 BLUR-OUT      growing multi-tap blur + dissolve toward the colour (the ending)
+     1 SYNTHWAVE CRT scanlines, chromatic split, vignette, grain (the credits)
+     2 VHS TAPE      tracking band, per-line jitter, chroma bleed, dropouts
+     3 DRUNK SWAY    slow rotation/zoom breathing, wavy warp, ghosting, hue drift
+     4 CRT TUBE      barrel distortion, aperture grille, hard scanlines, flicker
+     5 ACID TRIP     radial hue cycling, oversaturation, posterize, liquid warp
+     6 DATAMOSH      slice/block displacement glitch, channel swaps, noise blocks
+     7 NEON BLOOM    bright-pass glow, shadow tint toward the colour
+     8 PIXEL MOSAIC  chunky pixelation + dithered posterize
+     9 TUNNEL RUSH   radial zoom blur toward the centre (adrenaline)
+   All kinds share the args `kind t r g b` (t = 0..1 strength, rgb = the
+   effect's colour where it uses one). Only the last POSTFX of a frame applies.
    ========================================================================= */
 
 import { createRobotPipeline } from "./robot-core.js";
@@ -118,7 +127,9 @@ void main(){
 }
 `;
 
-// Full-screen post pass. Kept deliberately small and dependency-free.
+// Full-screen post pass. One shader, one uniform selecting the look — the
+// kinds are all cheap single-pass tricks (a few extra taps at most), kept
+// deliberately dependency-free. See the header table for the kind list.
 const POST_FS = `
 precision mediump float;
 varying vec2 vUv;
@@ -133,6 +144,26 @@ float hash(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+// Hue rotation: Rodrigues rotation of the rgb vector about the gray axis.
+vec3 hueShift(vec3 color, float a) {
+  const vec3 k = vec3(0.57735);
+  float ca = cos(a);
+  return color * ca + cross(k, color) * sin(a) + k * dot(k, color) * (1.0 - ca);
+}
+
+float luma(vec3 c) {
+  return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+// Chromatic split sample: r/b pulled apart along +-off.
+vec3 splitSample(vec2 uv, vec2 off) {
+  return vec3(
+    texture2D(uScene, uv + off).r,
+    texture2D(uScene, uv).g,
+    texture2D(uScene, uv - off).b
+  );
+}
+
 void main(){
   vec2 uv = vUv;
   vec3 c;
@@ -141,7 +172,7 @@ void main(){
   float n = hash(floor(uv * uRes / 3.0) + floor(uTime * 24.0) * 0.371);
   float scan = 0.5 + 0.5 * sin(uv.y * uRes.y * 3.14159);
   if (uKind < 0.5) {
-    // ---- BLUR-OUT: two rings of taps whose radius grows with t ----
+    // ---- 0 BLUR-OUT: two rings of taps whose radius grows with t ----
     float radPx = t * t * 34.0 + t * 2.0;
     vec2 px = radPx / uRes;
     vec3 acc = texture2D(uScene, uv).rgb * 2.0;
@@ -159,16 +190,142 @@ void main(){
     c = mix(c, uColor, k);
     c *= 1.0 - 0.22 * t * scan;
     c += (n - 0.5) * 0.12 * t;
-  } else {
-    // ---- SYNTHWAVE CRT: chromatic split, scanlines, vignette, grain ----
-    vec2 split = vec2(1.6 * t / uRes.x, 0.0);
-    c.r = texture2D(uScene, uv + split).r;
-    c.g = texture2D(uScene, uv).g;
-    c.b = texture2D(uScene, uv - split).b;
+  } else if (uKind < 1.5) {
+    // ---- 1 SYNTHWAVE CRT: chromatic split, scanlines, vignette, grain ----
+    c = splitSample(uv, vec2(1.6 * t / uRes.x, 0.0));
     c *= 1.0 - 0.28 * t * scan;
     vec2 q = uv * (1.0 - uv);
     float vig = pow(clamp(q.x * q.y * 18.0, 0.0, 1.0), 0.28 * t);
     c = c * vig + uColor * 0.10 * t * (1.0 - vig);
+    c += (n - 0.5) * 0.06 * t;
+  } else if (uKind < 2.5) {
+    // ---- 2 VHS TAPE: tracking band, line jitter, chroma bleed, dropouts ----
+    // A tracking band rolls up the screen; lines inside it tear hard.
+    float yb = fract(uTime * 0.13);
+    float db = abs(uv.y - yb);
+    float band = smoothstep(0.045, 0.0, min(db, 1.0 - db));
+    float ln = floor(uv.y * uRes.y);
+    float jit = (hash(vec2(ln, floor(uTime * 24.0))) - 0.5)
+      * (4.0 + band * 90.0) * t / uRes.x;
+    vec2 suv = vec2(uv.x + jit + band * 0.02 * t * sin(uTime * 43.0 + uv.y * 61.0), uv.y);
+    c = splitSample(suv, vec2(2.5 * t / uRes.x, 0.0));
+    // Washed-out tape colour, whitened noise inside the band.
+    c = mix(c, vec3(luma(c)), 0.25 * t);
+    c += band * t * (0.18 + 0.45 * n);
+    // Rare white dropout streaks.
+    float drop = step(0.994, hash(vec2(ln, floor(uTime * 60.0) + 7.0)));
+    c = mix(c, vec3(0.9), drop * 0.8 * t);
+    // Head-switch noise bar pinned to the bottom edge.
+    c = mix(c, vec3(n), step(0.972, uv.y) * 0.5 * t);
+    c *= 1.0 - 0.18 * t * scan;
+    c += (n - 0.5) * 0.10 * t;
+  } else if (uKind < 3.5) {
+    // ---- 3 DRUNK SWAY: rotation/zoom breathing, wavy warp, ghost, hue ----
+    float asp = uRes.x / uRes.y;
+    vec2 p = uv - 0.5;
+    p.x *= asp;
+    float ang = (sin(uTime * 0.8) * 0.045 + sin(uTime * 0.47 + 1.7) * 0.030) * t;
+    float ca = cos(ang), sa = sin(ang);
+    p = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca);
+    p /= 1.0 + (0.05 + 0.03 * sin(uTime * 1.1)) * t;
+    p.x /= asp;
+    vec2 wuv = p + 0.5;
+    wuv += vec2(sin(wuv.y * 7.0 + uTime * 1.3), cos(wuv.x * 6.0 + uTime * 1.1)) * 0.006 * t;
+    vec3 base = texture2D(uScene, wuv).rgb;
+    // Double-vision ghost slowly orbiting the true image.
+    vec2 gof = vec2(cos(uTime * 0.6), sin(uTime * 0.45)) * 9.0 * t / uRes;
+    vec3 ghost = texture2D(uScene, wuv + gof).rgb;
+    c = mix(base, max(base, ghost), 0.5 * t);
+    c = hueShift(c, 0.5 * t * sin(uTime * 0.5));
+    c *= 1.0 - 0.10 * t * scan;
+    c += (n - 0.5) * 0.05 * t;
+  } else if (uKind < 4.5) {
+    // ---- 4 CRT TUBE: barrel distortion, aperture grille, flicker ----
+    vec2 p = uv * 2.0 - 1.0;
+    float r2 = dot(p, p);
+    p *= 1.0 + 0.12 * t * r2;
+    vec2 cuv = p * 0.5 + 0.5;
+    // Off-tube pixels go black (the bezel).
+    float inb = step(0.0, cuv.x) * step(cuv.x, 1.0) * step(0.0, cuv.y) * step(cuv.y, 1.0);
+    c = splitSample(cuv, vec2(1.2 * t * (1.0 + r2) / uRes.x, 0.0));
+    // Aperture grille: RGB phosphor triads across x.
+    float px3 = mod(floor(cuv.x * uRes.x), 3.0);
+    vec3 tri = vec3(step(px3, 0.5), step(0.5, px3) * step(px3, 1.5), step(1.5, px3));
+    c *= mix(vec3(1.0), tri * 1.9 + 0.25, 0.7 * t);
+    float scan2 = 0.5 + 0.5 * sin(cuv.y * uRes.y * 3.14159);
+    c *= 1.0 - 0.35 * t * scan2;
+    c *= 1.0 - 0.04 * t * (0.5 + 0.5 * sin(uTime * 87.0)); // mains flicker
+    vec2 q = cuv * (1.0 - cuv);
+    c *= pow(clamp(q.x * q.y * 25.0, 0.0, 1.0), 0.45 * t) * inb;
+    c += (n - 0.5) * 0.05 * t * inb;
+  } else if (uKind < 5.5) {
+    // ---- 5 ACID TRIP: radial hue cycling, oversaturate, posterize ----
+    vec2 wuv = uv + vec2(sin(uv.y * 12.0 + uTime * 1.7), cos(uv.x * 11.0 + uTime * 1.3)) * 0.004 * t;
+    c = texture2D(uScene, wuv).rgb;
+    float r = length(uv - 0.5);
+    c = hueShift(c, t * (uTime * 1.2 + r * 6.0));
+    c = mix(vec3(luma(c)), c, 1.0 + 0.9 * t); // oversaturate
+    c = mix(c, floor(c * 6.0 + 0.5) / 6.0, 0.5 * t); // mild posterize
+    c *= 1.0 - 0.10 * t * scan;
+    c += (n - 0.5) * 0.05 * t;
+  } else if (uKind < 6.5) {
+    // ---- 6 DATAMOSH: slice/block displacement, channel swap, noise ----
+    float rt = floor(uTime * 12.0);
+    float seg = floor(uv.y * 28.0);
+    float r1 = hash(vec2(seg, rt));
+    float tear = step(0.72, r1);
+    float shift = (r1 - 0.5) * 0.22 * t * tear;
+    vec2 blk = floor(uv * vec2(12.0, 8.0));
+    float br = hash(blk + rt * 0.13);
+    shift += (hash(blk + rt) - 0.5) * 0.2 * t * step(0.93, br);
+    vec2 guv = vec2(fract(uv.x + shift), uv.y);
+    c = splitSample(guv, vec2((4.0 + 10.0 * tear) * t / uRes.x, 0.0));
+    // Corrupted blocks: swapped channels or raw digital noise.
+    c = mix(c, c.gbr, step(0.965, br) * t);
+    vec3 noiseCol = vec3(hash(blk + rt * 3.7), hash(blk + rt * 5.1), hash(blk + rt * 7.3));
+    c = mix(c, noiseCol, step(1.0 - 0.06 * t, hash(blk + rt + 31.0)));
+    c *= 1.0 - 0.12 * t * scan;
+    c += (n - 0.5) * 0.08 * t;
+  } else if (uKind < 7.5) {
+    // ---- 7 NEON BLOOM: bright-pass glow + shadow tint toward the colour ----
+    c = texture2D(uScene, uv).rgb;
+    vec3 glow = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * 0.785398;
+      vec2 d = vec2(cos(a), sin(a)) * (6.0 / uRes);
+      glow += max(texture2D(uScene, uv + d).rgb - 0.45, 0.0);
+      glow += max(texture2D(uScene, uv + d * 2.5).rgb - 0.45, 0.0) * 0.6;
+    }
+    glow /= 12.8;
+    c += glow * 2.2 * t * (0.92 + 0.08 * sin(uTime * 9.0));
+    c += uColor * 0.12 * t * (1.0 - luma(c)); // lift the shadows into neon
+    c *= 1.0 - 0.10 * t * scan;
+    c += (n - 0.5) * 0.04 * t;
+  } else if (uKind < 8.5) {
+    // ---- 8 PIXEL MOSAIC: chunky pixelation + dithered posterize ----
+    float cell = 1.0 + 6.0 * t;
+    vec2 id = floor(uv * uRes / cell);
+    c = texture2D(uScene, (id + 0.5) * cell / uRes).rgb;
+    float levels = 5.0;
+    float dith = (hash(id) - 0.5) / levels;
+    c = mix(c, floor((c + dith) * levels + 0.5) / levels, t);
+    c *= 1.0 - 0.08 * t * scan;
+  } else {
+    // ---- 9 TUNNEL RUSH: radial zoom blur toward the centre ----
+    vec2 p = uv - 0.5;
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < 10; i++) {
+      float k = float(i) / 10.0;
+      float w = 1.0 - k * 0.8;
+      acc += texture2D(uScene, p * (1.0 - 0.22 * t * k) + 0.5).rgb * w;
+      wsum += w;
+    }
+    c = acc / wsum;
+    float rr = length(p);
+    c *= 1.0 + 0.25 * t * (1.0 - smoothstep(0.0, 0.45, rr)); // hot centre
+    vec2 q = uv * (1.0 - uv);
+    c *= pow(clamp(q.x * q.y * 18.0, 0.0, 1.0), 0.4 * t);
     c += (n - 0.5) * 0.06 * t;
   }
   gl_FragColor = vec4(c, 1.0);

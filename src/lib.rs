@@ -19,6 +19,7 @@ pub mod levels;
 #[rustfmt::skip]
 pub mod levels_data;
 pub mod pathfinding;
+pub mod props;
 #[cfg(target_arch = "wasm32")]
 pub mod render;
 #[cfg(target_arch = "wasm32")]
@@ -55,6 +56,7 @@ mod wasm_entry {
         floor_def, floor_title, level_def, level_index_for_floor_id, BOSS_LEVEL, LEVEL_COUNT,
     };
     use crate::math::{Color, Vec2};
+    use crate::props::{draw_prop, PROP_COUNT, PROP_NAMES};
     use crate::render::*;
     use crate::render_comms::{
         render_comms, render_elevators, render_objective, render_zones_debug,
@@ -290,6 +292,26 @@ mod wasm_entry {
         Effects,
     }
 
+    /// EFFECTS tab: the POSTFX shader menu — (kind, label, preview peak `t`,
+    /// colour). Mirrors the kind table in renderer.js / `Graphics::postfx`.
+    /// Peak `t` stays below 1 where full strength would blank the frame
+    /// (BLUR-OUT at t = 1 is a solid colour).
+    const POSTFX_PREVIEWS: [(u32, &str, f32, Color); 10] = [
+        (0, "BLUR-OUT", 0.8, Color::new(0.05, 0.02, 0.10, 1.0)),
+        (1, "SYNTHWAVE CRT", 1.0, Color::new(1.0, 0.25, 0.65, 1.0)),
+        (2, "VHS TAPE", 1.0, Color::new(0.60, 0.60, 0.90, 1.0)),
+        (3, "DRUNK SWAY", 1.0, Color::new(0.60, 0.20, 0.80, 1.0)),
+        (4, "CRT TUBE", 1.0, Color::new(0.20, 0.90, 0.90, 1.0)),
+        (5, "ACID TRIP", 1.0, Color::new(0.90, 0.30, 0.90, 1.0)),
+        (6, "DATAMOSH", 1.0, Color::new(0.30, 0.90, 0.50, 1.0)),
+        (7, "NEON BLOOM", 1.0, Color::new(0.55, 0.10, 0.60, 1.0)),
+        (8, "PIXEL MOSAIC", 1.0, Color::new(0.90, 0.80, 0.30, 1.0)),
+        (9, "TUNNEL RUSH", 1.0, Color::new(1.0, 0.40, 0.20, 1.0)),
+    ];
+
+    /// How long an EFFECTS-tab POSTFX preview plays (ramp in, hold, ramp out).
+    const POSTFX_PREVIEW_MS: f64 = 4000.0;
+
     /// Small deterministic hash -> pseudo-random, used for the glitch effect.
     fn hash2(a: u32, b: u32) -> u32 {
         let mut x = a
@@ -491,7 +513,14 @@ mod wasm_entry {
         viz_tab: VizTab,
         /// Index of the sprites-gallery item open in the inspector (-1 = none).
         viz_selected: i32,
+        /// SPRITES tab sub-page: false = characters, true = the prop library.
+        viz_props_page: bool,
+        /// Selected prop in the PROPS gallery (big live preview on the right).
+        viz_prop_selected: usize,
         viz_level: usize,
+        /// EFFECTS tab: the running preview — -1 = the 2D shoggoth glitch,
+        /// >= 0 = an index into [`POSTFX_PREVIEWS`]. Timed from `effect_start`.
+        effect_kind: i32,
         effect_start: f64,
         prev_player_alive: bool,
         /// Seconds until the machine-gun burst SFX may retrigger (see the
@@ -545,7 +574,10 @@ mod wasm_entry {
                 boss_intro_line: 0,
                 viz_tab: VizTab::Sprites,
                 viz_selected: -1,
+                viz_props_page: false,
+                viz_prop_selected: 0,
                 viz_level: 0,
+                effect_kind: -1,
                 effect_start: 0.0,
                 prev_player_alive: true,
                 mg_sfx_cooldown: 0.0,
@@ -729,38 +761,212 @@ mod wasm_entry {
                 VizTab::Effects => self.draw_viz_effects(graphics, mouse, click),
             }
 
-            // A previewing effect draws full-screen, on top of everything.
+            // A previewing effect draws full-screen, on top of everything: the
+            // 2D shoggoth glitch as commands, a POSTFX kind as a real post pass
+            // over this whole viz frame.
             let elapsed = self.last_time - self.effect_start;
-            if self.effect_start > 0.0 && (0.0..1200.0).contains(&elapsed) {
-                draw_shoggoth_glitch(graphics, elapsed as f32);
+            if self.effect_start > 0.0 {
+                if self.effect_kind < 0 {
+                    if (0.0..1200.0).contains(&elapsed) {
+                        draw_shoggoth_glitch(graphics, elapsed as f32);
+                    }
+                } else if (0.0..POSTFX_PREVIEW_MS).contains(&elapsed) {
+                    let (kind, _, peak, color) = POSTFX_PREVIEWS[self.effect_kind as usize];
+                    let p = (elapsed / POSTFX_PREVIEW_MS) as f32;
+                    // Envelope: ramp in over 15%, hold, ramp out the last 20%.
+                    let env = (p / 0.15).min((1.0 - p) / 0.2).clamp(0.0, 1.0);
+                    graphics.postfx(kind, peak * env, color);
+                }
             }
         }
 
-        /// EFFECTS tab: trigger a full-screen effect to preview it (plays 1.2s).
+        /// EFFECTS tab: trigger a full-screen effect to preview it. The POSTFX
+        /// rows are the WebGL post shaders (played over this very pane for 4s,
+        /// ramp in / hold / ramp out); below them, the 2D command-stream
+        /// effects (1.2s).
         fn draw_viz_effects(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let coral = Color::from_rgba(217, 119, 87, 255);
+            let elapsed = self.last_time - self.effect_start;
             graphics.draw_text(
-                "Full-screen glitch effects. Click to preview (1.2s).",
-                Vec2::new(40.0, 100.0),
+                "Full-screen effects. Click one to preview it over this pane.",
+                Vec2::new(40.0, 96.0),
                 18.0,
                 Color::GRAY,
             );
-            if viz_button(graphics, mouse, 40.0, 140.0, 240.0, 46.0, "Shoggoth", false) && click {
+
+            graphics.draw_text(
+                "POST SHADERS (WebGL, POSTFX opcode)",
+                Vec2::new(40.0, 126.0),
+                16.0,
+                coral,
+            );
+            for (i, &(_, name, _, _)) in POSTFX_PREVIEWS.iter().enumerate() {
+                let x = 40.0 + (i % 4) as f32 * 178.0;
+                let y = 138.0 + (i / 4) as f32 * 52.0;
+                let active = self.effect_kind == i as i32
+                    && self.effect_start > 0.0
+                    && (0.0..POSTFX_PREVIEW_MS).contains(&elapsed);
+                if viz_button(graphics, mouse, x, y, 168.0, 46.0, name, active) && click {
+                    self.effect_kind = i as i32;
+                    self.effect_start = self.last_time;
+                }
+            }
+
+            let y2 = 138.0 + 3.0 * 52.0 + 18.0;
+            graphics.draw_text(
+                "COMMAND-STREAM EFFECTS (2D)",
+                Vec2::new(40.0, y2),
+                16.0,
+                coral,
+            );
+            let active =
+                self.effect_kind < 0 && self.effect_start > 0.0 && (0.0..1200.0).contains(&elapsed);
+            if viz_button(
+                graphics,
+                mouse,
+                40.0,
+                y2 + 12.0,
+                240.0,
+                46.0,
+                "Shoggoth glitch",
+                active,
+            ) && click
+            {
+                self.effect_kind = -1;
                 self.effect_start = self.last_time;
             }
+        }
+
+        /// SPRITES tab: two sub-pages — the character gallery (each item opens
+        /// the 3D inspector iframe) and the datacenter prop library (an
+        /// all-wasm gallery of animated primitive-drawn set dressing).
+        fn draw_viz_sprites(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let pages = [(false, "CHARACTERS"), (true, "PROPS")];
+            for (i, &(page, name)) in pages.iter().enumerate() {
+                let x = 40.0 + i as f32 * 168.0;
+                let over = viz_button(
+                    graphics,
+                    mouse,
+                    x,
+                    76.0,
+                    158.0,
+                    38.0,
+                    name,
+                    self.viz_props_page == page,
+                );
+                if over && click && self.viz_props_page != page {
+                    self.viz_props_page = page;
+                    // The prop gallery draws its own big preview pane; the
+                    // iframe inspector belongs to the character page only.
+                    viz_inspect_hide();
+                    self.viz_selected = -1;
+                }
+            }
+            if self.viz_props_page {
+                self.draw_viz_props(graphics, mouse, click);
+            } else {
+                self.draw_viz_characters(graphics, mouse, click);
+            }
+        }
+
+        /// The PROPS page of the SPRITES tab: the datacenter prop library
+        /// (`crate::props`) as a live-animated grid, with the selected prop
+        /// enlarged on the right.
+        fn draw_viz_props(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+            let time = (self.last_time / 1000.0) as f32;
+            let (w, h) = (graphics.width(), graphics.height());
             graphics.draw_text(
-                "(more effects to come)",
-                Vec2::new(40.0, 222.0),
-                15.0,
+                "DATACENTER PROP LIBRARY — primitive-drawn, animated. Click a tile to enlarge.",
+                Vec2::new(40.0, 138.0),
+                16.0,
+                Color::GRAY,
+            );
+
+            let cols = 4usize;
+            let rows = PROP_COUNT.div_ceil(cols);
+            let (x0, y0) = (40.0f32, 152.0f32);
+            let tile_w = 150.0f32;
+            let tile_h = ((h - y0 - 16.0) / rows as f32).clamp(64.0, 110.0);
+            for (i, &name) in PROP_NAMES.iter().enumerate() {
+                let bx = x0 + (i % cols) as f32 * tile_w;
+                let by = y0 + (i / cols) as f32 * tile_h;
+                let (bw, bh) = (tile_w - 6.0, tile_h - 6.0);
+                let over =
+                    mouse.x >= bx && mouse.x <= bx + bw && mouse.y >= by && mouse.y <= by + bh;
+                let selected = self.viz_prop_selected == i;
+                let bg = if selected {
+                    Color::new(1.0, 0.09, 0.26, 0.30)
+                } else if over {
+                    Color::new(0.28, 0.22, 0.33, 1.0)
+                } else {
+                    Color::new(0.13, 0.09, 0.17, 1.0)
+                };
+                let border = if selected {
+                    Color::new(1.0, 0.09, 0.26, 1.0)
+                } else {
+                    Color::new(0.4, 0.3, 0.45, 1.0)
+                };
+                graphics.draw_rectangle(Vec2::new(bx, by), bw, bh, bg);
+                graphics.draw_rectangle_lines(Vec2::new(bx, by), bw, bh, 1.5, border);
+                draw_prop(
+                    graphics,
+                    i,
+                    Vec2::new(bx + bw / 2.0, by + bh / 2.0 - 6.0),
+                    bh - 30.0,
+                    time,
+                );
+                graphics.draw_text(
+                    name,
+                    Vec2::new(bx + 6.0, by + bh - 5.0),
+                    12.0,
+                    if selected { Color::WHITE } else { Color::GRAY },
+                );
+                if over && click {
+                    self.viz_prop_selected = i;
+                }
+            }
+
+            // Big live preview of the selected prop, in place of the iframe.
+            let px = x0 + cols as f32 * tile_w + 20.0;
+            let pw = (w - px - 40.0).max(140.0);
+            let ph = rows as f32 * tile_h - 6.0;
+            graphics.draw_rectangle(Vec2::new(px, y0), pw, ph, Color::new(0.07, 0.05, 0.10, 1.0));
+            graphics.draw_rectangle_lines(
+                Vec2::new(px, y0),
+                pw,
+                ph,
+                1.5,
+                Color::new(0.4, 0.3, 0.45, 1.0),
+            );
+            let sel = self.viz_prop_selected;
+            draw_prop(
+                graphics,
+                sel,
+                Vec2::new(px + pw / 2.0, y0 + ph / 2.0 + 14.0),
+                pw.min(ph) * 0.72,
+                time,
+            );
+            graphics.draw_text(
+                PROP_NAMES[sel],
+                Vec2::new(px + 16.0, y0 + 28.0),
+                22.0,
+                Color::WHITE,
+            );
+            graphics.draw_text(
+                &format!("prop {:02} / {}", sel, PROP_COUNT),
+                Vec2::new(px + 16.0, y0 + 48.0),
+                14.0,
                 Color::GRAY,
             );
         }
 
-        /// SPRITES tab: a clickable character gallery. Clicking an item opens the
-        /// right-hand inspector iframe (3D orbit + baked 2D) via `viz_inspect`.
-        fn draw_viz_sprites(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
+        /// The CHARACTERS page of the SPRITES tab: a clickable gallery; an item
+        /// opens the right-hand inspector iframe (3D orbit + baked 2D) via
+        /// `viz_inspect`.
+        fn draw_viz_characters(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
             graphics.draw_text(
                 "Click a character to inspect it in 3D  \u{2192}",
-                Vec2::new(40.0, 92.0),
+                Vec2::new(40.0, 138.0),
                 18.0,
                 Color::GRAY,
             );
@@ -783,7 +989,7 @@ mod wasm_entry {
             ];
 
             // Two columns on the LEFT half; the right half is the inspector iframe.
-            let (x0, y0, dx, dy) = (120.0f32, 160.0f32, 190.0f32, 140.0f32);
+            let (x0, y0, dx, dy) = (120.0f32, 200.0f32, 190.0f32, 140.0f32);
             for (i, &(kind, label)) in items.iter().enumerate() {
                 let c = Vec2::new(x0 + (i % 2) as f32 * dx, y0 + (i / 2) as f32 * dy);
                 let (bx, by, bw, bh) = (c.x - 85.0, c.y - 58.0, 170.0, 116.0);
