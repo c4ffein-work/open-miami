@@ -1,8 +1,15 @@
-//! The datacenter prop sprite library: top-down set dressing for the server
+//! The datacenter prop sprite library: TOP-DOWN set dressing for the server
 //! floors — racks, switching, cooling, power, storage and hazard furniture —
 //! drawn entirely from the 2D command-stream primitives (no assets, no new
 //! dependencies) and animated by the continuous clock (blinking LEDs,
-//! spinning fans, rising bubbles, a patrolling tape-robot arm).
+//! spinning roof fans, rising bubbles, a patrolling tape-picker arm).
+//!
+//! Every prop is seen from straight above, matching the game camera: what you
+//! draw is the object's top surface. Conventions shared by the set — the
+//! machine's front face is the bottom edge (+y), where its status LEDs live;
+//! light comes from the top-left, so tall props cast a small drop shadow
+//! down-right; screens are edge-on slabs that wash their light across the
+//! floor or desk in front of them.
 //!
 //! Each prop is designed in a local 100x100 box centred on the origin
 //! (y down) and drawn through the transform stack, so it can be placed at
@@ -16,9 +23,9 @@ pub const PROP_NAMES: [&str; 24] = [
     "RACK / BURNT",
     "BLADE STACK",
     "CORE SWITCH",
-    "PATCH BAY",
+    "CABLE JUNCTION",
     "OPERATOR DESK",
-    "MONITOR BANK",
+    "CONTROL CONSOLE",
     "HOLO TABLE",
     "CRAC COOLER",
     "FLOOR VENT",
@@ -63,6 +70,7 @@ mod wasm {
     const CREAM: Color = Color::new(0.96, 0.93, 0.86, 1.0);
     const HAZARD_YELLOW: Color = Color::new(0.95, 0.78, 0.10, 1.0);
     const COPPER: Color = Color::new(0.62, 0.38, 0.28, 1.0);
+    const SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.30);
 
     // ---- tiny drawing / animation helpers -----------------------------------
     fn rect(g: &Graphics, x: f32, y: f32, w: f32, h: f32, c: Color) {
@@ -80,6 +88,14 @@ mod wasm {
     fn alpha(c: Color, a: f32) -> Color {
         Color::new(c.r, c.g, c.b, a)
     }
+    /// Drop shadow under a tall box footprint (light from the top-left).
+    fn shadow_rect(g: &Graphics, x: f32, y: f32, w: f32, h: f32) {
+        rect(g, x + 4.0, y + 4.0, w, h, SHADOW);
+    }
+    /// Drop shadow under a tall round footprint.
+    fn shadow_circle(g: &Graphics, x: f32, y: f32, r: f32) {
+        circle(g, x + 4.0, y + 4.0, r, SHADOW);
+    }
     /// Small deterministic hash -> 0..1, for per-cell variety that stays put.
     fn rnd(a: u32, b: u32) -> f32 {
         let mut x = a
@@ -91,6 +107,30 @@ mod wasm {
     /// Square-wave blink with `duty` fraction on, at `hz`, offset by `phase`.
     fn blink(time: f32, hz: f32, phase: f32, duty: f32) -> bool {
         (time * hz + phase).fract() < duty
+    }
+    /// A fan set into a top panel, seen from above: dark well, spinning
+    /// blades, hub. Negative `speed` spins it the other way.
+    fn top_fan(g: &Graphics, x: f32, y: f32, r: f32, speed: f32, time: f32) {
+        circle(g, x, y, r, PANEL);
+        for k in 0..4 {
+            let a = time * speed + k as f32 * FRAC_PI_2;
+            g.draw_arc(Vec2::new(x, y), r - 1.5, a, a + 0.62, STEEL_DARK);
+        }
+        circle(g, x, y, r * 0.24, TRIM);
+    }
+    /// A row of status LEDs winking on a front-edge service strip.
+    fn front_leds(g: &Graphics, x0: f32, y: f32, n: u32, time: f32) {
+        for i in 0..n {
+            let on = blink(time, 1.2 + rnd(i, 3) * 3.5, rnd(7, i), 0.6);
+            let c = if !on {
+                PANEL
+            } else if rnd(i, 5) > 0.35 {
+                LED_GREEN
+            } else {
+                LED_AMBER
+            };
+            rect(g, x0 + i as f32 * 8.0, y, 5.0, 4.0, c);
+        }
     }
 
     /// Draw prop `idx` (see [`super::PROP_NAMES`]) centred on `center` at
@@ -106,9 +146,9 @@ mod wasm {
             2 => rack_burnt(g, time),
             3 => blade_stack(g, time),
             4 => core_switch(g, time),
-            5 => patch_bay(g, time),
+            5 => cable_junction(g, time),
             6 => operator_desk(g, time),
-            7 => monitor_bank(g, time),
+            7 => control_console(g, time),
             8 => holo_table(g, time),
             9 => crac_cooler(g, time),
             10 => floor_vent(g, time),
@@ -129,331 +169,400 @@ mod wasm {
         g.restore();
     }
 
-    /// 0 — closed rack cabinet: vented door, handle, a status LED pair.
+    /// 0 — closed rack seen from above: sealed top panel, twin exhaust fans,
+    /// cabling ducking out the back, status LEDs on the front edge.
     fn rack_closed(g: &Graphics, time: f32) {
+        shadow_rect(g, -35.0, -45.0, 70.0, 90.0);
         rect(g, -35.0, -45.0, 70.0, 90.0, STEEL);
         frame(g, -35.0, -45.0, 70.0, 90.0, 2.0, TRIM);
-        for i in 0..8 {
-            rect(g, -27.0, -37.0 + i as f32 * 8.0, 54.0, 3.0, PANEL);
-        }
-        rect(g, -31.0, -6.0, 4.0, 12.0, TRIM); // door handle
-        let ok = blink(time, 0.8, 0.0, 0.85);
-        rect(g, 14.0, 32.0, 6.0, 6.0, if ok { LED_GREEN } else { PANEL });
-        let busy = blink(time, 3.1, 0.4, 0.5);
-        rect(
-            g,
-            24.0,
-            32.0,
-            6.0,
-            6.0,
-            if busy { LED_AMBER } else { PANEL },
-        );
+        // Lid seam, then the rear cable cutout with feeds heading off to the
+        // trunking behind.
+        frame(g, -29.0, -37.0, 58.0, 72.0, 1.0, alpha(PANEL, 0.6));
+        rect(g, -14.0, -45.0, 28.0, 7.0, PANEL);
+        line(g, -8.0, -42.0, -12.0, -49.0, 2.0, COPPER);
+        line(g, 3.0, -42.0, 6.0, -49.0, 2.0, GLOW_CYAN);
+        // Twin roof fans, counter-rotating.
+        top_fan(g, 0.0, -15.0, 13.0, 3.4, time);
+        top_fan(g, 0.0, 15.0, 13.0, -2.9, time + 0.4);
+        // Front service strip.
+        rect(g, -35.0, 37.0, 70.0, 8.0, STEEL_DARK);
+        front_leds(g, -30.0, 39.0, 5, time);
     }
 
-    /// 1 — open rack: a column of servers, one slot pulled for maintenance.
+    /// 1 — rack with the lid off, looking straight down into the chassis:
+    /// board, chip grid, finned heatsink, loose cabling, a live internal fan.
     fn rack_open(g: &Graphics, time: f32) {
-        rect(g, -35.0, -45.0, 70.0, 90.0, STEEL_DARK);
+        shadow_rect(g, -35.0, -45.0, 70.0, 90.0);
+        rect(g, -35.0, -45.0, 70.0, 90.0, STEEL_DARK); // chassis walls
         frame(g, -35.0, -45.0, 70.0, 90.0, 2.0, TRIM);
-        for i in 0..7 {
-            let y = -40.0 + i as f32 * 12.0;
-            if i == 4 {
-                // The pulled slot: dark bay with loose cabling.
-                rect(g, -30.0, y, 60.0, 10.0, PANEL);
-                line(g, -24.0, y + 3.0, -6.0, y + 8.0, 1.5, COPPER);
-                line(g, -6.0, y + 8.0, 12.0, y + 4.0, 1.5, GLOW_CYAN);
-                continue;
+        rect(g, -30.0, -40.0, 60.0, 80.0, PANEL); // the open bay
+                                                  // Main board and its chip grid.
+        rect(
+            g,
+            -27.0,
+            -37.0,
+            42.0,
+            74.0,
+            Color::new(0.07, 0.17, 0.11, 1.0),
+        );
+        for row in 0..4u32 {
+            for col in 0..3u32 {
+                if rnd(row * 5 + col, 3) > 0.75 {
+                    continue; // an unpopulated pad
+                }
+                rect(
+                    g,
+                    -23.0 + col as f32 * 13.0,
+                    -33.0 + row as f32 * 12.0,
+                    8.0,
+                    6.0,
+                    Color::new(0.11, 0.24, 0.16, 1.0),
+                );
             }
-            rect(g, -30.0, y, 60.0, 10.0, STEEL);
-            rect(g, -30.0, y, 4.0, 10.0, TRIM);
-            rect(g, 26.0, y, 4.0, 10.0, TRIM);
-            // Two activity LEDs per unit, each with its own rhythm.
-            for l in 0..2u32 {
-                let on = blink(time, 1.5 + rnd(i as u32, l) * 4.0, rnd(l, i as u32), 0.55);
-                let c = if !on {
-                    PANEL
-                } else if rnd(i as u32 * 7 + l, 13) > 0.3 {
-                    LED_GREEN
-                } else {
-                    LED_AMBER
-                };
-                rect(g, 6.0 + l as f32 * 8.0, y + 3.0, 4.0, 4.0, c);
-            }
+        }
+        // CPU under a finned heatsink.
+        rect(g, -21.0, 15.0, 24.0, 20.0, STEEL);
+        for i in 0..5 {
+            rect(g, -19.5 + i as f32 * 4.6, 16.0, 2.0, 18.0, STEEL_DARK);
+        }
+        // Loose cabling along the right wall.
+        line(g, 20.0, -36.0, 25.0, -10.0, 2.0, COPPER);
+        line(g, 25.0, -10.0, 19.0, 22.0, 2.0, COPPER);
+        line(g, 23.0, -36.0, 20.0, 8.0, 1.5, GLOW_CYAN);
+        // The internal fan, still running with the lid off.
+        top_fan(g, 0.0, -12.0, 10.0, 4.6, time);
+        // Board LEDs.
+        for i in 0..3u32 {
+            let on = blink(time, 2.0 + rnd(i, 9) * 4.0, rnd(i, 4), 0.5);
+            rect(
+                g,
+                -26.0,
+                24.0 + i as f32 * 5.0,
+                3.0,
+                3.0,
+                if on { LED_GREEN } else { PANEL },
+            );
         }
     }
 
-    /// 2 — burnt-out rack: dead cabinet, door hanging open, scorch, sparks.
+    /// 2 — burnt-out rack from above: charred top blown open, an ember still
+    /// cooling in the hole, the lid flat on the floor beside it, stray sparks.
     fn rack_burnt(g: &Graphics, time: f32) {
+        // The blown-off lid lies on the floor to the right (flat: no shadow).
+        g.save();
+        g.translate(36.0, 8.0);
+        g.rotate(0.25);
         rect(
             g,
-            -35.0,
+            -8.0,
+            -27.0,
+            16.0,
+            54.0,
+            Color::new(0.11, 0.09, 0.13, 1.0),
+        );
+        frame(
+            g,
+            -8.0,
+            -27.0,
+            16.0,
+            54.0,
+            1.5,
+            Color::new(0.20, 0.17, 0.22, 1.0),
+        );
+        g.restore();
+        shadow_rect(g, -40.0, -45.0, 62.0, 90.0);
+        rect(
+            g,
+            -40.0,
             -45.0,
-            70.0,
+            62.0,
             90.0,
             Color::new(0.09, 0.08, 0.11, 1.0),
         );
         frame(
             g,
-            -35.0,
+            -40.0,
             -45.0,
-            70.0,
+            62.0,
             90.0,
             2.0,
             Color::new(0.20, 0.17, 0.22, 1.0),
         );
-        // Scorch blooms around the failed unit.
-        circle(g, 2.0, -12.0, 19.0, Color::new(0.03, 0.02, 0.04, 0.9));
-        circle(g, 14.0, -26.0, 10.0, Color::new(0.05, 0.03, 0.05, 0.9));
-        // The door hangs off its lower hinge.
-        g.save();
-        g.translate(-35.0, 8.0);
-        g.rotate(0.35);
-        rect(g, 0.0, 0.0, 66.0, 38.0, Color::new(0.12, 0.10, 0.14, 1.0));
-        frame(
-            g,
-            0.0,
-            0.0,
-            66.0,
-            38.0,
-            1.5,
-            Color::new(0.22, 0.18, 0.24, 1.0),
-        );
-        g.restore();
+        // The blast hole through the top, soot streaked outward.
+        for k in 0..4u32 {
+            let a = rnd(k, 1) * TAU;
+            line(
+                g,
+                -9.0 + a.cos() * 12.0,
+                -6.0 + a.sin() * 12.0,
+                -9.0 + a.cos() * 26.0,
+                -6.0 + a.sin() * 26.0,
+                4.0,
+                Color::new(0.04, 0.03, 0.05, 0.8),
+            );
+        }
+        circle(g, -9.0, -6.0, 16.0, Color::new(0.03, 0.02, 0.04, 1.0));
+        circle(g, 0.0, 6.0, 9.0, Color::new(0.03, 0.02, 0.04, 1.0));
+        let ember = 0.25 + 0.20 * (time * 3.3).sin();
+        circle(g, -9.0, -5.0, 6.0, Color::new(0.9, 0.25, 0.08, ember));
         // Something in there still shorts now and then.
         for k in 0..3u32 {
             if ((time * (11.0 + k as f32 * 3.7) + k as f32 * 1.9).sin()) > 0.94 {
-                let x = -14.0 + rnd(k, 5) * 28.0;
-                let y = -30.0 + rnd(k, 9) * 30.0;
+                let x = -24.0 + rnd(k, 5) * 30.0;
+                let y = -28.0 + rnd(k, 9) * 44.0;
                 rect(g, x, y, 3.0, 3.0, Color::new(1.0, 0.92, 0.4, 0.95));
                 line(g, x + 1.0, y + 1.0, x + 5.0, y - 4.0, 1.0, LED_AMBER);
             }
         }
     }
 
-    /// 3 — dense blade stack with a pulsing coolant edge-light.
+    /// 3 — open blade enclosure from above: vertical blade fins with the hot
+    /// exhaust glow breathing in the gaps, service strip along the front.
     fn blade_stack(g: &Graphics, time: f32) {
-        for i in 0..9 {
-            let y = -42.0 + i as f32 * 9.5;
-            rect(
-                g,
-                -40.0,
-                y,
-                80.0,
-                7.5,
-                if i % 2 == 0 { STEEL } else { STEEL_DARK },
-            );
-            let on = blink(time, 2.0 + rnd(i as u32, 3) * 5.0, rnd(3, i as u32), 0.5);
-            rect(
-                g,
-                -36.0,
-                y + 2.0,
-                3.5,
-                3.5,
-                if on { LED_GREEN } else { PANEL },
-            );
+        shadow_rect(g, -40.0, -42.0, 80.0, 84.0);
+        rect(g, -40.0, -42.0, 80.0, 84.0, STEEL_DARK);
+        frame(g, -40.0, -42.0, 80.0, 84.0, 2.0, TRIM);
+        for i in 0..8u32 {
+            let x = -34.0 + i as f32 * 9.0;
+            // The hot aisle glow in the gap before each fin.
+            let pulse = 0.22 + 0.18 * (time * 2.2 + i as f32 * 0.7).sin();
+            rect(g, x - 2.5, -34.0, 2.5, 66.0, alpha(GLOW_CYAN, pulse));
+            let fin = if i % 2 == 0 {
+                STEEL
+            } else {
+                Color::new(0.28, 0.26, 0.35, 1.0)
+            };
+            rect(g, x, -36.0, 6.0, 70.0, fin);
         }
-        frame(g, -40.0, -42.0, 80.0, 85.5, 1.5, TRIM);
-        let pulse = 0.55 + 0.35 * (time * 2.2).sin();
-        rect(g, 34.0, -42.0, 4.0, 85.5, alpha(GLOW_CYAN, pulse));
+        rect(g, -40.0, 34.0, 80.0, 8.0, PANEL);
+        front_leds(g, -34.0, 36.0, 8, time);
     }
 
-    /// 4 — core switch: two rows of ports blinking traffic, cyan uplinks.
+    /// 4 — core switch from above: low vented top, uplinks breathing, the
+    /// port field blinking along the front edge, cables snaking off across
+    /// the floor.
     fn core_switch(g: &Graphics, time: f32) {
-        rect(g, -45.0, -20.0, 90.0, 40.0, STEEL);
-        frame(g, -45.0, -20.0, 90.0, 40.0, 2.0, TRIM);
-        rect(g, -45.0, -20.0, 90.0, 6.0, STEEL_DARK);
-        let tick = (time * 6.0) as u32;
-        for row in 0..2u32 {
-            for i in 0..9u32 {
-                let x = -40.0 + i as f32 * 8.0;
-                let y = if row == 0 { -9.0 } else { 3.0 };
-                rect(g, x, y, 6.0, 6.0, PANEL);
-                let r = rnd(i * 2 + row, tick);
-                let c = if r > 0.6 {
-                    LED_GREEN
-                } else if r > 0.45 {
-                    LED_AMBER
-                } else {
-                    PANEL
-                };
-                rect(g, x + 1.5, y + 1.5, 3.0, 3.0, c);
-            }
+        shadow_rect(g, -45.0, -22.0, 90.0, 40.0);
+        rect(g, -45.0, -22.0, 90.0, 40.0, STEEL);
+        frame(g, -45.0, -22.0, 90.0, 40.0, 2.0, TRIM);
+        for i in 0..3 {
+            rect(g, -38.0, -16.0 + i as f32 * 7.0, 60.0, 2.5, PANEL);
         }
-        // The pair of uplink ports, breathing cyan.
+        // The uplink pair, breathing cyan on the top surface.
         let pulse = 0.5 + 0.5 * (time * 3.0).sin();
         rect(
             g,
-            34.0,
-            -9.0,
-            8.0,
-            8.0,
+            28.0,
+            -15.0,
+            9.0,
+            9.0,
             alpha(GLOW_CYAN, 0.35 + 0.6 * pulse),
         );
-        rect(g, 34.0, 3.0, 8.0, 8.0, alpha(GLOW_CYAN, 0.95 - 0.6 * pulse));
-    }
-
-    /// 5 — patch bay: colour-coded cables sagging between two port columns.
-    fn patch_bay(g: &Graphics, time: f32) {
-        rect(g, -45.0, -32.0, 90.0, 64.0, STEEL_DARK);
-        frame(g, -45.0, -32.0, 90.0, 64.0, 2.0, TRIM);
-        let cable_colors = [COPPER, GLOW_CYAN, GLOW_MAGENTA, LED_GREEN, LED_AMBER, TRIM];
-        // A fixed shuffle: left port k patches to right port (k * 5 + 2) % 6.
-        for (k, &c) in cable_colors.iter().enumerate() {
-            let ly = -24.0 + k as f32 * 9.5;
-            let ry = -24.0 + ((k * 5 + 2) % 6) as f32 * 9.5;
-            circle(g, -38.0, ly, 3.0, PANEL);
-            circle(g, 38.0, ry, 3.0, PANEL);
-            let sag = 6.0 + 2.0 * ((time * 0.7 + k as f32).sin()); // cables breathe
-            let mid = (ly + ry) / 2.0 + sag;
-            line(g, -35.0, ly, 0.0, mid, 2.0, c);
-            line(g, 0.0, mid, 35.0, ry, 2.0, c);
+        rect(
+            g,
+            28.0,
+            -2.0,
+            9.0,
+            9.0,
+            alpha(GLOW_CYAN, 0.95 - 0.6 * pulse),
+        );
+        // Front edge: the port field, traffic winking at the cable heads.
+        rect(g, -45.0, 12.0, 90.0, 6.0, STEEL_DARK);
+        let tick = (time * 6.0) as u32;
+        for i in 0..10u32 {
+            let x = -41.0 + i as f32 * 8.4;
+            let r = rnd(i, tick);
+            let c = if r > 0.6 {
+                LED_GREEN
+            } else if r > 0.45 {
+                LED_AMBER
+            } else {
+                PANEL
+            };
+            rect(g, x, 13.5, 4.0, 3.0, c);
+        }
+        // Patched cables dropping off the front edge onto the floor.
+        let cols = [COPPER, GLOW_CYAN, GLOW_MAGENTA, LED_GREEN];
+        for (k, &c) in cols.iter().enumerate() {
+            let x = -34.0 + k as f32 * 21.0;
+            let sway = (time * 0.8 + k as f32).sin() * 2.0;
+            line(g, x, 18.0, x + 4.0 + sway, 30.0, 2.0, c);
+            line(g, x + 4.0 + sway, 30.0, x - 2.0 + sway, 42.0, 2.0, c);
         }
     }
 
-    /// 6 — operator desk: terminal with a live scanline, keyboard, cold coffee.
+    /// 5 — cable junction: colour-coded runs crossing the floor between two
+    /// pull boxes.
+    fn cable_junction(g: &Graphics, time: f32) {
+        for &x in &[-45.0f32, 27.0] {
+            shadow_rect(g, x, -30.0, 18.0, 60.0);
+            rect(g, x, -30.0, 18.0, 60.0, STEEL);
+            frame(g, x, -30.0, 18.0, 60.0, 2.0, TRIM);
+            for i in 0..6 {
+                circle(g, x + 9.0, -24.0 + i as f32 * 9.5, 2.5, PANEL);
+            }
+        }
+        let cable_colors = [COPPER, GLOW_CYAN, GLOW_MAGENTA, LED_GREEN, LED_AMBER, TRIM];
+        // A fixed shuffle: left gland k runs to right gland (k * 5 + 2) % 6.
+        for (k, &c) in cable_colors.iter().enumerate() {
+            let ly = -24.0 + k as f32 * 9.5;
+            let ry = -24.0 + ((k * 5 + 2) % 6) as f32 * 9.5;
+            let slack = 2.0 * ((time * 0.5 + k as f32).sin()); // loose runs shift
+            let mid = (ly + ry) / 2.0 + slack;
+            line(g, -27.0, ly, 0.0, mid, 2.0, c);
+            line(g, 0.0, mid, 27.0, ry, 2.0, c);
+        }
+    }
+
+    /// 6 — operator desk from above: an edge-on monitor slab washing terminal
+    /// light across the desk, keyboard, mouse, paperwork, the mug that never
+    /// gets finished.
     fn operator_desk(g: &Graphics, time: f32) {
+        shadow_rect(g, -45.0, -28.0, 90.0, 52.0);
         rect(
             g,
             -45.0,
-            -25.0,
+            -28.0,
             90.0,
-            50.0,
+            52.0,
             Color::new(0.28, 0.20, 0.24, 1.0),
         );
         frame(
             g,
             -45.0,
-            -25.0,
+            -28.0,
             90.0,
-            50.0,
+            52.0,
             2.0,
             Color::new(0.40, 0.30, 0.34, 1.0),
         );
-        // Terminal.
-        rect(g, -22.0, -20.0, 44.0, 28.0, PANEL);
-        rect(
-            g,
-            -19.0,
-            -17.0,
-            38.0,
-            22.0,
-            Color::new(0.06, 0.16, 0.13, 1.0),
-        );
-        for i in 0..4 {
-            let w = 12.0 + rnd(i, 7) * 20.0;
+        // Screen light spilling toward the operator.
+        let flick = 0.9 + 0.1 * (time * 13.0).sin();
+        for i in 0..3 {
+            let t = i as f32;
             rect(
                 g,
-                -17.0,
-                -14.0 + i as f32 * 5.0,
-                w,
-                2.0,
-                Color::new(0.25, 0.85, 0.45, 0.8),
+                -16.0 + t * 3.0,
+                -14.0 + t * 6.0,
+                32.0 - t * 6.0,
+                6.0,
+                Color::new(0.25, 0.85, 0.45, (0.20 - t * 0.06) * flick),
             );
         }
-        let scanl = -17.0 + (time * 0.6).fract() * 22.0;
-        rect(g, -19.0, scanl, 38.0, 2.0, Color::new(0.4, 1.0, 0.7, 0.35));
-        // Keyboard and the mug that never gets finished.
-        rect(g, -16.0, 12.0, 32.0, 9.0, STEEL_DARK);
-        for i in 0..8 {
-            rect(g, -14.0 + i as f32 * 4.0, 14.0, 2.5, 2.0, TRIM);
-            rect(g, -14.0 + i as f32 * 4.0, 17.5, 2.5, 2.0, TRIM);
-        }
-        circle(g, 33.0, 10.0, 5.5, Color::new(0.85, 0.47, 0.34, 1.0));
-        circle(g, 33.0, 10.0, 3.5, Color::new(0.16, 0.09, 0.07, 1.0));
-    }
-
-    /// 7 — monitor bank: four feeds — terminal, logs, a graph, and static.
-    fn monitor_bank(g: &Graphics, time: f32) {
-        let cells = [(-41.0, -31.0), (1.0, -31.0), (-41.0, 3.0), (1.0, 3.0)];
-        for (m, &(x, y)) in cells.iter().enumerate() {
-            rect(g, x, y, 40.0, 28.0, PANEL);
-            frame(g, x, y, 40.0, 28.0, 1.5, TRIM);
-            match m {
-                0 => {
-                    // Green terminal, lines crawling upward.
-                    rect(
-                        g,
-                        x + 3.0,
-                        y + 3.0,
-                        34.0,
-                        22.0,
-                        Color::new(0.05, 0.14, 0.10, 1.0),
-                    );
-                    for i in 0..4u32 {
-                        let ph = ((time * 0.5 + i as f32 * 0.25).fract()) * 22.0;
-                        let w = 8.0 + rnd(i, 21) * 22.0;
-                        rect(
-                            g,
-                            x + 5.0,
-                            y + 3.0 + ph,
-                            w,
-                            1.8,
-                            Color::new(0.3, 0.9, 0.5, 0.8),
-                        );
-                    }
-                }
-                1 => {
-                    // Amber log feed.
-                    rect(
-                        g,
-                        x + 3.0,
-                        y + 3.0,
-                        34.0,
-                        22.0,
-                        Color::new(0.14, 0.09, 0.03, 1.0),
-                    );
-                    for i in 0..5u32 {
-                        let w = 6.0 + rnd(i, (time * 2.0) as u32) * 26.0;
-                        rect(
-                            g,
-                            x + 5.0,
-                            y + 5.0 + i as f32 * 4.0,
-                            w,
-                            1.8,
-                            alpha(LED_AMBER, 0.75),
-                        );
-                    }
-                }
-                2 => {
-                    // Cyan metric graph, scrolling.
-                    rect(
-                        g,
-                        x + 3.0,
-                        y + 3.0,
-                        34.0,
-                        22.0,
-                        Color::new(0.03, 0.09, 0.12, 1.0),
-                    );
-                    let mut lx = x + 4.0;
-                    let mut ly = y + 16.0;
-                    for i in 0..7 {
-                        let nx = lx + 4.6;
-                        let ny = y + 20.0 - (2.0 + 12.0 * rnd(i, (time * 1.5) as u32 + i));
-                        line(g, lx, ly, nx, ny, 1.5, GLOW_CYAN);
-                        lx = nx;
-                        ly = ny;
-                    }
-                }
-                _ => {
-                    // Dead channel: rolling static.
-                    let tick = (time * 20.0) as u32;
-                    for i in 0..24u32 {
-                        let v = rnd(i, tick);
-                        rect(
-                            g,
-                            x + 3.0 + (i % 6) as f32 * 5.7,
-                            y + 3.0 + (i / 6) as f32 * 5.5,
-                            5.7,
-                            5.5,
-                            Color::new(v * 0.5, v * 0.5, v * 0.55, 1.0),
-                        );
-                    }
-                }
+        rect(g, -5.0, -26.0, 10.0, 5.0, STEEL_DARK); // stand foot behind
+        rect(g, -17.0, -22.0, 34.0, 7.0, PANEL); // the monitor slab
+        rect(
+            g,
+            -17.0,
+            -15.5,
+            34.0,
+            2.0,
+            Color::new(0.35, 0.95, 0.55, 0.8 * flick),
+        );
+        // Keyboard + mouse.
+        rect(g, -18.0, 2.0, 30.0, 12.0, STEEL_DARK);
+        for r in 0..2 {
+            for i in 0..7 {
+                rect(
+                    g,
+                    -16.0 + i as f32 * 4.0,
+                    4.0 + r as f32 * 5.0,
+                    2.5,
+                    3.0,
+                    TRIM,
+                );
             }
         }
+        circle(g, 21.0, 8.0, 3.0, TRIM);
+        // Paperwork drift on the left.
+        g.save();
+        g.translate(-33.0, 4.0);
+        g.rotate(-0.2);
+        rect(g, -8.0, -10.0, 16.0, 20.0, alpha(CREAM, 0.8));
+        g.restore();
+        g.save();
+        g.translate(-30.0, 7.0);
+        g.rotate(0.15);
+        rect(g, -8.0, -10.0, 16.0, 20.0, alpha(CREAM, 0.9));
+        for i in 0..4 {
+            let y = -6.0 + i as f32 * 4.0;
+            line(g, -5.0, y, 5.0, y, 1.0, alpha(PANEL, 0.5));
+        }
+        g.restore();
+        // The mug, seen from above, handle out.
+        circle(g, 36.0, 14.0, 5.5, Color::new(0.85, 0.47, 0.34, 1.0));
+        circle(g, 42.0, 14.0, 2.0, Color::new(0.85, 0.47, 0.34, 1.0));
+        circle(g, 36.0, 14.0, 3.5, Color::new(0.16, 0.09, 0.07, 1.0));
+    }
+
+    /// 7 — control console from above: three angled screen slabs washing
+    /// green / amber / static across a winged desk, the chair pushed back.
+    fn control_console(g: &Graphics, time: f32) {
+        // The desk: a slab with angled wings.
+        shadow_rect(g, -34.0, -34.0, 68.0, 26.0);
+        for &(x, a) in &[(-40.0f32, 0.55f32), (40.0, -0.55)] {
+            g.save();
+            g.translate(x, -16.0);
+            g.rotate(a);
+            rect(
+                g,
+                -16.0,
+                -12.0,
+                32.0,
+                24.0,
+                Color::new(0.22, 0.19, 0.27, 1.0),
+            );
+            g.restore();
+        }
+        rect(
+            g,
+            -34.0,
+            -34.0,
+            68.0,
+            26.0,
+            Color::new(0.24, 0.21, 0.29, 1.0),
+        );
+        // The three feeds; the right one has dropped to flickering static.
+        let feeds = [
+            (-27.0f32, 0.5f32, Color::new(0.30, 0.90, 0.50, 1.0)),
+            (0.0, 0.0, Color::new(1.0, 0.72, 0.20, 1.0)),
+            (27.0, -0.5, Color::new(0.30, 0.95, 1.0, 1.0)),
+        ];
+        for (k, &(x, a, c)) in feeds.iter().enumerate() {
+            g.save();
+            g.translate(x, -24.0);
+            g.rotate(a);
+            let fl = if k == 2 {
+                0.4 + 0.6 * rnd(3, (time * 14.0) as u32)
+            } else {
+                0.9 + 0.1 * (time * (9.0 + k as f32 * 2.0)).sin()
+            };
+            for i in 0..3 {
+                let t = i as f32;
+                rect(
+                    g,
+                    -11.0 + t * 2.5,
+                    4.0 + t * 6.0,
+                    22.0 - t * 5.0,
+                    6.0,
+                    alpha(c, (0.18 - t * 0.05) * fl),
+                );
+            }
+            rect(g, -12.0, -3.0, 24.0, 6.0, PANEL);
+            rect(g, -12.0, 3.0, 24.0, 1.8, alpha(c, 0.85 * fl));
+            g.restore();
+        }
+        // The chair, drifting as if someone just left it.
+        let j = (time * 0.4).sin() * 1.5;
+        shadow_circle(g, j, 26.0, 11.0);
+        g.draw_arc(Vec2::new(j, 26.0), 13.5, 0.35, PI - 0.35, STEEL_DARK); // backrest
+        circle(g, j, 26.0, 9.5, Color::new(0.30, 0.26, 0.36, 1.0));
+        circle(g, j, 26.0, 4.0, STEEL_DARK);
     }
 
     /// 8 — holo table: a spinning wireframe projection over a round pedestal.
     fn holo_table(g: &Graphics, time: f32) {
+        shadow_circle(g, 0.0, 14.0, 27.0);
         circle(g, 0.0, 14.0, 27.0, TRIM);
         circle(g, 0.0, 14.0, 23.0, STEEL_DARK);
         circle(
@@ -479,27 +588,30 @@ mod wasm {
         }
     }
 
-    /// 9 — CRAC cooling unit: big housing, spinning blower, status lights.
+    /// 9 — CRAC cooling unit from above: big housing, top vents, the main
+    /// blower set into the roof, a heartbeat status LED on the front edge.
     fn crac_cooler(g: &Graphics, time: f32) {
+        shadow_rect(g, -40.0, -45.0, 80.0, 90.0);
         rect(g, -40.0, -45.0, 80.0, 90.0, STEEL);
         frame(g, -40.0, -45.0, 80.0, 90.0, 2.0, TRIM);
         for i in 0..3 {
             rect(g, -32.0, -39.0 + i as f32 * 6.0, 64.0, 2.5, PANEL);
         }
-        circle(g, 0.0, 12.0, 26.0, PANEL);
+        circle(g, 0.0, 10.0, 26.0, PANEL);
         for k in 0..4 {
             let a = time * 4.0 + k as f32 * FRAC_PI_2;
-            g.draw_arc(Vec2::new(0.0, 12.0), 23.0, a, a + 0.62, STEEL_DARK);
-            g.draw_arc(Vec2::new(0.0, 12.0), 23.0, a + 0.1, a + 0.5, TRIM);
+            g.draw_arc(Vec2::new(0.0, 10.0), 23.0, a, a + 0.62, STEEL_DARK);
+            g.draw_arc(Vec2::new(0.0, 10.0), 23.0, a + 0.1, a + 0.5, TRIM);
         }
-        circle(g, 0.0, 12.0, 5.0, TRIM);
+        circle(g, 0.0, 10.0, 5.0, TRIM);
+        rect(g, -40.0, 39.0, 80.0, 6.0, STEEL_DARK);
         let ok = blink(time, 1.2, 0.0, 0.9);
         rect(
             g,
             28.0,
-            -41.0,
+            40.0,
             6.0,
-            6.0,
+            4.0,
             if ok { LED_GREEN } else { LED_RED },
         );
     }
@@ -528,7 +640,7 @@ mod wasm {
         }
     }
 
-    /// 11 — wall exhaust fan: five blades behind a safety cross.
+    /// 11 — floor exhaust duct: five blades spinning under a safety cross.
     fn exhaust_fan(g: &Graphics, time: f32) {
         rect(g, -42.0, -42.0, 84.0, 84.0, STEEL_DARK);
         frame(g, -42.0, -42.0, 84.0, 84.0, 2.0, TRIM);
@@ -544,6 +656,7 @@ mod wasm {
 
     /// 12 — coolant tank seen from above: liquid, rising bubbles, bolted hatch.
     fn coolant_tank(g: &Graphics, time: f32) {
+        shadow_circle(g, 0.0, 0.0, 38.0);
         circle(g, 0.0, 0.0, 38.0, TRIM);
         circle(g, 0.0, 0.0, 34.0, Color::new(0.08, 0.20, 0.26, 1.0));
         circle(g, 0.0, 0.0, 30.0, Color::new(0.10, 0.42, 0.52, 0.85));
@@ -561,8 +674,12 @@ mod wasm {
         }
     }
 
-    /// 13 — overhead pipe run: coolant + power conduit, flanges, a red valve.
+    /// 13 — overhead pipe run seen from below the camera: two runs casting
+    /// floor shadows, flanges, a red valve wheel creeping.
     fn pipe_run(g: &Graphics, time: f32) {
+        // The pipes hang overhead, so their shadows fall well below them.
+        rect(g, -50.0, -13.0, 100.0, 13.0, alpha(SHADOW, 0.20));
+        rect(g, -50.0, 14.0, 100.0, 13.0, alpha(SHADOW, 0.20));
         rect(
             g,
             -50.0,
@@ -598,40 +715,63 @@ mod wasm {
         }
     }
 
-    /// 14 — UPS cabinet: charge display counting, battery pairs, bolt badge.
+    /// 14 — UPS cabinet from above: hazard strip and cable glands at the
+    /// back, vented lid with the bolt painted on, charge LEDs up front.
     fn ups_cabinet(g: &Graphics, time: f32) {
+        shadow_rect(g, -30.0, -45.0, 60.0, 90.0);
         rect(g, -30.0, -45.0, 60.0, 90.0, STEEL);
         frame(g, -30.0, -45.0, 60.0, 90.0, 2.0, TRIM);
-        rect(g, -22.0, -39.0, 44.0, 14.0, PANEL);
-        // Charge readout breathing between 4 and 5 bars: holding, on mains.
-        let fill = 4 + if blink(time, 0.5, 0.0, 0.5) { 1 } else { 0 };
-        for i in 0..5 {
-            let c = if i < fill { LED_GREEN } else { STEEL_DARK };
-            rect(g, -19.0 + i as f32 * 8.0, -36.0, 6.0, 8.0, c);
+        // Rear cable glands, feeds ducking out the back.
+        for k in 0..2u32 {
+            let x = -12.0 + k as f32 * 24.0;
+            line(
+                g,
+                x,
+                -40.0,
+                x + (k as f32 - 0.5) * 10.0,
+                -49.0,
+                3.0,
+                if k == 0 { COPPER } else { STEEL_DARK },
+            );
+            circle(g, x, -38.0, 4.5, STEEL_DARK);
+            circle(g, x, -38.0, 2.0, PANEL);
         }
-        for row in 0..3 {
-            let y = -18.0 + row as f32 * 18.0;
-            for col in 0..2 {
-                let x = -24.0 + col as f32 * 26.0;
-                rect(g, x, y, 22.0, 13.0, STEEL_DARK);
-                rect(g, x + 2.0, y + 4.0, 3.0, 5.0, CREAM); // + terminal
-                rect(g, x + 17.0, y + 4.0, 3.0, 5.0, TRIM); // - terminal
-            }
+        // Hazard strip across the lid.
+        for i in 0..7 {
+            let c = if i % 2 == 0 {
+                HAZARD_YELLOW
+            } else {
+                Color::new(0.05, 0.05, 0.06, 1.0)
+            };
+            rect(g, -28.0 + i as f32 * 8.0, -28.0, 8.0, 6.0, c);
         }
-        // Lightning badge.
+        // Vent grille.
+        for i in 0..4 {
+            rect(g, -22.0, -16.0 + i as f32 * 7.0, 44.0, 2.5, PANEL);
+        }
+        // The bolt, painted on the lid.
         let on = blink(time, 1.0, 0.25, 0.7);
         let c = if on {
             HAZARD_YELLOW
         } else {
             alpha(HAZARD_YELLOW, 0.35)
         };
-        line(g, 5.0, 29.0, -1.0, 37.0, 2.5, c);
-        line(g, -1.0, 37.0, 4.0, 37.0, 2.5, c);
-        line(g, 4.0, 37.0, -3.0, 44.0, 2.5, c);
+        line(g, 4.0, 16.0, -2.0, 24.0, 2.5, c);
+        line(g, -2.0, 24.0, 3.0, 24.0, 2.5, c);
+        line(g, 3.0, 24.0, -4.0, 32.0, 2.5, c);
+        // Front edge: charge readout breathing between 4 and 5 bars.
+        rect(g, -30.0, 37.0, 60.0, 8.0, STEEL_DARK);
+        let fill = 4 + if blink(time, 0.5, 0.0, 0.5) { 1 } else { 0 };
+        for i in 0..5 {
+            let c = if i < fill { LED_GREEN } else { PANEL };
+            rect(g, -24.0 + i as f32 * 10.0, 39.0, 7.0, 4.0, c);
+        }
     }
 
-    /// 15 — backup generator: engine block, alternator, smoking exhaust.
+    /// 15 — backup generator from above: engine block with cooling fins, the
+    /// round alternator, exhaust rings drifting off the stack.
     fn generator(g: &Graphics, time: f32) {
+        shadow_rect(g, -45.0, -25.0, 90.0, 64.0);
         rect(g, -45.0, 25.0, 90.0, 14.0, STEEL_DARK); // skid
         frame(g, -45.0, 25.0, 90.0, 14.0, 1.5, TRIM);
         rect(
@@ -663,19 +803,22 @@ mod wasm {
         }
         circle(g, 28.0, 0.0, 16.0, STEEL);
         circle(g, 28.0, 0.0, 5.0, TRIM);
-        // Exhaust stack + drifting smoke.
-        rect(g, -36.0, -45.0, 10.0, 20.0, STEEL_DARK);
+        // The exhaust stack pokes up past the block; from above its smoke
+        // spreads as widening rings.
         for k in 0..3u32 {
             let ph = (time * 0.45 + k as f32 / 3.0).fract();
             circle(
                 g,
-                -31.0 + ph * 10.0 + k as f32 * 2.0,
-                -48.0 - ph * 12.0,
-                3.0 + ph * 5.0,
-                Color::new(0.5, 0.5, 0.55, 0.25 * (1.0 - ph)),
+                -31.0,
+                -36.0,
+                7.0 + ph * 13.0,
+                Color::new(0.5, 0.5, 0.55, 0.22 * (1.0 - ph)),
             );
         }
-        // Fuel gauge, needle trembling while it runs.
+        rect(g, -33.0, -31.0, 4.0, 8.0, STEEL_DARK); // stack feed
+        circle(g, -31.0, -36.0, 6.5, STEEL_DARK);
+        circle(g, -31.0, -36.0, 3.0, PANEL);
+        // Fuel gauge on the block, needle trembling while it runs.
         circle(g, -12.0, 8.0, 7.0, CREAM);
         let a = -1.9 + 0.12 * (time * 9.0).sin();
         line(
@@ -724,6 +867,7 @@ mod wasm {
 
     /// 17 — spare cable coil with its loose end and connector.
     fn cable_coil(g: &Graphics, time: f32) {
+        shadow_circle(g, 0.0, 0.0, 33.0);
         circle(g, 0.0, 0.0, 33.0, Color::new(0.48, 0.28, 0.20, 1.0));
         circle(g, 0.0, 0.0, 26.0, COPPER);
         circle(g, 0.0, 0.0, 19.0, Color::new(0.48, 0.28, 0.20, 1.0));
@@ -737,32 +881,42 @@ mod wasm {
         rect(g, 40.0, 24.0, 8.0, 8.0, STEEL);
     }
 
-    /// 18 — tape library: cartridge wall and the little robot that never sleeps.
+    /// 18 — tape library from above, lid off: cartridge racks down both long
+    /// walls, the picker robot riding the centre rail and reaching into the
+    /// shelves.
     fn tape_library(g: &Graphics, time: f32) {
+        shadow_rect(g, -42.0, -45.0, 84.0, 90.0);
         rect(g, -42.0, -45.0, 84.0, 90.0, STEEL_DARK);
         frame(g, -42.0, -45.0, 84.0, 90.0, 2.0, TRIM);
-        for row in 0..5u32 {
-            for col in 0..4u32 {
-                let x = -36.0 + col as f32 * 19.0;
-                let y = -40.0 + row as f32 * 12.0;
-                if rnd(row * 7 + col, 11) > 0.8 {
-                    rect(g, x, y, 16.0, 9.0, PANEL); // empty slot
+        rect(g, -37.0, -40.0, 74.0, 80.0, PANEL); // the open bay
+                                                  // Cartridge racks along the two long walls.
+        for side in 0..2u32 {
+            let x = if side == 0 { -35.0 } else { 21.0 };
+            for row in 0..7u32 {
+                let y = -38.0 + row as f32 * 11.0;
+                if rnd(row * 7 + side, 11) > 0.82 {
+                    rect(g, x, y, 14.0, 9.0, Color::new(0.05, 0.05, 0.09, 1.0));
+                // empty
                 } else {
-                    let v = 0.2 + rnd(col, row) * 0.15;
-                    rect(g, x, y, 16.0, 9.0, Color::new(v, v * 0.95, v * 1.2, 1.0));
-                    rect(g, x + 2.0, y + 3.0, 12.0, 2.0, alpha(CREAM, 0.4)); // label
+                    let v = 0.2 + rnd(side * 3 + row, row) * 0.15;
+                    rect(g, x, y, 14.0, 9.0, Color::new(v, v * 0.95, v * 1.2, 1.0));
+                    rect(g, x + 2.0, y + 3.0, 10.0, 2.0, alpha(CREAM, 0.35));
                 }
             }
         }
-        // The picker arm patrols its rail; its head lamp blinks while seeking.
-        rect(g, -36.0, 24.0, 72.0, 4.0, TRIM);
-        let ax = (time * 0.7).sin() * 27.0;
-        rect(g, ax - 6.0, 18.0, 12.0, 16.0, CREAM);
+        // Centre rail; the carriage rides it, arm reaching into a shelf.
+        rect(g, -2.0, -38.0, 4.0, 76.0, TRIM);
+        let ay = (time * 0.7).sin() * 28.0;
+        let reach = ((time * 1.1).sin() * 0.5 + 0.5) * 14.0;
+        let side = if (time * 0.23).sin() > 0.0 { 1.0 } else { -1.0 };
+        line(g, 0.0, ay, side * (6.0 + reach), ay, 4.0, alpha(CREAM, 0.9));
+        rect(g, side * (6.0 + reach) - 3.0, ay - 4.0, 6.0, 8.0, CREAM); // gripper
+        rect(g, -7.0, ay - 8.0, 14.0, 16.0, CREAM); // carriage
         let seek = blink(time, 5.0, 0.0, 0.5);
         rect(
             g,
-            ax - 2.0,
-            20.0,
+            -2.0,
+            ay - 2.0,
             4.0,
             4.0,
             if seek { LED_RED } else { PANEL },
@@ -771,6 +925,7 @@ mod wasm {
 
     /// 19 — strapped supply crate, stencilled for the datacenter.
     fn supply_crate(g: &Graphics, _time: f32) {
+        shadow_rect(g, -38.0, -32.0, 76.0, 64.0);
         rect(
             g,
             -38.0,
@@ -815,60 +970,72 @@ mod wasm {
         );
     }
 
-    /// 20 — ceiling security camera panning its watch cone.
+    /// 20 — security camera from above: a pivot on its wall stub, panning a
+    /// long watch cone across the floor (the same read as the rogues' vision
+    /// cones).
     fn security_cam(g: &Graphics, time: f32) {
-        rect(g, -8.0, -48.0, 16.0, 10.0, STEEL_DARK); // mount plate
-        line(g, 0.0, -38.0, 0.0, -22.0, 4.0, STEEL);
+        rect(g, -16.0, -48.0, 32.0, 10.0, STEEL_DARK); // the wall stub
+        frame(g, -16.0, -48.0, 32.0, 10.0, 1.5, TRIM);
         g.save();
-        g.translate(0.0, -18.0);
-        g.rotate((time * 0.5).sin() * 0.55);
-        // Watch cone first, under the body.
+        g.translate(0.0, -30.0);
+        g.rotate((time * 0.5).sin() * 0.35);
+        // The watch cone sweeps the floor first, under the body.
         g.draw_arc(
-            Vec2::new(0.0, 30.0),
-            34.0,
-            FRAC_PI_2 - 0.35,
-            FRAC_PI_2 + 0.35,
-            Color::new(1.0, 0.2, 0.2, 0.08),
+            Vec2::new(0.0, 0.0),
+            64.0,
+            FRAC_PI_2 - 0.30,
+            FRAC_PI_2 + 0.30,
+            Color::new(1.0, 0.2, 0.2, 0.07),
         );
-        rect(g, -8.0, 0.0, 16.0, 30.0, STEEL);
-        frame(g, -8.0, 0.0, 16.0, 30.0, 1.5, TRIM);
-        circle(g, 0.0, 30.0, 6.0, PANEL);
-        circle(g, 0.0, 30.0, 2.5, GLOW_CYAN);
+        g.draw_arc(
+            Vec2::new(0.0, 0.0),
+            30.0,
+            FRAC_PI_2 - 0.30,
+            FRAC_PI_2 + 0.30,
+            Color::new(1.0, 0.2, 0.2, 0.06),
+        );
+        // Body seen from above: housing, head, lens looking down the cone.
+        rect(g, -5.0, -2.0, 10.0, 14.0, STEEL);
+        rect(g, -7.0, 12.0, 14.0, 8.0, STEEL_DARK);
+        circle(g, 0.0, 20.0, 3.5, PANEL);
+        circle(g, 0.0, 20.0, 1.5, GLOW_CYAN);
+        circle(g, 0.0, 0.0, 6.0, TRIM); // the pivot
         let recording = blink(time, 1.0, 0.0, 0.12);
-        circle(g, 5.0, 4.0, 2.0, if recording { LED_RED } else { PANEL });
+        circle(g, 4.5, 4.0, 1.8, if recording { LED_RED } else { PANEL });
         g.restore();
     }
 
-    /// 21 — fire suppression pair: agent canisters plumbed into a manifold.
+    /// 21 — fire suppression pair from above: two agent tanks, handwheels up,
+    /// plumbed into the discharge manifold along the back wall.
     fn fire_suppressor(g: &Graphics, time: f32) {
-        rect(g, -26.0, -40.0, 52.0, 7.0, STEEL); // manifold
+        rect(g, -30.0, -44.0, 60.0, 7.0, STEEL); // the manifold
         for k in 0..4 {
-            circle(g, -19.0 + k as f32 * 13.0, -40.0, 2.0, PANEL); // nozzles
+            circle(g, -21.0 + k as f32 * 14.0, -36.0, 2.0, PANEL); // nozzles
         }
-        for &x in &[-18.0f32, 18.0] {
-            line(g, x, -33.0, x, -15.0, 4.0, TRIM);
-            circle(g, x, 4.0, 17.0, TRIM);
-            circle(g, x, 4.0, 14.0, Color::new(0.72, 0.14, 0.18, 1.0));
-            rect(g, x - 9.0, 0.0, 18.0, 5.0, alpha(CREAM, 0.85)); // band
-            circle(g, x, -10.0, 4.5, STEEL);
-            // Pressure gauges, needles steady (one twitches).
-            circle(g, x, 14.0, 4.0, CREAM);
-            let tw = if x > 0.0 {
-                0.12 * (time * 7.0).sin()
-            } else {
-                0.0
-            };
-            let a = -1.9 + tw;
-            line(
-                g,
-                x,
-                14.0,
-                x + a.cos() * 3.2,
-                14.0 + a.sin() * 3.2,
-                1.2,
-                LED_RED,
-            );
+        for (k, &x) in [-18.0f32, 18.0].iter().enumerate() {
+            line(g, x, -37.0, x, -12.0, 4.0, TRIM); // feed pipe
+            shadow_circle(g, x, 8.0, 17.0);
+            circle(g, x, 8.0, 17.0, TRIM);
+            circle(g, x, 8.0, 14.5, Color::new(0.72, 0.14, 0.18, 1.0));
+            circle(g, x, 8.0, 6.5, Color::new(0.55, 0.10, 0.14, 1.0)); // shoulder
+                                                                       // The handwheel on top, creeping as pressure is trimmed.
+            let a0 = 0.25 * (time * (0.5 + k as f32 * 0.3)).sin() + k as f32;
+            for s in 0..3 {
+                let a = a0 + s as f32 * (PI / 3.0);
+                line(
+                    g,
+                    x - a.cos() * 8.5,
+                    8.0 - a.sin() * 8.5,
+                    x + a.cos() * 8.5,
+                    8.0 + a.sin() * 8.5,
+                    1.8,
+                    STEEL,
+                );
+            }
+            circle(g, x, 8.0, 2.2, TRIM);
         }
+        // Inspection tag on the floor between them.
+        rect(g, -4.0, 32.0, 8.0, 10.0, alpha(HAZARD_YELLOW, 0.8));
     }
 
     /// 22 — hazard floor pad: striped border around a KEEP CLEAR zone.
@@ -891,7 +1058,7 @@ mod wasm {
             rect(g, -44.0, o, 8.0, 8.0, c2);
             rect(g, 36.0, o, 8.0, 8.0, c);
         }
-        // Warning triangle.
+        // Warning triangle painted in the middle.
         line(g, 0.0, -18.0, 16.0, 12.0, 3.0, HAZARD_YELLOW);
         line(g, 16.0, 12.0, -16.0, 12.0, 3.0, HAZARD_YELLOW);
         line(g, -16.0, 12.0, 0.0, -18.0, 3.0, HAZARD_YELLOW);
@@ -899,49 +1066,51 @@ mod wasm {
         rect(g, -1.5, 5.0, 3.0, 3.0, HAZARD_YELLOW);
     }
 
-    /// 23 — the uplink obelisk: a humming monolith with an orbiting escort.
+    /// 23 — the uplink obelisk from above: a diamond monolith top with seams
+    /// bleeding light toward its points, an escort of motes orbiting it.
     fn uplink_obelisk(g: &Graphics, time: f32) {
         let breath = 0.5 + 0.5 * (time * 2.0).sin();
-        circle(g, 0.0, 0.0, 44.0, alpha(GLOW_MAGENTA, 0.08 + 0.06 * breath));
+        circle(g, 0.0, 0.0, 44.0, alpha(GLOW_MAGENTA, 0.07 + 0.05 * breath));
+        circle(g, 0.0, 0.0, 30.0, alpha(GLOW_MAGENTA, 0.06 + 0.05 * breath));
+        // The monolith reads as a diamond from above.
+        g.save();
+        g.translate(4.0, 4.0);
+        g.rotate(PI / 4.0);
+        rect(g, -16.0, -16.0, 32.0, 32.0, SHADOW);
+        g.restore();
+        g.save();
+        g.rotate(PI / 4.0);
         rect(
             g,
-            -14.0,
-            -45.0,
-            28.0,
-            90.0,
+            -16.0,
+            -16.0,
+            32.0,
+            32.0,
             Color::new(0.07, 0.05, 0.10, 1.0),
         );
         frame(
             g,
-            -14.0,
-            -45.0,
-            28.0,
-            90.0,
+            -16.0,
+            -16.0,
+            32.0,
+            32.0,
             1.5,
             Color::new(0.35, 0.15, 0.35, 1.0),
         );
-        rect(
-            g,
-            -2.0,
-            -40.0,
-            4.0,
-            80.0,
-            alpha(GLOW_MAGENTA, 0.45 + 0.45 * breath),
-        );
-        for i in 0..5 {
-            rect(
-                g,
-                -7.0,
-                -33.0 + i as f32 * 16.0,
-                14.0,
-                2.0,
-                alpha(GLOW_MAGENTA, 0.5),
-            );
-        }
+        g.restore();
+        // Seams bleeding light toward the four points, the core white-hot.
+        let seam = alpha(GLOW_MAGENTA, 0.35 + 0.4 * breath);
+        line(g, 0.0, 0.0, 21.0, 0.0, 2.0, seam);
+        line(g, 0.0, 0.0, -21.0, 0.0, 2.0, seam);
+        line(g, 0.0, 0.0, 0.0, 21.0, 2.0, seam);
+        line(g, 0.0, 0.0, 0.0, -21.0, 2.0, seam);
+        circle(g, 0.0, 0.0, 6.0, alpha(GLOW_MAGENTA, 0.5 + 0.4 * breath));
+        circle(g, 0.0, 0.0, 2.5, alpha(CREAM, 0.8));
+        // The escort.
         for k in 0..3 {
             let a = time * 1.3 + k as f32 * 2.1;
             let c = if k % 2 == 0 { GLOW_MAGENTA } else { GLOW_CYAN };
-            circle(g, a.cos() * 30.0, a.sin() * 38.0, 2.5, alpha(c, 0.85));
+            circle(g, a.cos() * 32.0, a.sin() * 36.0, 2.5, alpha(c, 0.85));
         }
     }
 }
