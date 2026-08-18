@@ -880,6 +880,10 @@ impl EditableFloor {
                             }
                             Obj(vec![("say".into(), Obj(kv))])
                         }
+                        Action::Talk(t) => Obj(vec![(
+                            "talk".into(),
+                            Obj(vec![("who".into(), s(t.who)), ("text".into(), s(t.text))]),
+                        )]),
                         Action::Spawn(wave) => Obj(vec![(
                             "spawn".into(),
                             Arr(wave

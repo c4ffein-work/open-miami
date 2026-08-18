@@ -33,7 +33,8 @@ WEAPONS = {"pistol": "Pistol", "shotgun": "Shotgun", "machinegun": "MachineGun",
 SPEAKERS = {"CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR", "UPLINK"}
 TRIGGERS = {"start", "enter_zone", "kills", "all_dead", "timer", "exit_open", "step_done",
             "boss_dead", "extracted"}
-ACTIONS = {"say", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at"}
+ACTIONS = {"say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold",
+           "look_at"}
 SFX = {"elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"}
 # Portal (entry / exit) rendering kinds and floor ground surfaces.
 PORTAL_KINDS = {"lift": "Lift", "door": "Door", "gate": "Gate"}
@@ -223,6 +224,15 @@ def validate(floors):
                         raise Invalid(f"{tag}/{sid}: say needs text")
                     if "delay" in payload and (not isinstance(payload["delay"], (int, float)) or payload["delay"] < 0):
                         raise Invalid(f"{tag}/{sid}: say.delay must be >= 0")
+                elif name == "talk":
+                    # A dialogue line: who + text only (player-paced, no delay).
+                    if payload.get("who") not in SPEAKERS:
+                        raise Invalid(f"{tag}/{sid}: unknown speaker {payload.get('who')!r}")
+                    if not isinstance(payload.get("text"), str) or not payload["text"]:
+                        raise Invalid(f"{tag}/{sid}: talk needs text")
+                    extra = set(payload) - {"who", "text"}
+                    if extra:
+                        raise Invalid(f"{tag}/{sid}: talk takes only who/text, got {sorted(extra)}")
                 elif name == "spawn":
                     for s in payload:
                         validate_spawn(s, zone_ids, f"{tag}/{sid}: wave spawn")
@@ -380,6 +390,9 @@ def gen_floor(f, out):
             if kind == "say":
                 out.append(f"    Action::Say(SayDef {{ who: {rstr(payload['who'])}, "
                            f"text: {rstr(payload['text'])}, delay: {f32(payload.get('delay', 0))} }}),")
+            elif kind == "talk":
+                out.append(f"    Action::Talk(TalkDef {{ who: {rstr(payload['who'])}, "
+                           f"text: {rstr(payload['text'])} }}),")
             elif kind == "spawn":
                 out.append(f"    Action::Spawn(&{name}_WAVE_{ident(sid)}_{j}),")
             elif kind == "open_exit":
@@ -509,8 +522,8 @@ def generate(floors):
         "use crate::components::{EnemyType, WeaponType};",
         "use crate::scenario::{",
         "    Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, HoldDef, LookAtDef, PickupDef,",
-        "    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, Trigger, ZoneDef,",
-        "    SURFACE_EXIT,",
+        "    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, TalkDef, Trigger,",
+        "    ZoneDef, SURFACE_EXIT,",
         "};",
         "",
     ]

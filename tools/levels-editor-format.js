@@ -42,7 +42,7 @@
     timer: ["seconds", "after"], exit_open: ["exit"], step_done: ["step"],
     boss_dead: [], extracted: [],
   };
-  const ACTION_KINDS = ["say", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at"];
+  const ACTION_KINDS = ["say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at"];
   const SFX_NAMES = ["elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"];
   const MAX_FLOOR = 14;
 
@@ -63,6 +63,8 @@
     step: ["id", "trigger", "actions"],
     trigger: ["kind", "zone", "count", "seconds", "after", "exit", "step"],
     say: ["who", "text", "delay"],
+    /* dialogue-mode line (player-paced, no delay) */
+    talk: ["who", "text"],
     hold: ["seconds", "until_comms_idle", "text"],
     look_at: ["x", "y", "seconds"],
   };
@@ -138,6 +140,10 @@
       const say = { who: SPEAKERS.includes(s.who) ? s.who : str(s.who, "CL4-UD3"), text: str(s.text, "") };
       if (s.delay != null && s.delay !== "" && Number.isFinite(Number(s.delay))) say.delay = num(s.delay, 0);
       return { say };
+    }
+    if ("talk" in a) {
+      const t = isObj(a.talk) ? a.talk : {};
+      return { talk: { who: SPEAKERS.includes(t.who) ? t.who : str(t.who, "CL4-UD3"), text: str(t.text, "") } };
     }
     if ("spawn" in a) return { spawn: (Array.isArray(a.spawn) ? a.spawn : []).map(normSpawn) };
     if ("open_exit" in a) return { open_exit: str(a.open_exit, "") };
@@ -222,6 +228,7 @@
   function canonicalAction(a) {
     if (!isObj(a)) return a;
     if ("say" in a && isObj(a.say)) return { say: ordered(a.say, ORDER.say) };
+    if ("talk" in a && isObj(a.talk)) return { talk: ordered(a.talk, ORDER.talk) };
     if ("spawn" in a && Array.isArray(a.spawn)) return { spawn: a.spawn.map((s) => ordered(s, ORDER.spawn)) };
     if ("hold" in a && isObj(a.hold)) return { hold: ordered(a.hold, ORDER.hold) };
     if ("look_at" in a && isObj(a.look_at)) return { look_at: ordered(a.look_at, ORDER.look_at) };
@@ -376,6 +383,9 @@
           if (!SPEAKERS.includes(a.say.who)) err(q, label + ": unknown speaker \"" + a.say.who + "\"");
           if (!a.say.text || !a.say.text.trim()) err(q, label + ": say text is empty");
           if (a.say.delay != null && !(a.say.delay >= 0)) err(q, label + ": say delay must be >= 0");
+        } else if (a.talk) {
+          if (!SPEAKERS.includes(a.talk.who)) err(q, label + ": unknown speaker \"" + a.talk.who + "\"");
+          if (!a.talk.text || !a.talk.text.trim()) err(q, label + ": talk text is empty");
         } else if ("open_exit" in a || "close_exit" in a) {
           const id = a.open_exit != null ? a.open_exit : a.close_exit;
           if (!exitIds.has(id)) err(q, label + ": exit \"" + id + "\" does not exist");

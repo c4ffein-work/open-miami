@@ -27,6 +27,8 @@ pub mod props_data;
 pub mod render;
 #[cfg(target_arch = "wasm32")]
 pub mod render_comms;
+#[cfg(target_arch = "wasm32")]
+pub mod render_dialogue;
 pub mod scenario;
 pub mod sim;
 pub mod systems;
@@ -71,6 +73,7 @@ mod wasm_entry {
     use crate::render_comms::{
         render_comms, render_elevators, render_hold_caption, render_objective, render_zones_debug,
     };
+    use crate::render_dialogue::render_dialogue;
     use crate::scenario::{ScenarioState, SURFACE_EXIT};
     use crate::systems::boss::any_boss_enraged;
     use crate::systems::*;
@@ -2043,9 +2046,30 @@ mod wasm_entry {
             // Get mouse position in world coordinates
             let mouse_world_pos = self.camera.screen_to_world(mouse_screen_pos);
 
-            // A scenario `hold` locks movement / fire / throw / pickup (the
-            // world keeps running; Esc below still works).
-            let held = self.scenario.as_ref().is_some_and(|sc| sc.hold_active());
+            // A scenario `hold` — or an active `talk` conversation — locks
+            // movement / fire / throw / pickup (the world keeps running; Esc
+            // below still works).
+            let dialogue = self
+                .scenario
+                .as_ref()
+                .is_some_and(|sc| sc.dialogue_active());
+            let held = self
+                .scenario
+                .as_ref()
+                .is_some_and(|sc| sc.hold_active() || sc.dialogue_active());
+
+            // While a conversation is up, click / Space / Enter ADVANCES it
+            // (and, `held` being set, can never fire the weapon).
+            if dialogue
+                && player_alive
+                && (input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
+                    || input::is_key_pressed(input::keys::SPACE)
+                    || input::is_key_pressed("Enter"))
+            {
+                if let Some(sc) = self.scenario.as_mut() {
+                    sc.dialogue_advance();
+                }
+            }
 
             // Handle input (only if the player is alive and hasn't left in
             // the car yet)
@@ -2381,6 +2405,13 @@ mod wasm_entry {
                 if let Some(text) = sc.hold_caption() {
                     if player_alive && !level_complete {
                         render_hold_caption(graphics, text, accent, sc.time());
+                    }
+                }
+                // The visual-novel dialogue panel (`talk` conversations),
+                // over everything else on the HUD layer.
+                if let Some(view) = sc.dialogue_view() {
+                    if player_alive && !level_complete {
+                        render_dialogue(graphics, &view, accent, self.last_time as f32 / 1000.0);
                     }
                 }
             }

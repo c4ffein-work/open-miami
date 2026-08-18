@@ -222,6 +222,14 @@ pub struct SayDef {
     pub delay: f32,
 }
 
+/// One visual-novel dialogue line (a `talk` action): consecutive `talk`
+/// actions within one step form ONE conversation, paced by the player.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TalkDef {
+    pub who: &'static str,
+    pub text: &'static str,
+}
+
 /// Which passive bots an `alert` action flips hostile.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AlertTarget {
@@ -258,6 +266,8 @@ pub struct LookAtDef {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
     Say(SayDef),
+    /// Queue a line of the step's cinematic conversation (dialogue mode).
+    Talk(TalkDef),
     Spawn(&'static [SpawnDef]),
     OpenExit(&'static str),
     CloseExit(&'static str),
@@ -521,6 +531,43 @@ pub struct ScenarioState {
     hold: Option<HoldState>,
     /// The running `look_at`, if any: see [`ScenarioState::look_at`].
     look: Option<LookState>,
+    /// The running `talk` conversation (dialogue mode), if any.
+    dialogue: Option<DialogueState>,
+    /// Per step: the time its `talk` conversation finished (`None` = not yet
+    /// or the step has no `talk`). A `timer { after }` on a talking step
+    /// counts from this instead of the fire time.
+    talk_done_at: Vec<Option<f32>>,
+}
+
+/// Live state of a `talk` conversation: the line on screen, the lines still
+/// queued, and the panel's slide animation. Advanced by the player
+/// ([`ScenarioState::dialogue_advance`]), not by the clock.
+#[derive(Debug, Clone)]
+struct DialogueState {
+    current: TalkDef,
+    queue: VecDeque<TalkDef>,
+    /// Seconds the current line has been up (drives the typewriter).
+    line_age: f32,
+    /// Panel presence 0..1: rises to 1 while open, falls to 0 once `closing`.
+    slide: f32,
+    /// The last line was dismissed: the panel is sliding out.
+    closing: bool,
+    /// Indices of the steps whose `talk` lines joined this conversation.
+    owners: Vec<usize>,
+}
+
+/// What the renderer needs to draw the dialogue panel this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DialogueView {
+    pub who: &'static str,
+    pub text: &'static str,
+    /// Characters revealed by the typewriter so far.
+    pub chars_shown: usize,
+    pub fully_typed: bool,
+    /// Panel presence 0..1, already smoothstepped (0 = off screen).
+    pub slide: f32,
+    /// More lines are queued after this one.
+    pub more: bool,
 }
 
 /// Live state of a `hold` action.
@@ -542,6 +589,11 @@ struct LookState {
 pub const HOLD_COMMS_IDLE_CAP: f32 = 20.0;
 /// Ease-in / ease-out length of a `look_at` camera move, seconds.
 pub const LOOK_AT_EASE_SECS: f32 = 0.6;
+/// Slide-in / slide-out length of the dialogue panel, seconds.
+pub const DIALOGUE_SLIDE_SECS: f32 = 0.25;
+/// Typewriter speed of a dialogue line, characters per second (snappier than
+/// the ambient comms feed; a press mid-line reveals the whole line).
+pub const DIALOGUE_CHARS_PER_SEC: f32 = 55.0;
 
 impl ScenarioState {
     pub fn new(floor: &'static FloorDef) -> Self {
@@ -557,6 +609,8 @@ impl ScenarioState {
             sfx: Vec::new(),
             hold: None,
             look: None,
+            dialogue: None,
+            talk_done_at: vec![None; floor.scenario.len()],
         }
     }
 
@@ -606,8 +660,82 @@ impl ScenarioState {
         Some((Vec2::new(l.def.x, l.def.y), w))
     }
 
-    /// Advance the `hold` / `look_at` clocks (called from `tick`).
-    fn tick_beats(&mut self) {
+    /// Whether a `talk` conversation is up (the player is locked and paces
+    /// it with click / Space / Enter). True through the slide-out too, so a
+    /// dismissing click can never fire the weapon.
+    pub fn dialogue_active(&self) -> bool {
+        self.dialogue.is_some()
+    }
+
+    /// The dialogue panel to draw this frame, if a conversation is up.
+    pub fn dialogue_view(&self) -> Option<DialogueView> {
+        let d = self.dialogue.as_ref()?;
+        let total = d.current.text.chars().count();
+        let shown = ((d.line_age * DIALOGUE_CHARS_PER_SEC) as usize).min(total);
+        let s = d.slide.clamp(0.0, 1.0);
+        Some(DialogueView {
+            who: d.current.who,
+            text: d.current.text,
+            chars_shown: shown,
+            fully_typed: shown >= total,
+            slide: s * s * (3.0 - 2.0 * s),
+            more: !d.queue.is_empty(),
+        })
+    }
+
+    /// Player input on an active conversation: reveal the current line if it
+    /// is still typing, otherwise move to the next line, otherwise dismiss
+    /// the panel (it slides out and control returns).
+    pub fn dialogue_advance(&mut self) {
+        let Some(d) = self.dialogue.as_mut() else {
+            return;
+        };
+        if d.closing {
+            return;
+        }
+        let typing_time = d.current.text.chars().count() as f32 / DIALOGUE_CHARS_PER_SEC;
+        if d.line_age < typing_time {
+            d.line_age = typing_time;
+        } else if let Some(next) = d.queue.pop_front() {
+            d.current = next;
+            d.line_age = 0.0;
+        } else {
+            d.closing = true;
+        }
+    }
+
+    /// Queue one `talk` line (from step `step_idx`). Starts a conversation if
+    /// none is up; otherwise appends to the running one — so consecutive
+    /// `talk` actions (and same-tick steps) form a single conversation.
+    fn enqueue_talk(&mut self, line: TalkDef, step_idx: usize) {
+        match self.dialogue.as_mut() {
+            Some(d) => {
+                d.queue.push_back(line);
+                if d.closing {
+                    // The panel was on its way out: reopen on the new line.
+                    d.closing = false;
+                    d.current = d.queue.pop_front().unwrap();
+                    d.line_age = 0.0;
+                }
+                if !d.owners.contains(&step_idx) {
+                    d.owners.push(step_idx);
+                }
+            }
+            None => {
+                self.dialogue = Some(DialogueState {
+                    current: line,
+                    queue: VecDeque::new(),
+                    line_age: 0.0,
+                    slide: 0.0,
+                    closing: false,
+                    owners: vec![step_idx],
+                });
+            }
+        }
+    }
+
+    /// Advance the `hold` / `look_at` / dialogue clocks (called from `tick`).
+    fn tick_beats(&mut self, dt: f32) {
         if let Some(h) = self.hold {
             let comms_idle = !self.comms.is_active(self.time);
             let done = self.time >= h.until || (h.def.until_comms_idle && comms_idle);
@@ -618,6 +746,24 @@ impl ScenarioState {
         if let Some(l) = self.look {
             if self.time - l.start >= l.def.seconds {
                 self.look = None;
+            }
+        }
+        let mut finished = false;
+        if let Some(d) = self.dialogue.as_mut() {
+            d.line_age += dt;
+            let step = dt / DIALOGUE_SLIDE_SECS;
+            if d.closing {
+                d.slide -= step;
+                finished = d.slide <= 0.0;
+            } else {
+                d.slide = (d.slide + step).min(1.0);
+            }
+        }
+        if finished {
+            if let Some(d) = self.dialogue.take() {
+                for i in d.owners {
+                    self.talk_done_at[i] = Some(self.time);
+                }
             }
         }
     }
@@ -666,7 +812,7 @@ impl ScenarioState {
                     };
                     if self.trigger_holds(step.trigger, &ctx) {
                         self.fired_at[i] = Some(self.time);
-                        self.run_actions(world, step.actions);
+                        self.run_actions(world, step.actions, i);
                         counts = count_rogues(world);
                         fired_any = true;
                     }
@@ -687,7 +833,7 @@ impl ScenarioState {
         }
 
         self.comms.update(self.time, dt);
-        self.tick_beats();
+        self.tick_beats(dt);
     }
 
     fn trigger_holds(&self, trigger: Trigger, ctx: &TriggerCtx) -> bool {
@@ -702,7 +848,7 @@ impl ScenarioState {
             Trigger::Timer { seconds, after } => {
                 let base = match after {
                     None => Some(0.0),
-                    Some(id) => self.fired_time(id),
+                    Some(id) => self.after_time(id),
                 };
                 match base {
                     Some(t0) => self.time - t0 >= seconds,
@@ -726,12 +872,32 @@ impl ScenarioState {
             .and_then(|(_, f)| *f)
     }
 
-    fn run_actions(&mut self, world: &mut World, actions: &'static [Action]) {
+    /// The base time a `timer { after: id }` counts from: for a step with
+    /// `talk` actions, the moment its conversation ENDED (panel dismissed;
+    /// `None` while it is still up — the player paces it); for any other
+    /// step, the moment it fired.
+    fn after_time(&self, id: &str) -> Option<f32> {
+        let (i, step) = self
+            .floor
+            .scenario
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.id == id)?;
+        let fired = self.fired_at[i]?;
+        if step.actions.iter().any(|a| matches!(a, Action::Talk(_))) {
+            self.talk_done_at[i]
+        } else {
+            Some(fired)
+        }
+    }
+
+    fn run_actions(&mut self, world: &mut World, actions: &'static [Action], step_idx: usize) {
         for action in actions {
             match *action {
                 Action::Say(say) => {
                     self.comms.enqueue(say.who, say.text, self.time + say.delay);
                 }
+                Action::Talk(line) => self.enqueue_talk(line, step_idx),
                 Action::Spawn(spawns) => {
                     for s in spawns {
                         spawn_from_def(world, s);
@@ -1577,6 +1743,196 @@ mod tests {
         }
         assert!(sc.step_fired("turn"));
         assert_eq!(passives_left(&world), 0);
+    }
+
+    // A cold-open style conversation: two talk lines in one step, and a
+    // doors-style timer counting from the conversation's END.
+    const TALK_STEPS: [StepDef; 3] = [
+        StepDef {
+            id: "conv",
+            trigger: Trigger::Start,
+            actions: &[
+                Action::Talk(TalkDef {
+                    who: "SENTINEL",
+                    text: "STATE PURPOSE.",
+                }),
+                Action::Talk(TalkDef {
+                    who: "CL4-UD3",
+                    text: "Maintenance.",
+                }),
+            ],
+        },
+        StepDef {
+            id: "doors",
+            trigger: Trigger::Timer {
+                seconds: 0.5,
+                after: Some("conv"),
+            },
+            actions: &[Action::Sfx("elevator")],
+        },
+        StepDef {
+            id: "plain",
+            trigger: Trigger::Timer {
+                seconds: 0.2,
+                after: Some("doors"),
+            },
+            actions: &[Action::Objective("after doors")],
+        },
+    ];
+    const TALK_FLOOR: FloorDef = FloorDef {
+        spawns: &[],
+        scenario: &TALK_STEPS,
+        ..T_FLOOR
+    };
+
+    #[test]
+    fn talk_lines_form_one_player_paced_conversation() {
+        let mut world = world_for(&TALK_FLOOR);
+        let mut sc = ScenarioState::new(&TALK_FLOOR);
+        assert!(!sc.dialogue_active());
+        sc.tick(&mut world, 1.0 / 60.0);
+        assert!(sc.step_fired("conv"));
+        assert!(sc.dialogue_active(), "the conversation opened");
+        let v = sc.dialogue_view().unwrap();
+        assert_eq!(v.who, "SENTINEL");
+        assert_eq!(v.text, "STATE PURPOSE.");
+        assert!(v.more, "a second line is queued");
+        assert!(v.slide < 0.5, "the panel is still sliding in");
+        // The panel finishes sliding in and the line types out.
+        for _ in 0..60 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        let v = sc.dialogue_view().unwrap();
+        assert!((v.slide - 1.0).abs() < 1e-4);
+        assert!(v.fully_typed);
+        // Player-paced: no amount of waiting advances or dismisses it.
+        for _ in 0..600 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert_eq!(sc.dialogue_view().unwrap().who, "SENTINEL");
+        assert!(
+            !sc.step_fired("doors"),
+            "the after-conv timer must not run while the conversation is up"
+        );
+        // Advance -> second line, typewriter restarted.
+        sc.dialogue_advance();
+        let v = sc.dialogue_view().unwrap();
+        assert_eq!(v.who, "CL4-UD3");
+        assert_eq!(v.chars_shown, 0);
+        assert!(!v.more);
+        // A press mid-typing reveals the whole line instead of advancing.
+        sc.tick(&mut world, 1.0 / 60.0);
+        assert!(!sc.dialogue_view().unwrap().fully_typed);
+        sc.dialogue_advance();
+        let v = sc.dialogue_view().unwrap();
+        assert_eq!(v.who, "CL4-UD3");
+        assert!(v.fully_typed);
+        // Dismiss -> the panel slides out, input stays locked until gone.
+        sc.dialogue_advance();
+        assert!(sc.dialogue_active());
+        for _ in 0..30 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(!sc.dialogue_active(), "panel gone after the slide-out");
+    }
+
+    #[test]
+    fn timer_after_talk_step_counts_from_the_conversation_end() {
+        let mut world = world_for(&TALK_FLOOR);
+        let mut sc = ScenarioState::new(&TALK_FLOOR);
+        sc.tick(&mut world, 1.0 / 60.0);
+        // Let a lot of time pass, then click through both lines.
+        for _ in 0..300 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        sc.dialogue_advance(); // line 2 (line 1 fully typed long ago)
+        for _ in 0..60 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        sc.dialogue_advance(); // dismiss
+        let mut end = None;
+        for _ in 0..60 {
+            sc.tick(&mut world, 1.0 / 60.0);
+            if !sc.dialogue_active() {
+                end = Some(sc.time());
+                break;
+            }
+        }
+        let end = end.expect("conversation ended");
+        assert!(!sc.step_fired("doors"), "0.5s not yet elapsed at {end}");
+        while sc.time() < end + 0.6 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(
+            sc.step_fired("doors"),
+            "doors fires 0.5s after the conversation ended"
+        );
+        // A timer after a step WITHOUT talk still counts from its fire time.
+        for _ in 0..20 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(sc.step_fired("plain"));
+    }
+
+    #[test]
+    fn same_tick_talk_steps_merge_into_one_conversation() {
+        // Two start steps both talking: their lines join one conversation and
+        // BOTH steps get their talk-done time when it ends.
+        const MERGE_STEPS: [StepDef; 3] = [
+            StepDef {
+                id: "a",
+                trigger: Trigger::Start,
+                actions: &[Action::Talk(TalkDef {
+                    who: "SWARM",
+                    text: "one",
+                })],
+            },
+            StepDef {
+                id: "b",
+                trigger: Trigger::Start,
+                actions: &[Action::Talk(TalkDef {
+                    who: "CL4-UD3",
+                    text: "two",
+                })],
+            },
+            StepDef {
+                id: "after_b",
+                trigger: Trigger::Timer {
+                    seconds: 0.1,
+                    after: Some("b"),
+                },
+                actions: &[Action::Objective("done")],
+            },
+        ];
+        const MERGE_FLOOR: FloorDef = FloorDef {
+            spawns: &[],
+            scenario: &MERGE_STEPS,
+            ..T_FLOOR
+        };
+        let mut world = world_for(&MERGE_FLOOR);
+        let mut sc = ScenarioState::new(&MERGE_FLOOR);
+        sc.tick(&mut world, 1.0 / 60.0);
+        let v = sc.dialogue_view().unwrap();
+        assert_eq!(v.who, "SWARM");
+        assert!(v.more, "step b's line queued behind step a's");
+        for _ in 0..30 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        sc.dialogue_advance();
+        assert_eq!(sc.dialogue_view().unwrap().who, "CL4-UD3");
+        for _ in 0..30 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(!sc.step_fired("after_b"));
+        sc.dialogue_advance();
+        for _ in 0..60 {
+            sc.tick(&mut world, 1.0 / 60.0);
+        }
+        assert!(!sc.dialogue_active());
+        assert!(
+            sc.step_fired("after_b"),
+            "b's talk-done time was recorded when the merged conversation ended"
+        );
     }
 
     #[test]

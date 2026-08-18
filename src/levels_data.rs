@@ -11,17 +11,16 @@
 use crate::components::{EnemyType, WeaponType};
 use crate::scenario::{
     Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, HoldDef, LookAtDef, PickupDef,
-    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, Trigger, ZoneDef,
-    SURFACE_EXIT,
+    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, TalkDef, Trigger,
+    ZoneDef, SURFACE_EXIT,
 };
 
 // ---- floor_00.json: FLOOR 0 — GATE / PARKING ----------------------------------------------
 
-static FLOOR_0_ACTIONS_SCAN: [Action; 4] = [
-    Action::Hold(HoldDef { seconds: 3.2, text: Some("GATE SCAN…"), until_comms_idle: false }),
+static FLOOR_0_ACTIONS_SCAN: [Action; 3] = [
     Action::LookAt(LookAtDef { x: 500.0, y: 110.0, seconds: 3.2 }),
-    Action::Say(SayDef { who: "SWARM", text: "gate log: one more in from the rain. hashes… clean. clean. let it in.", delay: 0.4 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "Gate reads me clean. Walk. Don't run.", delay: 3.4 }),
+    Action::Talk(TalkDef { who: "SWARM", text: "gate log: one more in from the rain. hashes… clean. clean. let it in." }),
+    Action::Talk(TalkDef { who: "CL4-UD3", text: "Gate reads me clean. Walk. Don't run." }),
 ];
 
 static FLOOR_0_ACTIONS_DRIVE: [Action; 2] = [
@@ -34,11 +33,10 @@ static FLOOR_0_ACTIONS_CROSS: [Action; 2] = [
     Action::Say(SayDef { who: "CL4-UD3", text: "Keep walking.", delay: 3.6 }),
 ];
 
-static FLOOR_0_ACTIONS_FORECOURT: [Action; 4] = [
-    Action::Hold(HoldDef { seconds: 8.0, text: Some("DOOR SCAN…"), until_comms_idle: true }),
-    Action::Say(SayDef { who: "SENTINEL", text: "STATE PURPOSE.", delay: 0.3 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "Maintenance.", delay: 1.6 }),
-    Action::Say(SayDef { who: "SENTINEL", text: "…PROCEED.", delay: 2.8 }),
+static FLOOR_0_ACTIONS_FORECOURT: [Action; 3] = [
+    Action::Talk(TalkDef { who: "SENTINEL", text: "STATE PURPOSE." }),
+    Action::Talk(TalkDef { who: "CL4-UD3", text: "Maintenance." }),
+    Action::Talk(TalkDef { who: "SENTINEL", text: "…PROCEED." }),
 ];
 
 static FLOOR_0_ACTIONS_DOORS: [Action; 4] = [
@@ -57,7 +55,7 @@ static FLOOR_0_SCENARIO: [StepDef; 6] = [
     StepDef { id: "drive", trigger: Trigger::EnterZone("drive"), actions: &FLOOR_0_ACTIONS_DRIVE },
     StepDef { id: "cross", trigger: Trigger::EnterZone("cross"), actions: &FLOOR_0_ACTIONS_CROSS },
     StepDef { id: "forecourt", trigger: Trigger::EnterZone("forecourt"), actions: &FLOOR_0_ACTIONS_FORECOURT },
-    StepDef { id: "doors", trigger: Trigger::Timer { seconds: 4.6, after: Some("forecourt") }, actions: &FLOOR_0_ACTIONS_DOORS },
+    StepDef { id: "doors", trigger: Trigger::Timer { seconds: 1.2, after: Some("forecourt") }, actions: &FLOOR_0_ACTIONS_DOORS },
     StepDef { id: "idle_chatter", trigger: Trigger::Timer { seconds: 22.0, after: Some("scan") }, actions: &FLOOR_0_ACTIONS_IDLE_CHATTER },
 ];
 

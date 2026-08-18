@@ -523,6 +523,7 @@
   function defaultAction(k, fl) {
     switch (k) {
       case "say": return { say: { who: "CL4-UD3", text: "" } };
+      case "talk": return { talk: { who: "CL4-UD3", text: "" } };
       case "spawn": return { spawn: [{ x: Math.round(fl.size.w / 2), y: Math.round(fl.size.h / 2), type: "patrolling" }] };
       case "open_exit": return { open_exit: (fl.exits[0] && fl.exits[0].id) || "" };
       case "close_exit": return { close_exit: (fl.exits[0] && fl.exits[0].id) || "" };
@@ -560,6 +561,14 @@
         const v = row.querySelector(".dly").value; if (v === "" || !Number.isFinite(Number(v))) delete x.say.delay; else x.say.delay = Number(v);
       }));
       row.appendChild(el("span", null, "s"));
+    } else if (kind === "talk") {
+      // dialogue-mode line: who + text only (player-paced conversation)
+      const who = el("select", { class: "who who-" + a.talk.who });
+      for (const w of F.SPEAKERS) who.appendChild(opt(w, w, a.talk.who === w));
+      if (!F.SPEAKERS.includes(a.talk.who)) who.appendChild(opt(a.talk.who, a.talk.who + " (?)", true));
+      who.addEventListener("change", () => mutate((fl) => { fl.scenario[i].actions[j].talk.who = who.value; }));
+      row.appendChild(who);
+      row.appendChild(live(el("input", { type: "text", class: "txt", placeholder: "dialogue line… (click to advance in game)", value: a.talk.text }), (x) => { x.talk.text = row.querySelector(".txt").value; }));
     } else if (kind === "open_exit" || kind === "close_exit") {
       const ex = idOptions(el("select"), exitIds, a[kind], false);
       ex.addEventListener("change", () => mutate((fl) => { fl.scenario[i].actions[j][kind] = ex.value; }));
@@ -684,6 +693,19 @@
           wh.appendChild(el("span", { class: "t" }, "+" + (a.say.delay || 0) + "s"));
           body.appendChild(wh);
           body.appendChild(el("div", { class: "line" }, a.say.text || "…"));
+          row.appendChild(body); comms.appendChild(row);
+        } else if (a.talk) {
+          // dialogue-mode line: same card, marked DIALOGUE instead of a delay
+          const who = a.talk.who, col = F.SPEAKER_COLORS[who] || "#fff";
+          const row = el("div", { class: "msg" + (who === "CL4-UD3" ? " clyde" : "") + (who === "DRIFTER" ? " static" : "") + (who === "CORRUPTOR" || who === "SWARM" ? " corrupt" : "") });
+          row.style.setProperty("--who", col);
+          row.appendChild(portrait(who));
+          const body = el("div", { class: "body" });
+          const wh = el("div", { class: "who" }, who);
+          if (F.SPEAKER_TAGS[who]) wh.appendChild(el("span", { class: "tag" }, "// " + F.SPEAKER_TAGS[who]));
+          wh.appendChild(el("span", { class: "t" }, "DIALOGUE ▼"));
+          body.appendChild(wh);
+          body.appendChild(el("div", { class: "line" }, a.talk.text || "…"));
           row.appendChild(body); comms.appendChild(row);
         } else if ("spawn" in a) comms.appendChild(el("div", { class: "sys spawn" }, "SPAWN WAVE ×" + a.spawn.length + " " + a.spawn.map((s) => F.SPAWN_LETTER[s.type]).join("")));
         else if ("open_exit" in a) comms.appendChild(el("div", { class: "sys" }, "EXIT OPENED: " + a.open_exit));

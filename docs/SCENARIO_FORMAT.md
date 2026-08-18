@@ -84,7 +84,7 @@ World units: the existing levels are ~1000×800 world units; keep that scale
 | `enter_zone` | `zone` | the player is inside that zone |
 | `kills` | `count` | at least `count` rogues are dead on this floor |
 | `all_dead` | — | every rogue (incl. spawned waves) is dead |
-| `timer` | `seconds`, optional `after` (step id) | `seconds` after floor start (or after step `after` fired) |
+| `timer` | `seconds`, optional `after` (step id) | `seconds` after floor start (or after step `after` fired — but when step `after` has `talk` actions, `seconds` counts from the moment its **conversation ends** (last line dismissed, panel gone), since the player paces it) |
 | `exit_open` | optional `exit` | that exit (any if omitted) has been opened |
 | `step_done` | `step` | step `step` has fired (chain steps) |
 | `boss_dead` | — | the floor's boss (the `Boss` entity) is dead — never on floors without one |
@@ -98,6 +98,7 @@ never let `all_dead` slip through.
 | action | payload | effect |
 |---|---|---|
 | `say` | `who`, `text`, optional `delay` (s, default 0; relative to the step firing) | queue a comms line; lines with delays play **one after another** |
+| `talk` | `who`, `text` (no `delay` — the player paces it) | queue a **DIALOGUE line**: consecutive `talk` actions in one step (and same-tick steps) form ONE conversation, shown in the visual-novel panel that slides in from the right (the speaking bot's bust, name in the speaker's colour, typewriter text). While it is up the player is locked like a `hold` (the world keeps running) and click / Space / Enter advances: first press reveals the typing line, next press moves on; after the last line the panel slides out and control returns. A `timer` trigger `after` the step counts from the conversation's end |
 | `spawn` | array of spawns | spawn a wave (counted by `kills`/`all_dead`) |
 | `open_exit` / `close_exit` | exit id | open/close an elevator (open = extractable) |
 | `objective` | text | replace the on-screen objective line |
