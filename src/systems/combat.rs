@@ -23,6 +23,20 @@ pub const BULLET_KNOCKBACK: f32 = 500.0;
 /// than a single bullet (matching the heavier feel of a swing).
 pub const MELEE_KNOCKBACK: f32 = 1000.0;
 
+/// Chip damage of a bare-fist strike — the KNOCKDOWN is the point, the damage
+/// is a scratch (it still flips passive civilians hostile, like any hurt).
+pub const PUNCH_DAMAGE: i32 = 10;
+
+/// Reach of a punch: a touch shorter than the metal bar's 50 px swing.
+pub const PUNCH_RANGE: f32 = 45.0;
+
+/// The shove of a punch: between a bullet and the metal bar.
+pub const PUNCH_KNOCKBACK: f32 = 700.0;
+
+/// How long a punched rogue stays sprawled on the floor before getting back
+/// up (unless finished off first).
+pub const KNOCKDOWN_SECS: f32 = 3.0;
+
 /// How hard an enemy's contact attack shoves the player straight away from it.
 pub const PLAYER_KNOCKBACK: f32 = 650.0;
 
@@ -133,6 +147,30 @@ impl CombatSystem {
         false // No hit
     }
 
+    /// Is `enemy_pos` inside the 90-degree melee cone: within `range` of the
+    /// attacker and within 45 degrees of the attacker->target direction?
+    fn in_melee_cone(
+        attacker_pos: Position,
+        target_angle: f32,
+        enemy_pos: Position,
+        range: f32,
+    ) -> bool {
+        if attacker_pos.distance_to(&enemy_pos) > range {
+            return false;
+        }
+        let enemy_dx = enemy_pos.x - attacker_pos.x;
+        let enemy_dy = enemy_pos.y - attacker_pos.y;
+        let enemy_angle = enemy_dy.atan2(enemy_dx);
+
+        let angle_diff = (enemy_angle - target_angle).abs();
+        let normalized_angle = if angle_diff > std::f32::consts::PI {
+            2.0 * std::f32::consts::PI - angle_diff
+        } else {
+            angle_diff
+        };
+        normalized_angle < std::f32::consts::PI / 4.0
+    }
+
     /// Process melee attack in a cone. Emits one [`GameEvent::EnemyHit`] (by
     /// melee) per enemy struck.
     pub fn process_melee(
@@ -165,36 +203,79 @@ impl CombatSystem {
                 continue;
             }
 
-            let distance = attacker_pos.distance_to(&enemy_pos);
-            if distance > range {
-                continue;
-            }
-
-            // Check angle (90 degree cone)
-            let enemy_dx = enemy_pos.x - attacker_pos.x;
-            let enemy_dy = enemy_pos.y - attacker_pos.y;
-            let enemy_angle = enemy_dy.atan2(enemy_dx);
-
-            let angle_diff = (enemy_angle - target_angle).abs();
-            let normalized_angle = if angle_diff > std::f32::consts::PI {
-                2.0 * std::f32::consts::PI - angle_diff
-            } else {
-                angle_diff
-            };
-
-            if normalized_angle < std::f32::consts::PI / 4.0 {
-                // Within 45 degree cone (90 degrees total)
+            if Self::in_melee_cone(attacker_pos, target_angle, enemy_pos, range) {
                 if let Some(health) = world.get_component_mut::<Health>(enemy) {
                     health.take_damage(damage);
                     hit_any = true;
                     world.push_event(GameEvent::EnemyHit {
                         by: WeaponType::Melee,
                     });
+                    world.push_event(GameEvent::StrikeLanded);
                 }
                 // Shove the enemy away from the attacker (attacker -> enemy).
                 let dir_x = enemy_pos.x - attacker_pos.x;
                 let dir_y = enemy_pos.y - attacker_pos.y;
                 Self::apply_knockback(world, enemy, dir_x, dir_y, MELEE_KNOCKBACK);
+            }
+        }
+
+        hit_any
+    }
+
+    /// Process a bare-fist strike in the same 90-degree cone as melee, but
+    /// Hotline-Miami style: instead of plain damage the enemy is KNOCKED DOWN —
+    /// chip damage ([`PUNCH_DAMAGE`]), a shove, and a [`Stunned`] sprawl of
+    /// [`KNOCKDOWN_SECS`] falling AWAY from the blow (attacker -> enemy). The
+    /// boss shrugs the knockdown off (it only takes the chip damage). Emits one
+    /// [`GameEvent::EnemyHit`] (by melee — a fist clanging on a metal bot) per
+    /// enemy struck.
+    pub fn process_punch(
+        world: &mut World,
+        attacker_pos: Position,
+        target_pos: Position,
+        damage: i32,
+        range: f32,
+    ) -> bool {
+        let enemies: Vec<Entity> = world.query::<Enemy>();
+
+        let dx = target_pos.x - attacker_pos.x;
+        let dy = target_pos.y - attacker_pos.y;
+        let target_angle = dy.atan2(dx);
+
+        let mut hit_any = false;
+
+        for enemy in enemies {
+            let (enemy_pos, enemy_health) = match (
+                world.get_component::<Position>(enemy),
+                world.get_component::<Health>(enemy),
+            ) {
+                (Some(pos), Some(hp)) => (*pos, *hp),
+                _ => continue,
+            };
+
+            if enemy_health.is_dead() {
+                continue;
+            }
+
+            if Self::in_melee_cone(attacker_pos, target_angle, enemy_pos, range) {
+                if let Some(health) = world.get_component_mut::<Health>(enemy) {
+                    health.take_damage(damage);
+                    hit_any = true;
+                    world.push_event(GameEvent::EnemyHit {
+                        by: WeaponType::Melee,
+                    });
+                    world.push_event(GameEvent::PunchLanded);
+                }
+                let dir_x = enemy_pos.x - attacker_pos.x;
+                let dir_y = enemy_pos.y - attacker_pos.y;
+                Self::apply_knockback(world, enemy, dir_x, dir_y, PUNCH_KNOCKBACK);
+                // Knock the bot down, sprawled along the direction of the blow.
+                // The boss is immune to knockdown (and re-punching a downed bot
+                // simply restarts its sprawl).
+                if !world.has_component::<Boss>(enemy) {
+                    let fall = dir_y.atan2(dir_x);
+                    world.add_component(enemy, Stunned::with_fall(KNOCKDOWN_SECS, fall));
+                }
             }
         }
 
@@ -431,8 +512,12 @@ mod tests {
             vec![
                 GameEvent::EnemyHit {
                     by: WeaponType::Melee
-                };
-                2
+                },
+                GameEvent::StrikeLanded,
+                GameEvent::EnemyHit {
+                    by: WeaponType::Melee
+                },
+                GameEvent::StrikeLanded,
             ]
         );
     }

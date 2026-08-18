@@ -210,17 +210,55 @@ async function purgeRogues(page) {
  * Floor 1 (RECEPTION CACHE, the welcome hall): the MAIN DOORS entry is bottom
  * centre (500,750), a partition wall at y 500..520 splits the foyer from the
  * hall with the turnstile gap at x 430..570, and the SERVICE LIFT exit is the
- * NW car x 60..150, y 20..80. Walk north through the arch and the turnstiles
- * into the hall, west until under the car, then north into it; the caller
- * then waits for the dwell (0.6 s), the extraction card and floor 2 to load.
+ * NW car x 60..150, y 20..80.
+ *
+ * The hall is the TUTORIAL stage now: the desk zone (x 400..600, y 395..450)
+ * starts the cover-blown scene and the gated combat tutorial, so this MINIMAL
+ * path to the lift stays south of it (y >= 470) and hugs the west side. The
+ * `deep` zone (y <= 340) still fires the SENTINEL "not past the line" block
+ * talk on the way up — it is clicked through here. The caller then waits for
+ * the dwell (0.6 s), the extraction card and floor 2 to load.
  */
 async function walkFloor1ToServiceLift(page) {
+  // North through the turnstile gap, stopping SOUTH of the desk zone.
   await page.mouse.move(640, 100);
-  await walkUntil(page, 'w', (p) => p.y <= 440, { what: 'walking north through the turnstiles' });
+  await walkUntil(page, 'w', (p) => p.y <= 470, { what: 'walking north through the turnstiles' });
+  // West along the hall's south band, clear of the desk trigger.
   await page.mouse.move(300, 400);
   await walkUntil(page, 'a', (p) => p.x <= 108, { what: 'walking west to the SERVICE LIFT column' });
+  // North to the edge of the `deep` zone; stepping in freezes the walk on
+  // the block conversation.
   await page.mouse.move(640, 100);
-  const pos = await walkUntil(page, 'w', (p) => p.y <= 60, { what: 'walking north into the SERVICE LIFT' });
+  await walkUntil(page, 'w', (p) => p.y <= 346, { what: 'walking north to the deep-hall line' });
+  await hold(page, 'w', 300); // step across y=340 into the zone
+  await waitForFrameTexts(page, (t) => t.some((s) => s.includes('NOT PAST')), {
+    what: 'the SENTINEL block talk',
+  });
+  // Tap Space through the conversation (frame-aware presses): one press
+  // reveals the typing line, the next advances; the panel shows "END" on the
+  // last fully-typed line and one more press dismisses it.
+  for (let i = 0; i < 24; i++) {
+    const texts = await lastFrameTexts(page);
+    if (texts.includes('END')) break;
+    await tap(page, ' ');
+    await page.waitForTimeout(120);
+  }
+  await tap(page, ' '); // dismiss
+  await page.waitForTimeout(500); // the panel slides out, control returns
+  // On north into the SERVICE LIFT (an extra tap if the panel lingered).
+  let pos = null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      pos = await walkUntil(page, 'w', (p) => p.y <= 60, {
+        timeout: 8000,
+        what: 'walking north into the SERVICE LIFT',
+      });
+      break;
+    } catch (e) {
+      if (attempt >= 2) throw e;
+      await tap(page, ' ');
+    }
+  }
   expect(pos.x).toBeGreaterThan(60);
   expect(pos.x).toBeLessThan(150);
 }

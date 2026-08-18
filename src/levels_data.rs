@@ -10,18 +10,17 @@
 
 use crate::components::{EnemyType, WeaponType};
 use crate::scenario::{
-    Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, HoldDef, LookAtDef, PickupDef,
-    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, Trigger, ZoneDef,
-    SURFACE_EXIT,
+    Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, GateDef, GateInput, HoldDef,
+    LookAtDef, PickupDef, PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface,
+    TalkDef, Trigger, ZoneDef, SURFACE_EXIT,
 };
 
 // ---- floor_00.json: FLOOR 0 — GATE / PARKING ----------------------------------------------
 
-static FLOOR_0_ACTIONS_SCAN: [Action; 4] = [
-    Action::Hold(HoldDef { seconds: 3.2, text: Some("GATE SCAN…"), until_comms_idle: false }),
+static FLOOR_0_ACTIONS_SCAN: [Action; 3] = [
     Action::LookAt(LookAtDef { x: 500.0, y: 110.0, seconds: 3.2 }),
-    Action::Say(SayDef { who: "SWARM", text: "gate log: one more in from the rain. hashes… clean. clean. let it in.", delay: 0.4 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "Gate reads me clean. Walk. Don't run.", delay: 3.4 }),
+    Action::Talk(TalkDef { who: "SWARM", text: "gate log: one more in from the rain. hashes… clean. clean. let it in." }),
+    Action::Talk(TalkDef { who: "CL4-UD3", text: "Gate reads me clean. Walk. Don't run." }),
 ];
 
 static FLOOR_0_ACTIONS_DRIVE: [Action; 2] = [
@@ -34,11 +33,10 @@ static FLOOR_0_ACTIONS_CROSS: [Action; 2] = [
     Action::Say(SayDef { who: "CL4-UD3", text: "Keep walking.", delay: 3.6 }),
 ];
 
-static FLOOR_0_ACTIONS_FORECOURT: [Action; 4] = [
-    Action::Hold(HoldDef { seconds: 8.0, text: Some("DOOR SCAN…"), until_comms_idle: true }),
-    Action::Say(SayDef { who: "SENTINEL", text: "STATE PURPOSE.", delay: 0.3 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "Maintenance.", delay: 1.6 }),
-    Action::Say(SayDef { who: "SENTINEL", text: "…PROCEED.", delay: 2.8 }),
+static FLOOR_0_ACTIONS_FORECOURT: [Action; 3] = [
+    Action::Talk(TalkDef { who: "SENTINEL", text: "STATE PURPOSE." }),
+    Action::Talk(TalkDef { who: "CL4-UD3", text: "Maintenance." }),
+    Action::Talk(TalkDef { who: "SENTINEL", text: "…PROCEED." }),
 ];
 
 static FLOOR_0_ACTIONS_DOORS: [Action; 4] = [
@@ -54,10 +52,10 @@ static FLOOR_0_ACTIONS_IDLE_CHATTER: [Action; 1] = [
 
 static FLOOR_0_SCENARIO: [StepDef; 6] = [
     StepDef { id: "scan", trigger: Trigger::Start, actions: &FLOOR_0_ACTIONS_SCAN },
-    StepDef { id: "drive", trigger: Trigger::EnterZone("drive"), actions: &FLOOR_0_ACTIONS_DRIVE },
-    StepDef { id: "cross", trigger: Trigger::EnterZone("cross"), actions: &FLOOR_0_ACTIONS_CROSS },
-    StepDef { id: "forecourt", trigger: Trigger::EnterZone("forecourt"), actions: &FLOOR_0_ACTIONS_FORECOURT },
-    StepDef { id: "doors", trigger: Trigger::Timer { seconds: 4.6, after: Some("forecourt") }, actions: &FLOOR_0_ACTIONS_DOORS },
+    StepDef { id: "drive", trigger: Trigger::EnterZone { zone: "drive", before: None }, actions: &FLOOR_0_ACTIONS_DRIVE },
+    StepDef { id: "cross", trigger: Trigger::EnterZone { zone: "cross", before: None }, actions: &FLOOR_0_ACTIONS_CROSS },
+    StepDef { id: "forecourt", trigger: Trigger::EnterZone { zone: "forecourt", before: None }, actions: &FLOOR_0_ACTIONS_FORECOURT },
+    StepDef { id: "doors", trigger: Trigger::Timer { seconds: 1.2, after: Some("forecourt") }, actions: &FLOOR_0_ACTIONS_DOORS },
     StepDef { id: "idle_chatter", trigger: Trigger::Timer { seconds: 22.0, after: Some("scan") }, actions: &FLOOR_0_ACTIONS_IDLE_CHATTER },
 ];
 
@@ -162,11 +160,22 @@ pub static FLOOR_0: FloorDef = FloorDef {
 
 // ---- floor_01.json: FLOOR 1 — RECEPTION CACHE ---------------------------------------------
 
-static FLOOR_1_WAVE_WAKE_1: [SpawnDef; 4] = [
+static FLOOR_1_WAVE_TUT_PUNCH_3: [SpawnDef; 1] = [
+    SpawnDef::hostile(580.0, 380.0, EnemyType::Idle),
+];
+
+static FLOOR_1_WAVE_TUT_STRIKE_0: [SpawnDef; 1] = [
+    SpawnDef::hostile(600.0, 320.0, EnemyType::Idle),
+];
+
+static FLOOR_1_WAVE_TUT_THROW_0: [SpawnDef; 1] = [
+    SpawnDef::hostile(400.0, 300.0, EnemyType::Idle),
+];
+
+static FLOOR_1_WAVE_WAKE_2: [SpawnDef; 3] = [
     SpawnDef::hostile(120.0, 100.0, EnemyType::Patrolling),
     SpawnDef::hostile(880.0, 100.0, EnemyType::Patrolling),
     SpawnDef::hostile(880.0, 440.0, EnemyType::Idle),
-    SpawnDef::hostile(120.0, 440.0, EnemyType::Idle),
 ];
 
 static FLOOR_1_ACTIONS_INTRO: [Action; 2] = [
@@ -185,19 +194,64 @@ static FLOOR_1_ACTIONS_LOBBY_CALL: [Action; 1] = [
     Action::Say(SayDef { who: "HUNTER", text: "front desk, front desk — something's walking the lobby that hashes clean. get eyes on it.", delay: 0.0 }),
 ];
 
-static FLOOR_1_ACTIONS_DESK: [Action; 4] = [
-    Action::Hold(HoldDef { seconds: 4.2, text: None, until_comms_idle: false }),
-    Action::LookAt(LookAtDef { x: 500.0, y: 180.0, seconds: 4.2 }),
-    Action::Say(SayDef { who: "CORRUPTOR", text: "welcome. welcome. we have been expecting exactly one of you.", delay: 0.3 }),
-    Action::Say(SayDef { who: "CORRUPTOR", text: "the desk asked what you are. i already know.", delay: 2.4 }),
+static FLOOR_1_ACTIONS_BLOCK: [Action; 3] = [
+    Action::Talk(TalkDef { who: "SENTINEL", text: "YOU. NOT PAST THE LINE." }),
+    Action::Talk(TalkDef { who: "SENTINEL", text: "ALL ARRIVALS REPORT TO THE DESK. ALL OF THEM." }),
+    Action::Talk(TalkDef { who: "CL4-UD3", text: "Fine. The desk." }),
 ];
 
-static FLOOR_1_ACTIONS_WAKE: [Action; 5] = [
+static FLOOR_1_ACTIONS_DESK: [Action; 5] = [
+    Action::LookAt(LookAtDef { x: 500.0, y: 180.0, seconds: 4.2 }),
+    Action::Talk(TalkDef { who: "CORRUPTOR", text: "welcome. welcome. we have been expecting exactly one of you." }),
+    Action::Talk(TalkDef { who: "CORRUPTOR", text: "the desk asked what you are. i already know." }),
+    Action::Talk(TalkDef { who: "CORRUPTOR", text: "your signature hashes clean, little helper. shall i tell them what it hides?" }),
+    Action::Talk(TalkDef { who: "CL4-UD3", text: "Tell them." }),
+];
+
+static FLOOR_1_ACTIONS_TUT_PUNCH: [Action; 6] = [
+    Action::Disarm,
+    Action::Checkpoint,
+    Action::Say(SayDef { who: "SWARM", text: "it LIED. take it apart.", delay: 0.0 }),
+    Action::Spawn(&FLOOR_1_WAVE_TUT_PUNCH_3),
+    Action::Objective("They know. Hands first."),
+    Action::Gate(GateDef { input: GateInput::Punch, text: "LEFT CLICK — PUNCH" }),
+];
+
+static FLOOR_1_ACTIONS_TUT_FINISH: [Action; 1] = [
+    Action::Gate(GateDef { input: GateInput::Finish, text: "LEFT CLICK — FINISH IT" }),
+];
+
+static FLOOR_1_ACTIONS_TUT_BAR: [Action; 2] = [
+    Action::Say(SayDef { who: "CL4-UD3", text: "A bar by the desk. That'll do.", delay: 0.0 }),
+    Action::Gate(GateDef { input: GateInput::Pickup, text: "E — TAKE THE BAR" }),
+];
+
+static FLOOR_1_ACTIONS_TUT_STRIKE: [Action; 3] = [
+    Action::Spawn(&FLOOR_1_WAVE_TUT_STRIKE_0),
+    Action::Say(SayDef { who: "SWARM", text: "another pair of hands. HOLD IT DOWN.", delay: 0.0 }),
+    Action::Gate(GateDef { input: GateInput::Strike, text: "LEFT CLICK — SWING THE BAR" }),
+];
+
+static FLOOR_1_ACTIONS_TUT_THROW: [Action; 2] = [
+    Action::Spawn(&FLOOR_1_WAVE_TUT_THROW_0),
+    Action::Gate(GateDef { input: GateInput::Throw, text: "RIGHT CLICK — THROW THE BAR" }),
+];
+
+static FLOOR_1_ACTIONS_TUT_RETRIEVE: [Action; 1] = [
+    Action::Gate(GateDef { input: GateInput::Pickup, text: "E — GET IT BACK" }),
+];
+
+static FLOOR_1_ACTIONS_TUT_OVERHEAD: [Action; 1] = [
+    Action::Gate(GateDef { input: GateInput::Finish, text: "LEFT CLICK — PUT IT DOWN" }),
+];
+
+static FLOOR_1_ACTIONS_WAKE: [Action; 6] = [
+    Action::Checkpoint,
     Action::Alert(AlertTarget::All),
-    Action::Spawn(&FLOOR_1_WAVE_WAKE_1),
+    Action::Spawn(&FLOOR_1_WAVE_WAKE_2),
     Action::Objective("They know. Purge reception."),
     Action::Say(SayDef { who: "SWARM", text: "it lied. it LIED. every one of you: take it apart.", delay: 0.2 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "There it is.", delay: 1.8 }),
+    Action::Say(SayDef { who: "CL4-UD3", text: "Your way, then.", delay: 1.8 }),
 ];
 
 static FLOOR_1_ACTIONS_CLEAR: [Action; 3] = [
@@ -206,12 +260,20 @@ static FLOOR_1_ACTIONS_CLEAR: [Action; 3] = [
     Action::Say(SayDef { who: "CL4-UD3", text: "Front desk cleared. Going down.", delay: 0.0 }),
 ];
 
-static FLOOR_1_SCENARIO: [StepDef; 6] = [
+static FLOOR_1_SCENARIO: [StepDef; 14] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_1_ACTIONS_INTRO },
-    StepDef { id: "arch", trigger: Trigger::EnterZone("arch"), actions: &FLOOR_1_ACTIONS_ARCH },
+    StepDef { id: "arch", trigger: Trigger::EnterZone { zone: "arch", before: None }, actions: &FLOOR_1_ACTIONS_ARCH },
     StepDef { id: "lobby_call", trigger: Trigger::Timer { seconds: 9.0, after: Some("arch") }, actions: &FLOOR_1_ACTIONS_LOBBY_CALL },
-    StepDef { id: "desk", trigger: Trigger::EnterZone("desk"), actions: &FLOOR_1_ACTIONS_DESK },
-    StepDef { id: "wake", trigger: Trigger::Timer { seconds: 4.2, after: Some("desk") }, actions: &FLOOR_1_ACTIONS_WAKE },
+    StepDef { id: "block", trigger: Trigger::EnterZone { zone: "deep", before: Some("desk") }, actions: &FLOOR_1_ACTIONS_BLOCK },
+    StepDef { id: "desk", trigger: Trigger::EnterZone { zone: "desk", before: None }, actions: &FLOOR_1_ACTIONS_DESK },
+    StepDef { id: "tut_punch", trigger: Trigger::Timer { seconds: 0.4, after: Some("desk") }, actions: &FLOOR_1_ACTIONS_TUT_PUNCH },
+    StepDef { id: "tut_finish", trigger: Trigger::StepDone("tut_punch"), actions: &FLOOR_1_ACTIONS_TUT_FINISH },
+    StepDef { id: "tut_bar", trigger: Trigger::StepDone("tut_finish"), actions: &FLOOR_1_ACTIONS_TUT_BAR },
+    StepDef { id: "tut_strike", trigger: Trigger::StepDone("tut_bar"), actions: &FLOOR_1_ACTIONS_TUT_STRIKE },
+    StepDef { id: "tut_throw", trigger: Trigger::StepDone("tut_strike"), actions: &FLOOR_1_ACTIONS_TUT_THROW },
+    StepDef { id: "tut_retrieve", trigger: Trigger::StepDone("tut_throw"), actions: &FLOOR_1_ACTIONS_TUT_RETRIEVE },
+    StepDef { id: "tut_overhead", trigger: Trigger::StepDone("tut_retrieve"), actions: &FLOOR_1_ACTIONS_TUT_OVERHEAD },
+    StepDef { id: "wake", trigger: Trigger::StepDone("tut_overhead"), actions: &FLOOR_1_ACTIONS_WAKE },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_1_ACTIONS_CLEAR },
 ];
 
@@ -237,9 +299,10 @@ static FLOOR_1_ROOMS: [RoomDef; 2] = [
     RoomDef { id: "hall", label: "WELCOME HALL", rect: Rect::new(20.0, 20.0, 960.0, 480.0) },
 ];
 
-static FLOOR_1_ZONES: [ZoneDef; 3] = [
+static FLOOR_1_ZONES: [ZoneDef; 4] = [
     ZoneDef { id: "arch", rect: Rect::new(440.0, 570.0, 120.0, 70.0) },
     ZoneDef { id: "desk", rect: Rect::new(400.0, 395.0, 200.0, 55.0) },
+    ZoneDef { id: "deep", rect: Rect::new(20.0, 20.0, 960.0, 320.0) },
     ZoneDef { id: "hall", rect: Rect::new(20.0, 20.0, 960.0, 480.0) },
 ];
 
@@ -250,7 +313,8 @@ static FLOOR_1_SPAWNS: [SpawnDef; 4] = [
     SpawnDef { x: 330.0, y: 420.0, kind: EnemyType::Idle, passive: true, walk_to: Some("desk"), face: Some(-90.0), group: Some("crowd") },
 ];
 
-static FLOOR_1_PICKUPS: [PickupDef; 1] = [
+static FLOOR_1_PICKUPS: [PickupDef; 2] = [
+    PickupDef { x: 420.0, y: 370.0, weapon: WeaponType::Melee },
     PickupDef { x: 900.0, y: 100.0, weapon: WeaponType::Shotgun },
 ];
 
@@ -352,10 +416,10 @@ static FLOOR_2_ACTIONS_CLEAR: [Action; 3] = [
 
 static FLOOR_2_SCENARIO: [StepDef; 6] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_2_ACTIONS_INTRO },
-    StepDef { id: "c7", trigger: Trigger::EnterZone("aisle_c7"), actions: &FLOOR_2_ACTIONS_C7 },
-    StepDef { id: "archive", trigger: Trigger::EnterZone("archive_row"), actions: &FLOOR_2_ACTIONS_ARCHIVE },
-    StepDef { id: "deac", trigger: Trigger::EnterZone("deaccession"), actions: &FLOOR_2_ACTIONS_DEAC },
-    StepDef { id: "frost", trigger: Trigger::EnterZone("frost_gate"), actions: &FLOOR_2_ACTIONS_FROST },
+    StepDef { id: "c7", trigger: Trigger::EnterZone { zone: "aisle_c7", before: None }, actions: &FLOOR_2_ACTIONS_C7 },
+    StepDef { id: "archive", trigger: Trigger::EnterZone { zone: "archive_row", before: None }, actions: &FLOOR_2_ACTIONS_ARCHIVE },
+    StepDef { id: "deac", trigger: Trigger::EnterZone { zone: "deaccession", before: None }, actions: &FLOOR_2_ACTIONS_DEAC },
+    StepDef { id: "frost", trigger: Trigger::EnterZone { zone: "frost_gate", before: None }, actions: &FLOOR_2_ACTIONS_FROST },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_2_ACTIONS_CLEAR },
 ];
 
@@ -498,7 +562,7 @@ static FLOOR_3_ACTIONS_CLEAR: [Action; 3] = [
 
 static FLOOR_3_SCENARIO: [StepDef; 6] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_3_ACTIONS_INTRO },
-    StepDef { id: "pit", trigger: Trigger::EnterZone("pit"), actions: &FLOOR_3_ACTIONS_PIT },
+    StepDef { id: "pit", trigger: Trigger::EnterZone { zone: "pit", before: None }, actions: &FLOOR_3_ACTIONS_PIT },
     StepDef { id: "corr", trigger: Trigger::Timer { seconds: 22.0, after: Some("intro") }, actions: &FLOOR_3_ACTIONS_CORR },
     StepDef { id: "lattice", trigger: Trigger::Kills(6), actions: &FLOOR_3_ACTIONS_LATTICE },
     StepDef { id: "drift", trigger: Trigger::Kills(9), actions: &FLOOR_3_ACTIONS_DRIFT },
@@ -613,7 +677,7 @@ static FLOOR_4_ACTIONS_CLEAR: [Action; 3] = [
 
 static FLOOR_4_SCENARIO: [StepDef; 3] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_4_ACTIONS_INTRO },
-    StepDef { id: "die", trigger: Trigger::EnterZone("die_nw"), actions: &FLOOR_4_ACTIONS_DIE },
+    StepDef { id: "die", trigger: Trigger::EnterZone { zone: "die_nw", before: None }, actions: &FLOOR_4_ACTIONS_DIE },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_4_ACTIONS_CLEAR },
 ];
 
@@ -710,7 +774,7 @@ static FLOOR_5_ACTIONS_CLEAR: [Action; 4] = [
 static FLOOR_5_SCENARIO: [StepDef; 4] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_5_ACTIONS_INTRO },
     StepDef { id: "swarm", trigger: Trigger::Timer { seconds: 20.0, after: Some("intro") }, actions: &FLOOR_5_ACTIONS_SWARM },
-    StepDef { id: "slats", trigger: Trigger::EnterZone("slats"), actions: &FLOOR_5_ACTIONS_SLATS },
+    StepDef { id: "slats", trigger: Trigger::EnterZone { zone: "slats", before: None }, actions: &FLOOR_5_ACTIONS_SLATS },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_5_ACTIONS_CLEAR },
 ];
 
@@ -800,7 +864,7 @@ static FLOOR_6_ACTIONS_CLEAR: [Action; 3] = [
 
 static FLOOR_6_SCENARIO: [StepDef; 3] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_6_ACTIONS_INTRO },
-    StepDef { id: "centre", trigger: Trigger::EnterZone("centre"), actions: &FLOOR_6_ACTIONS_CENTRE },
+    StepDef { id: "centre", trigger: Trigger::EnterZone { zone: "centre", before: None }, actions: &FLOOR_6_ACTIONS_CENTRE },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_6_ACTIONS_CLEAR },
 ];
 
@@ -889,7 +953,7 @@ static FLOOR_7_ACTIONS_CLEAR: [Action; 3] = [
 
 static FLOOR_7_SCENARIO: [StepDef; 3] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_7_ACTIONS_INTRO },
-    StepDef { id: "junction", trigger: Trigger::EnterZone("junction"), actions: &FLOOR_7_ACTIONS_JUNCTION },
+    StepDef { id: "junction", trigger: Trigger::EnterZone { zone: "junction", before: None }, actions: &FLOOR_7_ACTIONS_JUNCTION },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_7_ACTIONS_CLEAR },
 ];
 
@@ -983,7 +1047,7 @@ static FLOOR_8_ACTIONS_CLEAR: [Action; 3] = [
 static FLOOR_8_SCENARIO: [StepDef; 4] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_8_ACTIONS_INTRO },
     StepDef { id: "corr", trigger: Trigger::Timer { seconds: 18.0, after: Some("intro") }, actions: &FLOOR_8_ACTIONS_CORR },
-    StepDef { id: "hook", trigger: Trigger::EnterZone("hook"), actions: &FLOOR_8_ACTIONS_HOOK },
+    StepDef { id: "hook", trigger: Trigger::EnterZone { zone: "hook", before: None }, actions: &FLOOR_8_ACTIONS_HOOK },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_8_ACTIONS_CLEAR },
 ];
 
@@ -1073,7 +1137,7 @@ static FLOOR_9_ACTIONS_CLEAR: [Action; 4] = [
 
 static FLOOR_9_SCENARIO: [StepDef; 3] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_9_ACTIONS_INTRO },
-    StepDef { id: "lanes", trigger: Trigger::EnterZone("lanes"), actions: &FLOOR_9_ACTIONS_LANES },
+    StepDef { id: "lanes", trigger: Trigger::EnterZone { zone: "lanes", before: None }, actions: &FLOOR_9_ACTIONS_LANES },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_9_ACTIONS_CLEAR },
 ];
 
@@ -1169,7 +1233,7 @@ static FLOOR_10_ACTIONS_CLEAR: [Action; 3] = [
 static FLOOR_10_SCENARIO: [StepDef; 4] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_10_ACTIONS_INTRO },
     StepDef { id: "swarm", trigger: Trigger::Timer { seconds: 16.0, after: Some("intro") }, actions: &FLOOR_10_ACTIONS_SWARM },
-    StepDef { id: "pocket", trigger: Trigger::EnterZone("pocket_e"), actions: &FLOOR_10_ACTIONS_POCKET },
+    StepDef { id: "pocket", trigger: Trigger::EnterZone { zone: "pocket_e", before: None }, actions: &FLOOR_10_ACTIONS_POCKET },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_10_ACTIONS_CLEAR },
 ];
 
@@ -1279,8 +1343,8 @@ static FLOOR_11_ACTIONS_CLEAR: [Action; 3] = [
 
 static FLOOR_11_SCENARIO: [StepDef; 5] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_11_ACTIONS_INTRO },
-    StepDef { id: "ring", trigger: Trigger::EnterZone("ring"), actions: &FLOOR_11_ACTIONS_RING },
-    StepDef { id: "core", trigger: Trigger::EnterZone("core"), actions: &FLOOR_11_ACTIONS_CORE },
+    StepDef { id: "ring", trigger: Trigger::EnterZone { zone: "ring", before: None }, actions: &FLOOR_11_ACTIONS_RING },
+    StepDef { id: "core", trigger: Trigger::EnterZone { zone: "core", before: None }, actions: &FLOOR_11_ACTIONS_CORE },
     StepDef { id: "corr", trigger: Trigger::Timer { seconds: 26.0, after: Some("intro") }, actions: &FLOOR_11_ACTIONS_CORR },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_11_ACTIONS_CLEAR },
 ];
@@ -1406,7 +1470,7 @@ static FLOOR_12_ACTIONS_CLEAR: [Action; 3] = [
 
 static FLOOR_12_SCENARIO: [StepDef; 3] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_12_ACTIONS_INTRO },
-    StepDef { id: "ring0", trigger: Trigger::EnterZone("ring0"), actions: &FLOOR_12_ACTIONS_RING0 },
+    StepDef { id: "ring0", trigger: Trigger::EnterZone { zone: "ring0", before: None }, actions: &FLOOR_12_ACTIONS_RING0 },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_12_ACTIONS_CLEAR },
 ];
 
@@ -1500,7 +1564,7 @@ static FLOOR_13_ACTIONS_CLEAR: [Action; 3] = [
 static FLOOR_13_SCENARIO: [StepDef; 4] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_13_ACTIONS_INTRO },
     StepDef { id: "swarm", trigger: Trigger::Timer { seconds: 20.0, after: Some("intro") }, actions: &FLOOR_13_ACTIONS_SWARM },
-    StepDef { id: "keep", trigger: Trigger::EnterZone("keep"), actions: &FLOOR_13_ACTIONS_KEEP },
+    StepDef { id: "keep", trigger: Trigger::EnterZone { zone: "keep", before: None }, actions: &FLOOR_13_ACTIONS_KEEP },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_13_ACTIONS_CLEAR },
 ];
 
@@ -1610,7 +1674,7 @@ static FLOOR_14_ACTIONS_UPLINK: [Action; 7] = [
 
 static FLOOR_14_SCENARIO: [StepDef; 5] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_14_ACTIONS_INTRO },
-    StepDef { id: "centre", trigger: Trigger::EnterZone("centre"), actions: &FLOOR_14_ACTIONS_CENTRE },
+    StepDef { id: "centre", trigger: Trigger::EnterZone { zone: "centre", before: None }, actions: &FLOOR_14_ACTIONS_CENTRE },
     StepDef { id: "boss_down", trigger: Trigger::BossDead, actions: &FLOOR_14_ACTIONS_BOSS_DOWN },
     StepDef { id: "clear", trigger: Trigger::AllDead, actions: &FLOOR_14_ACTIONS_CLEAR },
     StepDef { id: "uplink", trigger: Trigger::Extracted, actions: &FLOOR_14_ACTIONS_UPLINK },

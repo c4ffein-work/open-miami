@@ -125,18 +125,14 @@
       "id": "scan",
       "trigger": { "kind": "start" },
       "actions": [
-        { "hold": { "seconds": 3.2, "text": "GATE SCAN…" } },
         { "look_at": { "x": 500, "y": 110, "seconds": 3.2 } },
         {
-          "say": {
+          "talk": {
             "who": "SWARM",
-            "text": "gate log: one more in from the rain. hashes… clean. clean. let it in.",
-            "delay": 0.4
+            "text": "gate log: one more in from the rain. hashes… clean. clean. let it in."
           }
         },
-        {
-          "say": { "who": "CL4-UD3", "text": "Gate reads me clean. Walk. Don't run.", "delay": 3.4 }
-        }
+        { "talk": { "who": "CL4-UD3", "text": "Gate reads me clean. Walk. Don't run." } }
       ]
     },
     {
@@ -173,15 +169,14 @@
       "id": "forecourt",
       "trigger": { "kind": "enter_zone", "zone": "forecourt" },
       "actions": [
-        { "hold": { "seconds": 8, "until_comms_idle": true, "text": "DOOR SCAN…" } },
-        { "say": { "who": "SENTINEL", "text": "STATE PURPOSE.", "delay": 0.3 } },
-        { "say": { "who": "CL4-UD3", "text": "Maintenance.", "delay": 1.6 } },
-        { "say": { "who": "SENTINEL", "text": "…PROCEED.", "delay": 2.8 } }
+        { "talk": { "who": "SENTINEL", "text": "STATE PURPOSE." } },
+        { "talk": { "who": "CL4-UD3", "text": "Maintenance." } },
+        { "talk": { "who": "SENTINEL", "text": "…PROCEED." } }
       ]
     },
     {
       "id": "doors",
-      "trigger": { "kind": "timer", "seconds": 4.6, "after": "forecourt" },
+      "trigger": { "kind": "timer", "seconds": 1.2, "after": "forecourt" },
       "actions": [
         { "open_exit": "doors" },
         { "sfx": "elevator" },

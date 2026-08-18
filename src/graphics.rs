@@ -266,7 +266,8 @@ impl Graphics {
     /// draws it as a rotated quad of `size_px` px.
     /// Indices follow renderer.js tables:
     ///   color:  0 coral, 1 red, 2 violet, 3 magenta
-    ///   pose:   0 idle, 1 walk, 2 shoot, 3 hit
+    ///   pose:   0 idle, 1 walk, 2 shoot, 3 hit, 4 downed (sprawled knockdown;
+    ///           `time` = seconds since the fall started)
     ///   weapon: 0 fist, 1 pistol, 2 machinegun, 3 shotgun
     #[allow(clippy::too_many_arguments)]
     pub fn draw_robot(

@@ -551,6 +551,61 @@ pub fn render_hold_caption(graphics: &Graphics, text: &str, accent: (u8, u8, u8)
     );
 }
 
+/// The tutorial gate prompt: a centred lower-third caption on a dim band
+/// while the world is frozen on a `gate`. The input name (the part of the
+/// text before the em-dash separator, e.g. "LEFT CLICK — PUNCH") pulses in
+/// the floor's accent colour; the rest stays white.
+pub fn render_gate_prompt(
+    graphics: &Graphics,
+    gate: &crate::scenario::GateDef,
+    accent: (u8, u8, u8),
+    t: f32,
+) {
+    let w = graphics.width();
+    let h = graphics.height();
+    let fs = 30.0;
+    let cy = h * 0.72;
+    graphics.draw_rectangle(
+        Vec2::new(0.0, cy - fs * 0.95),
+        w,
+        fs * 1.8,
+        Color::new(0.0, 0.0, 0.0, 0.55),
+    );
+    // Split "INPUT — action": the input half is highlighted.
+    let (head, tail) = match gate.text.split_once(" — ") {
+        Some((a, b)) => (a, Some(b)),
+        None => (gate.text, None),
+    };
+    let head_w = head.chars().count() as f32 * fs * CHAR_W;
+    let sep = " — ";
+    let sep_w = if tail.is_some() {
+        sep.chars().count() as f32 * fs * CHAR_W
+    } else {
+        0.0
+    };
+    let tail_w = tail
+        .map(|s| s.chars().count() as f32 * fs * CHAR_W)
+        .unwrap_or(0.0);
+    let total = head_w + sep_w + tail_w;
+    let x0 = w / 2.0 - total / 2.0;
+    let pulse = 0.7 + 0.3 * (t * 4.0).sin();
+    graphics.draw_text(head, Vec2::new(x0, cy), fs, rgb(accent, pulse));
+    if let Some(tail) = tail {
+        graphics.draw_text(
+            sep,
+            Vec2::new(x0 + head_w, cy),
+            fs,
+            Color::new(1.0, 1.0, 1.0, 0.45),
+        );
+        graphics.draw_text(
+            tail,
+            Vec2::new(x0 + head_w + sep_w, cy),
+            fs,
+            Color::new(1.0, 1.0, 1.0, 0.92),
+        );
+    }
+}
+
 /// Debug overlay: trigger zones as thin cyan outlines with their ids.
 pub fn render_zones_debug(world: &World, graphics: &Graphics) {
     for entity in world.query::<Zone>() {

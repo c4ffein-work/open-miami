@@ -33,7 +33,11 @@ WEAPONS = {"pistol": "Pistol", "shotgun": "Shotgun", "machinegun": "MachineGun",
 SPEAKERS = {"CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR", "UPLINK"}
 TRIGGERS = {"start", "enter_zone", "kills", "all_dead", "timer", "exit_open", "step_done",
             "boss_dead", "extracted"}
-ACTIONS = {"say", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at"}
+ACTIONS = {"say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold",
+           "look_at", "gate", "checkpoint", "disarm"}
+# Tutorial `gate` inputs (mirrors scenario.rs `GateInput::parse`).
+GATE_INPUTS = {"punch": "Punch", "finish": "Finish", "pickup": "Pickup", "strike": "Strike",
+               "fire": "Fire", "throw": "Throw"}
 SFX = {"elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"}
 # Portal (entry / exit) rendering kinds and floor ground surfaces.
 PORTAL_KINDS = {"lift": "Lift", "door": "Door", "gate": "Gate"}
@@ -199,8 +203,11 @@ def validate(floors):
             kind = trig.get("kind")
             if kind not in TRIGGERS:
                 raise Invalid(f"{tag}/{sid}: unknown trigger kind {kind!r}")
-            if kind == "enter_zone" and trig.get("zone") not in zone_ids:
-                raise Invalid(f"{tag}/{sid}: enter_zone references unknown zone {trig.get('zone')!r}")
+            if kind == "enter_zone":
+                if trig.get("zone") not in zone_ids:
+                    raise Invalid(f"{tag}/{sid}: enter_zone references unknown zone {trig.get('zone')!r}")
+                if "before" in trig and trig["before"] not in step_ids:
+                    raise Invalid(f"{tag}/{sid}: enter_zone.before references unknown step {trig['before']!r}")
             if kind == "kills" and not (isinstance(trig.get("count"), int) and trig["count"] >= 1):
                 raise Invalid(f"{tag}/{sid}: kills needs an integer count >= 1")
             if kind == "timer":
@@ -223,6 +230,15 @@ def validate(floors):
                         raise Invalid(f"{tag}/{sid}: say needs text")
                     if "delay" in payload and (not isinstance(payload["delay"], (int, float)) or payload["delay"] < 0):
                         raise Invalid(f"{tag}/{sid}: say.delay must be >= 0")
+                elif name == "talk":
+                    # A dialogue line: who + text only (player-paced, no delay).
+                    if payload.get("who") not in SPEAKERS:
+                        raise Invalid(f"{tag}/{sid}: unknown speaker {payload.get('who')!r}")
+                    if not isinstance(payload.get("text"), str) or not payload["text"]:
+                        raise Invalid(f"{tag}/{sid}: talk needs text")
+                    extra = set(payload) - {"who", "text"}
+                    if extra:
+                        raise Invalid(f"{tag}/{sid}: talk takes only who/text, got {sorted(extra)}")
                 elif name == "spawn":
                     for s in payload:
                         validate_spawn(s, zone_ids, f"{tag}/{sid}: wave spawn")
@@ -241,6 +257,11 @@ def validate(floors):
                     validate_hold(payload, f"{tag}/{sid}")
                 elif name == "look_at":
                     validate_look_at(payload, f"{tag}/{sid}")
+                elif name == "gate":
+                    validate_gate(payload, f"{tag}/{sid}")
+                elif name in ("checkpoint", "disarm"):
+                    if payload is not True:
+                        raise Invalid(f"{tag}/{sid}: {name} must be true")
 
 
 def validate_spawn(s, zone_ids, what):
@@ -294,6 +315,18 @@ def validate_hold(payload, what):
         raise Invalid(f"{what}: hold.seconds must be > 0")
     if "text" in payload and not isinstance(payload["text"], str):
         raise Invalid(f"{what}: hold.text must be a string")
+
+
+def validate_gate(payload, what):
+    if not isinstance(payload, dict):
+        raise Invalid(f"{what}: gate must be an object")
+    if payload.get("input") not in GATE_INPUTS:
+        raise Invalid(f"{what}: gate.input must be one of {sorted(GATE_INPUTS)}, got {payload.get('input')!r}")
+    if not isinstance(payload.get("text"), str) or not payload["text"]:
+        raise Invalid(f"{what}: gate needs a non-empty text (the on-screen prompt)")
+    extra = set(payload) - {"input", "text"}
+    if extra:
+        raise Invalid(f"{what}: gate takes only input/text, got {sorted(extra)}")
 
 
 def validate_look_at(payload, what):
@@ -380,6 +413,9 @@ def gen_floor(f, out):
             if kind == "say":
                 out.append(f"    Action::Say(SayDef {{ who: {rstr(payload['who'])}, "
                            f"text: {rstr(payload['text'])}, delay: {f32(payload.get('delay', 0))} }}),")
+            elif kind == "talk":
+                out.append(f"    Action::Talk(TalkDef {{ who: {rstr(payload['who'])}, "
+                           f"text: {rstr(payload['text'])} }}),")
             elif kind == "spawn":
                 out.append(f"    Action::Spawn(&{name}_WAVE_{ident(sid)}_{j}),")
             elif kind == "open_exit":
@@ -396,6 +432,13 @@ def gen_floor(f, out):
                 out.append(f"    Action::Hold({hold(payload)}),")
             elif kind == "look_at":
                 out.append(f"    Action::LookAt({look_at(payload)}),")
+            elif kind == "gate":
+                out.append(f"    Action::Gate(GateDef {{ input: GateInput::{GATE_INPUTS[payload['input']]}, "
+                           f"text: {rstr(payload['text'])} }}),")
+            elif kind == "checkpoint":
+                out.append("    Action::Checkpoint,")
+            elif kind == "disarm":
+                out.append("    Action::Disarm,")
         out.append("];")
         out.append("")
     # Steps.
@@ -407,7 +450,8 @@ def gen_floor(f, out):
         if k == "start":
             t = "Trigger::Start"
         elif k == "enter_zone":
-            t = f"Trigger::EnterZone({rstr(trig['zone'])})"
+            before = f"Some({rstr(trig['before'])})" if "before" in trig else "None"
+            t = f"Trigger::EnterZone {{ zone: {rstr(trig['zone'])}, before: {before} }}"
         elif k == "kills":
             t = f"Trigger::Kills({int(trig['count'])})"
         elif k == "all_dead":
@@ -508,9 +552,9 @@ def generate(floors):
         "",
         "use crate::components::{EnemyType, WeaponType};",
         "use crate::scenario::{",
-        "    Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, HoldDef, LookAtDef, PickupDef,",
-        "    PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface, Trigger, ZoneDef,",
-        "    SURFACE_EXIT,",
+        "    Action, AlertTarget, ElevatorDef, ElevatorKind, FloorDef, GateDef, GateInput, HoldDef,",
+        "    LookAtDef, PickupDef, PropPlacement, Rect, RoomDef, SayDef, SpawnDef, StepDef, Surface,",
+        "    TalkDef, Trigger, ZoneDef, SURFACE_EXIT,",
         "};",
         "",
     ]

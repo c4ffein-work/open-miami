@@ -19,7 +19,9 @@
 //! rendered game.
 
 use crate::collision::has_line_of_sight;
-use crate::components::{Enemy, Health, Position, Speed, Weapon, WeaponPickup, WeaponType};
+use crate::components::{
+    Enemy, Health, Position, Speed, Stunned, Weapon, WeaponPickup, WeaponType,
+};
 use crate::components::{Player, Velocity};
 use crate::ecs::{Entity, System, World};
 use crate::game::{
@@ -27,14 +29,55 @@ use crate::game::{
 };
 use crate::math::Vec2;
 use crate::pathfinding::NavigationGrid;
+use crate::scenario::ScenarioState;
 use crate::systems::{
-    AISystem, BossSystem, BulletSystem, CombatSystem, MovementSystem, PickupSystem,
+    AISystem, BossSystem, BulletSystem, CombatSystem, FinisherSystem, MovementSystem, PickupSystem,
     ProjectileTrailSystem, StunSystem, ThrownWeaponSystem, WeaponUpdateSystem,
 };
+
+/// While a tutorial gate freezes the world, knockdown clocks tick for the
+/// fall animation but never drop below this floor — nobody gets back up
+/// under a freeze (the `finish` gate's victim stays down indefinitely).
+pub const GATE_STUN_FLOOR: f32 = 0.05;
+
+/// One engine tick while a tutorial `gate` FREEZES the world (see
+/// `scenario::GateDef`): only the PLAYER-DRIVEN systems advance — the
+/// finisher animation, weapon / fist cooldowns, movement (every enemy's
+/// velocity is pinned to zero first, so only the player and in-flight
+/// knockback shoves move), the player's bullets and thrown weapons, trails
+/// and pickups. Enemy AI, the boss, enemy attacks and the scenario clock do
+/// not run, and knockdown timers tick only down to [`GATE_STUN_FLOOR`].
+///
+/// Shared verbatim by the browser loop (`lib.rs`) and the headless
+/// [`Simulation::scenario_step`], so the freeze semantics are host-testable.
+pub fn gate_frozen_step(world: &mut World, dt: f32) {
+    FinisherSystem.run(world, dt);
+    WeaponUpdateSystem.run(world, dt);
+    // Pin the cast: enemies keep their pose but never walk under a freeze.
+    for enemy in world.query::<Enemy>() {
+        if let Some(v) = world.get_component_mut::<Velocity>(enemy) {
+            v.x = 0.0;
+            v.y = 0.0;
+        }
+    }
+    MovementSystem.run(world, dt);
+    BulletSystem.run(world, dt);
+    ThrownWeaponSystem.run(world, dt);
+    ProjectileTrailSystem.run(world, dt);
+    PickupSystem.run(world, dt);
+    // Knockdowns: the fall animation plays (age advances) but the timer is
+    // floored so nobody stands back up while the world holds its breath.
+    for entity in world.query::<Stunned>() {
+        if let Some(stun) = world.get_component_mut::<Stunned>(entity) {
+            stun.timer = (stun.timer - dt).max(GATE_STUN_FLOOR);
+        }
+    }
+}
 
 /// A headless instance of the full game engine.
 pub struct Simulation {
     pub world: World,
+    finisher: FinisherSystem,
     stun: StunSystem,
     weapon: WeaponUpdateSystem,
     ai: AISystem,
@@ -223,6 +266,7 @@ impl Simulation {
     pub fn from_world(world: World) -> Self {
         Simulation {
             world,
+            finisher: FinisherSystem,
             stun: StunSystem,
             weapon: WeaponUpdateSystem,
             ai: AISystem::default(),
@@ -243,6 +287,9 @@ impl Simulation {
     /// Advance the whole simulation by `dt` seconds — one engine tick, running
     /// every gameplay system in the same order as the browser loop.
     pub fn step(&mut self, dt: f32) {
+        // The finisher runs before the stun tick so it can keep its victim
+        // pinned (same order as the browser loop).
+        self.finisher.run(&mut self.world, dt);
         self.stun.run(&mut self.world, dt);
         self.weapon.run(&mut self.world, dt);
         self.ai.run(&mut self.world, dt);
@@ -260,6 +307,26 @@ impl Simulation {
         for _ in 0..frames {
             self.step(dt);
         }
+    }
+
+    /// One full frame WITH a floor scenario, mirroring the browser loop's
+    /// order: the frozen path while a tutorial gate is active
+    /// ([`gate_frozen_step`]), otherwise the normal [`Simulation::step`];
+    /// then the scenario tick, then the frame's events are drained and fed
+    /// to the gate ([`ScenarioState::gate_notify`]). Returns `true` when a
+    /// `checkpoint` action requested a snapshot this frame — the caller
+    /// clones the world + scenario (both are `Clone`) and restores them on
+    /// death.
+    pub fn scenario_step(&mut self, sc: &mut ScenarioState, dt: f32) -> bool {
+        if sc.gate_view().is_some() {
+            gate_frozen_step(&mut self.world, dt);
+        } else {
+            self.step(dt);
+        }
+        sc.tick(&mut self.world, dt);
+        let events = self.world.drain_events();
+        sc.gate_notify(&mut self.world, &events);
+        sc.take_checkpoint_request()
     }
 
     // --- Scripted player actions (stand-ins for keyboard/mouse input) ---
@@ -296,6 +363,12 @@ impl Simulation {
     /// Pick up / swap the weapon under the player (as the E key would).
     pub fn player_pickup(&mut self) -> Option<WeaponType> {
         PickupSystem::swap_for_player(&mut self.world)
+    }
+
+    /// Try to start a finisher on a downed enemy in reach (as the left click
+    /// does in the browser before it falls back to a normal attack).
+    pub fn player_finisher(&mut self) -> bool {
+        FinisherSystem::try_start(&mut self.world)
     }
 
     // --- Queries ---

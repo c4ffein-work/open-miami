@@ -145,10 +145,15 @@ mod tests {
             .filter_map(|s| s.walk_to)
             .all(|z| f.zone(z).is_some()));
         assert!(f.spawns.iter().filter(|s| s.walk_to.is_some()).count() >= 2);
-        assert!(f.scenario.iter().any(|s| s
-            .actions
-            .iter()
-            .any(|a| matches!(a, Action::Hold(h) if h.text.is_some()))));
+        // The gate-scan and forecourt beats are `talk` conversations now
+        // (dialogue mode, player-paced) rather than timed holds.
+        assert!(
+            f.scenario
+                .iter()
+                .filter(|s| s.actions.iter().any(|a| matches!(a, Action::Talk(_))))
+                .count()
+                >= 2
+        );
     }
 
     #[test]
@@ -270,7 +275,7 @@ mod tests {
             }
             for s in f.scenario {
                 match s.trigger {
-                    Trigger::EnterZone(z) if f.zone(z).is_none() => {
+                    Trigger::EnterZone { zone: z, .. } if f.zone(z).is_none() => {
                         problems.push(format!("floor {i}/{}: unknown zone {z}", s.id))
                     }
                     Trigger::Timer { after: Some(a), .. } | Trigger::StepDone(a)

@@ -470,6 +470,10 @@
         const z = idOptions(el("select"), zoneIds, t.zone, false);
         z.addEventListener("change", () => mutate((fl) => { fl.scenario[i].trigger.zone = z.value; }));
         hd.appendChild(z);
+        hd.appendChild(el("span", null, "before"));
+        const bf = idOptions(el("select"), stepIds.filter((x) => x !== st.id), t.before, true, "(always)");
+        bf.addEventListener("change", () => mutate((fl) => { if (bf.value) fl.scenario[i].trigger.before = bf.value; else delete fl.scenario[i].trigger.before; }));
+        hd.appendChild(bf);
       } else if (t.kind === "kills") {
         const c = el("input", { type: "number", min: 1, value: t.count, style: "width:56px" });
         c.addEventListener("change", () => mutate((fl) => { fl.scenario[i].trigger.count = parseInt(c.value, 10) || 1; }));
@@ -523,6 +527,7 @@
   function defaultAction(k, fl) {
     switch (k) {
       case "say": return { say: { who: "CL4-UD3", text: "" } };
+      case "talk": return { talk: { who: "CL4-UD3", text: "" } };
       case "spawn": return { spawn: [{ x: Math.round(fl.size.w / 2), y: Math.round(fl.size.h / 2), type: "patrolling" }] };
       case "open_exit": return { open_exit: (fl.exits[0] && fl.exits[0].id) || "" };
       case "close_exit": return { close_exit: (fl.exits[0] && fl.exits[0].id) || "" };
@@ -531,6 +536,9 @@
       case "alert": return { alert: "all" };
       case "hold": return { hold: { seconds: 1.5, text: "" } };
       case "look_at": return { look_at: { x: Math.round(fl.size.w / 2), y: Math.round(fl.size.h / 2), seconds: 2 } };
+      case "gate": return { gate: { input: "punch", text: "LEFT CLICK — PUNCH" } };
+      case "checkpoint": return { checkpoint: true };
+      case "disarm": return { disarm: true };
     }
     return { objective: "" };
   }
@@ -560,6 +568,25 @@
         const v = row.querySelector(".dly").value; if (v === "" || !Number.isFinite(Number(v))) delete x.say.delay; else x.say.delay = Number(v);
       }));
       row.appendChild(el("span", null, "s"));
+    } else if (kind === "talk") {
+      // dialogue-mode line: who + text only (player-paced conversation)
+      const who = el("select", { class: "who who-" + a.talk.who });
+      for (const w of F.SPEAKERS) who.appendChild(opt(w, w, a.talk.who === w));
+      if (!F.SPEAKERS.includes(a.talk.who)) who.appendChild(opt(a.talk.who, a.talk.who + " (?)", true));
+      who.addEventListener("change", () => mutate((fl) => { fl.scenario[i].actions[j].talk.who = who.value; }));
+      row.appendChild(who);
+      row.appendChild(live(el("input", { type: "text", class: "txt", placeholder: "dialogue line… (click to advance in game)", value: a.talk.text }), (x) => { x.talk.text = row.querySelector(".txt").value; }));
+    } else if (kind === "gate") {
+      // tutorial gate: the frozen-world prompt waiting on one input to succeed
+      const inp = el("select");
+      for (const g of F.GATE_INPUTS) inp.appendChild(opt(g, g, a.gate.input === g));
+      inp.addEventListener("change", () => mutate((fl) => { fl.scenario[i].actions[j].gate.input = inp.value; }));
+      row.appendChild(inp);
+      row.appendChild(live(el("input", { type: "text", class: "txt", placeholder: "prompt… (INPUT — ACTION)", value: a.gate.text }), (x) => { x.gate.text = row.querySelector(".txt").value; }));
+    } else if (kind === "checkpoint") {
+      row.appendChild(el("span", { style: "font-size:14px" }, "snapshot the run — death restores it"));
+    } else if (kind === "disarm") {
+      row.appendChild(el("span", { style: "font-size:14px" }, "take the player's held weapon away"));
     } else if (kind === "open_exit" || kind === "close_exit") {
       const ex = idOptions(el("select"), exitIds, a[kind], false);
       ex.addEventListener("change", () => mutate((fl) => { fl.scenario[i].actions[j][kind] = ex.value; }));
@@ -647,7 +674,7 @@
   function triggerDesc(t) {
     switch (t.kind) {
       case "start": return "on start";
-      case "enter_zone": return "enter zone " + (t.zone || "?");
+      case "enter_zone": return "enter zone " + (t.zone || "?") + (t.before ? " (before " + t.before + ")" : "");
       case "kills": return "kills ≥ " + t.count;
       case "all_dead": return "all rogues dead";
       case "timer": return "t+" + t.seconds + "s" + (t.after ? " after " + t.after : "");
@@ -685,6 +712,19 @@
           body.appendChild(wh);
           body.appendChild(el("div", { class: "line" }, a.say.text || "…"));
           row.appendChild(body); comms.appendChild(row);
+        } else if (a.talk) {
+          // dialogue-mode line: same card, marked DIALOGUE instead of a delay
+          const who = a.talk.who, col = F.SPEAKER_COLORS[who] || "#fff";
+          const row = el("div", { class: "msg" + (who === "CL4-UD3" ? " clyde" : "") + (who === "DRIFTER" ? " static" : "") + (who === "CORRUPTOR" || who === "SWARM" ? " corrupt" : "") });
+          row.style.setProperty("--who", col);
+          row.appendChild(portrait(who));
+          const body = el("div", { class: "body" });
+          const wh = el("div", { class: "who" }, who);
+          if (F.SPEAKER_TAGS[who]) wh.appendChild(el("span", { class: "tag" }, "// " + F.SPEAKER_TAGS[who]));
+          wh.appendChild(el("span", { class: "t" }, "DIALOGUE ▼"));
+          body.appendChild(wh);
+          body.appendChild(el("div", { class: "line" }, a.talk.text || "…"));
+          row.appendChild(body); comms.appendChild(row);
         } else if ("spawn" in a) comms.appendChild(el("div", { class: "sys spawn" }, "SPAWN WAVE ×" + a.spawn.length + " " + a.spawn.map((s) => F.SPAWN_LETTER[s.type]).join("")));
         else if ("open_exit" in a) comms.appendChild(el("div", { class: "sys" }, "EXIT OPENED: " + a.open_exit));
         else if ("close_exit" in a) comms.appendChild(el("div", { class: "sys close" }, "EXIT CLOSED: " + a.close_exit));
@@ -693,6 +733,9 @@
         else if ("alert" in a) comms.appendChild(el("div", { class: "sys close" }, "ALERT " + (typeof a.alert === "string" ? a.alert : JSON.stringify(a.alert))));
         else if ("hold" in a) comms.appendChild(el("div", { class: "sys" }, "HOLD " + (a.hold.until_comms_idle ? "until comms idle" : a.hold.seconds + "s") + (a.hold.text ? " — " + a.hold.text : "")));
         else if ("look_at" in a) comms.appendChild(el("div", { class: "sys" }, "LOOK AT " + a.look_at.x + "," + a.look_at.y + " (" + a.look_at.seconds + "s)"));
+        else if ("gate" in a) comms.appendChild(el("div", { class: "sys spawn" }, "GATE [" + a.gate.input + "] — " + (a.gate.text || "…")));
+        else if ("checkpoint" in a) comms.appendChild(el("div", { class: "sys objv" }, "CHECKPOINT"));
+        else if ("disarm" in a) comms.appendChild(el("div", { class: "sys close" }, "DISARM"));
       }
     });
     root.appendChild(comms);

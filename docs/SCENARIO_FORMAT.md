@@ -81,10 +81,10 @@ World units: the existing levels are ~1000×800 world units; keep that scale
 | kind | fields | fires when |
 |---|---|---|
 | `start` | — | the floor starts |
-| `enter_zone` | `zone` | the player is inside that zone |
+| `enter_zone` | `zone`, optional `before` (step id) | the player is inside that zone — with `before`, only while step `before` has **not** fired yet (once it fires the step is disarmed forever; for scene beats that stop making sense past a point, like floor 1's "not past the line" block before the desk scene) |
 | `kills` | `count` | at least `count` rogues are dead on this floor |
 | `all_dead` | — | every rogue (incl. spawned waves) is dead |
-| `timer` | `seconds`, optional `after` (step id) | `seconds` after floor start (or after step `after` fired) |
+| `timer` | `seconds`, optional `after` (step id) | `seconds` after floor start (or after step `after` fired — but when step `after` has `talk` actions, `seconds` counts from the moment its **conversation ends** (last line dismissed, panel gone), since the player paces it) |
 | `exit_open` | optional `exit` | that exit (any if omitted) has been opened |
 | `step_done` | `step` | step `step` has fired (chain steps) |
 | `boss_dead` | — | the floor's boss (the `Boss` entity) is dead — never on floors without one |
@@ -98,6 +98,7 @@ never let `all_dead` slip through.
 | action | payload | effect |
 |---|---|---|
 | `say` | `who`, `text`, optional `delay` (s, default 0; relative to the step firing) | queue a comms line; lines with delays play **one after another** |
+| `talk` | `who`, `text` (no `delay` — the player paces it) | queue a **DIALOGUE line**: consecutive `talk` actions in one step (and same-tick steps) form ONE conversation, shown in the visual-novel panel that slides in from the right (the speaking bot's bust, name in the speaker's colour, typewriter text). While it is up the player is locked like a `hold` (the world keeps running) and click / Space / Enter advances: first press reveals the typing line, next press moves on; after the last line the panel slides out and control returns. A `timer` trigger `after` the step counts from the conversation's end |
 | `spawn` | array of spawns | spawn a wave (counted by `kills`/`all_dead`) |
 | `open_exit` / `close_exit` | exit id | open/close an elevator (open = extractable) |
 | `objective` | text | replace the on-screen objective line |
@@ -105,6 +106,9 @@ never let `all_dead` slip through.
 | `alert` | `"all"` \| `{ "zone": id }` \| `{ "group": id }` | flip the matching passive bots hostile toward the player (all of them / the ones standing inside that zone / the ones spawned with that `group`) |
 | `hold` | `{ "seconds": s, "text": "…" }` or `{ "until_comms_idle": true, "seconds": cap, "text": "…" }` | lock the player's movement / fire / throw / pickup for `s` seconds (the world keeps running, comms keep playing; Esc still pauses); `until_comms_idle` releases as soon as the comms feed has nothing queued or typing, capped at `seconds` (default and hard cap 20 s). Optional `text` = a dim centred caption ("SCANNING…") |
 | `look_at` | `{ "x", "y", "seconds" }` | ease the camera focus onto that world point (smoothstep in over 0.6 s), hold, ease back onto the player over the last 0.6 s; total `seconds` |
+| `gate` | `{ "input": kind, "text": "LEFT CLICK — PUNCH" }` | **TUTORIAL GATE**: the world FREEZES (enemies, enemy attacks, the boss, projectiles-at-rest, the scenario clock — timers do **not** advance) and a centred lower-third prompt shows `text` (the part before the ` — ` separator is highlighted in the accent colour). The player can still aim, turn and MOVE (to close distance), but every combat input except the gated one is masked; their own bullets / thrown weapons keep flying, knockdown clocks play their fall but never expire, and the finisher animation runs. The gate releases only when the gated action **succeeds**: `punch` = an unarmed strike connects, `finish` = a finisher completes, `pickup` = E picks a weapon up, `strike` = an armed melee hit connects, `fire` = a gun round leaves, `throw` = a thrown weapon connects. On release the step's actions **after** the gate run (so gates chain inside one step), and the step only counts as done for `step_done` / `timer.after` from that moment. One gate at a time (the frozen scenario can't fire another step under it). Design the floor so a target always exists (spawn it in the same step, before the gate); with `?debug` + overlays on, **G** skips the active gate. During `strike` / `fire` / `throw` / `pickup` gates the E key stays live as a recovery path (fetch the right weapon back); the left click only acts when the held weapon matches the gate (no stray gunshot can kill a `strike` gate's target) |
+| `checkpoint` | `true` | snapshot the RUN mid-floor: the whole world (player position / health / held weapon + ammo, every entity alive-or-corpse and where, dropped pickups, exit open/closed states, RNG) plus the scenario (fired steps, objective, comms). On death, **R** restores the latest snapshot of the floor instead of restarting it from scratch (the death flash / sfx still play). No checkpoint fired = the old full-restart behaviour. Snapshots are taken at the end of the tick the action ran in, so a `spawn` / `alert` in the same step is inside the snapshot |
+| `disarm` | `true` | take the player's held weapon away (it vanishes — the checkpoint desk keeps it; used to guarantee the tutorial's `punch` gate starts bare-fisted) |
 
 ## Passive bots (`"type": "passive"`)
 A civilian: no vision cone, never aggroes, never attacks, unarmed. Fields:
