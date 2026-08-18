@@ -210,6 +210,7 @@ impl CombatSystem {
                     world.push_event(GameEvent::EnemyHit {
                         by: WeaponType::Melee,
                     });
+                    world.push_event(GameEvent::StrikeLanded);
                 }
                 // Shove the enemy away from the attacker (attacker -> enemy).
                 let dir_x = enemy_pos.x - attacker_pos.x;
@@ -263,6 +264,7 @@ impl CombatSystem {
                     world.push_event(GameEvent::EnemyHit {
                         by: WeaponType::Melee,
                     });
+                    world.push_event(GameEvent::PunchLanded);
                 }
                 let dir_x = enemy_pos.x - attacker_pos.x;
                 let dir_y = enemy_pos.y - attacker_pos.y;
@@ -510,8 +512,12 @@ mod tests {
             vec![
                 GameEvent::EnemyHit {
                     by: WeaponType::Melee
-                };
-                2
+                },
+                GameEvent::StrikeLanded,
+                GameEvent::EnemyHit {
+                    by: WeaponType::Melee
+                },
+                GameEvent::StrikeLanded,
             ]
         );
     }

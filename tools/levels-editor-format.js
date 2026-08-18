@@ -42,8 +42,10 @@
     timer: ["seconds", "after"], exit_open: ["exit"], step_done: ["step"],
     boss_dead: [], extracted: [],
   };
-  const ACTION_KINDS = ["say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at"];
+  const ACTION_KINDS = ["say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at", "gate", "checkpoint", "disarm"];
   const SFX_NAMES = ["elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"];
+  /* tutorial gate inputs (mirrors scenario.rs GateInput::parse) */
+  const GATE_INPUTS = ["punch", "finish", "pickup", "strike", "fire", "throw"];
   const MAX_FLOOR = 14;
 
   const ORDER = {
@@ -61,12 +63,14 @@
        tab, not here): kept verbatim, only key-ordered */
     prop: ["kind", "x", "y", "rot", "size"],
     step: ["id", "trigger", "actions"],
-    trigger: ["kind", "zone", "count", "seconds", "after", "exit", "step"],
+    trigger: ["kind", "zone", "before", "count", "seconds", "after", "exit", "step"],
     say: ["who", "text", "delay"],
     /* dialogue-mode line (player-paced, no delay) */
     talk: ["who", "text"],
     hold: ["seconds", "until_comms_idle", "text"],
     look_at: ["x", "y", "seconds"],
+    /* tutorial gate: freeze the world until `input` succeeds */
+    gate: ["input", "text"],
   };
 
   /* ---------- helpers ---------- */
@@ -114,7 +118,7 @@
     t = isObj(t) ? t : {};
     const kind = TRIGGER_KINDS[t.kind] ? t.kind : "start";
     const out = { kind };
-    if (kind === "enter_zone") out.zone = str(t.zone, "");
+    if (kind === "enter_zone") { out.zone = str(t.zone, ""); if (t.before != null && t.before !== "") out.before = str(t.before, ""); }
     if (kind === "kills") out.count = int(t.count, 1);
     if (kind === "timer") { out.seconds = num(t.seconds, 5); if (t.after != null && t.after !== "") out.after = str(t.after, ""); }
     if (kind === "exit_open") { if (t.exit != null && t.exit !== "") out.exit = str(t.exit, ""); }
@@ -170,6 +174,12 @@
       const l = isObj(a.look_at) ? a.look_at : {};
       return { look_at: { x: num(l.x, 0), y: num(l.y, 0), seconds: num(l.seconds, 2) } };
     }
+    if ("gate" in a) {
+      const g = isObj(a.gate) ? a.gate : {};
+      return { gate: { input: GATE_INPUTS.includes(g.input) ? g.input : "punch", text: str(g.text, "") } };
+    }
+    if ("checkpoint" in a) return { checkpoint: true };
+    if ("disarm" in a) return { disarm: true };
     return null;
   }
   function normStep(s) {
@@ -232,6 +242,7 @@
     if ("spawn" in a && Array.isArray(a.spawn)) return { spawn: a.spawn.map((s) => ordered(s, ORDER.spawn)) };
     if ("hold" in a && isObj(a.hold)) return { hold: ordered(a.hold, ORDER.hold) };
     if ("look_at" in a && isObj(a.look_at)) return { look_at: ordered(a.look_at, ORDER.look_at) };
+    if ("gate" in a && isObj(a.gate)) return { gate: ordered(a.gate, ORDER.gate) };
     return a;
   }
   function canonical(floor) {
@@ -364,7 +375,11 @@
       const label = s.id ? "step \"" + s.id + "\"" : "step #" + (i + 1);
       const t = s.trigger || {};
       if (!TRIGGER_KINDS[t.kind]) err(p + ".trigger", label + ": unknown trigger kind");
-      if (t.kind === "enter_zone" && !zoneIds.has(t.zone)) err(p + ".trigger.zone", label + ": zone \"" + (t.zone || "") + "\" does not exist");
+      if (t.kind === "enter_zone") {
+        if (!zoneIds.has(t.zone)) err(p + ".trigger.zone", label + ": zone \"" + (t.zone || "") + "\" does not exist");
+        if (t.before != null && t.before !== "" && !stepIds.has(t.before)) err(p + ".trigger.before", label + ": before-step \"" + t.before + "\" does not exist");
+        if (t.before != null && t.before === s.id) err(p + ".trigger.before", label + ": cannot be before itself");
+      }
       if (t.kind === "kills" && !(Number.isInteger(t.count) && t.count >= 1)) err(p + ".trigger.count", label + ": kills.count must be >= 1");
       if (t.kind === "timer") {
         if (!(Number.isFinite(t.seconds) && t.seconds >= 0)) err(p + ".trigger.seconds", label + ": timer.seconds must be >= 0");
@@ -407,6 +422,14 @@
           const l = a.look_at || {};
           if (!Number.isFinite(l.x) || !Number.isFinite(l.y)) err(q, label + ": look_at needs x / y");
           if (!(l.seconds > 0)) err(q, label + ": look_at seconds must be > 0");
+        } else if ("gate" in a) {
+          const g = a.gate || {};
+          if (!GATE_INPUTS.includes(g.input)) err(q, label + ": gate input must be one of " + GATE_INPUTS.join("|"));
+          if (!g.text || !g.text.trim()) err(q, label + ": gate text (the on-screen prompt) is empty");
+        } else if ("checkpoint" in a) {
+          if (a.checkpoint !== true) err(q, label + ": checkpoint must be true");
+        } else if ("disarm" in a) {
+          if (a.disarm !== true) err(q, label + ": disarm must be true");
         } else if ("objective" in a) {
           if (!a.objective.trim()) warn(q, label + ": objective text is empty");
         } else if ("sfx" in a) {
@@ -422,7 +445,7 @@
   return {
     SPEAKERS, SPEAKER_COLORS, SPEAKER_TAGS, SPAWN_TYPES, SPAWN_LETTER, SPAWN_COLORS, WEAPONS,
     PASSIVE_LOOKS, PORTAL_KINDS, SURFACES, SURFACE_TO,
-    TRIGGER_KINDS, ACTION_KINDS, SFX_NAMES, MAX_FLOOR, ORDER,
+    TRIGGER_KINDS, ACTION_KINDS, SFX_NAMES, GATE_INPUTS, MAX_FLOOR, ORDER,
     blankFloor, normalize, canonical, stringify, validate, fileNameFor, floorLabel, pad2,
   };
 });

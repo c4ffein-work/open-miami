@@ -704,6 +704,15 @@ pub enum GameEvent {
     Throw,
     /// A thrown weapon struck an enemy (knockdown).
     ThrownImpact,
+    /// A bare-fist punch connected (knockdown landed). Companion to the
+    /// melee `EnemyHit`; drives the tutorial `punch` gate.
+    PunchLanded,
+    /// An ARMED melee swing connected. Companion to the melee `EnemyHit`;
+    /// drives the tutorial `strike` gate.
+    StrikeLanded,
+    /// A finisher ran to completion (the victim died at the final impact).
+    /// Drives the tutorial `finish` gate.
+    FinisherDone,
 }
 
 /// Debug component to store pathfinding waypoints for visualization

@@ -275,7 +275,7 @@ mod tests {
             }
             for s in f.scenario {
                 match s.trigger {
-                    Trigger::EnterZone(z) if f.zone(z).is_none() => {
+                    Trigger::EnterZone { zone: z, .. } if f.zone(z).is_none() => {
                         problems.push(format!("floor {i}/{}: unknown zone {z}", s.id))
                     }
                     Trigger::Timer { after: Some(a), .. } | Trigger::StepDone(a)

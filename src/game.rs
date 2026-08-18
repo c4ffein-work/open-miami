@@ -549,7 +549,8 @@ mod tests {
                 GameEvent::PlayerFired(WeaponType::Melee),
                 GameEvent::EnemyHit {
                     by: WeaponType::Melee
-                }
+                },
+                GameEvent::PunchLanded,
             ]
         );
 

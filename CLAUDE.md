@@ -118,7 +118,8 @@
 
 ## Debug Mode
 - The game has a built-in debug mode that can be toggled by pressing **I** during gameplay
-- Debug mode is OFF by default; it is enabled only when the URL carries `?debug` (`debug_enabled` in GameState, e.g. `/?floor=14&debug`). Without it, I/K/B and the debug HUD line do nothing
+- Debug mode is OFF by default; it is enabled only when the URL carries `?debug` (`debug_enabled` in GameState, e.g. `/?floor=14&debug`). Without it, I/K/B/G and the debug HUD line do nothing
+- With debug overlays on (I), **G** skips the active tutorial `gate` (releases it as if the gated input succeeded — anti-softlock escape; see `docs/SCENARIO_FORMAT.md`)
 - When debug mode is active, pressing **I** toggles the display of debug information
 
 ### Debug Visualizations

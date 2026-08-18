@@ -164,6 +164,19 @@ pub fn kind_name(k: ElevatorKind) -> &'static str {
     }
 }
 
+/// The JSON id of a tutorial gate input (`gate.input`).
+pub fn gate_input_id(g: crate::scenario::GateInput) -> &'static str {
+    use crate::scenario::GateInput;
+    match g {
+        GateInput::Punch => "punch",
+        GateInput::Finish => "finish",
+        GateInput::Pickup => "pickup",
+        GateInput::Strike => "strike",
+        GateInput::Fire => "fire",
+        GateInput::Throw => "throw",
+    }
+}
+
 /// The JSON name of a ground surface.
 pub fn surface_name(s: Surface) -> &'static str {
     match s {
@@ -665,7 +678,7 @@ impl EditableFloor {
         let has_zone = |id: &str| self.zones.iter().any(|z| z.id == id);
         for s in self.scenario {
             match s.trigger {
-                Trigger::EnterZone(z) if !has_zone(z) => {
+                Trigger::EnterZone { zone: z, .. } if !has_zone(z) => {
                     out.push(format!("step \"{}\": zone \"{}\" does not exist", s.id, z))
                 }
                 Trigger::ExitOpen(Some(e)) if !has_exit(e) => {
@@ -836,8 +849,15 @@ impl EditableFloor {
             .map(|st| {
                 let trigger = match st.trigger {
                     Trigger::Start => vec![("kind".to_string(), s("start"))],
-                    Trigger::EnterZone(z) => {
-                        vec![("kind".into(), s("enter_zone")), ("zone".into(), s(z))]
+                    Trigger::EnterZone { zone, before } => {
+                        let mut kv = vec![
+                            ("kind".to_string(), s("enter_zone")),
+                            ("zone".into(), s(zone)),
+                        ];
+                        if let Some(b) = before {
+                            kv.push(("before".into(), s(b)));
+                        }
+                        kv
                     }
                     Trigger::Kills(c) => {
                         vec![("kind".into(), s("kills")), ("count".into(), Num(c as f32))]
@@ -925,6 +945,15 @@ impl EditableFloor {
                                 ("seconds".into(), n(l.seconds)),
                             ]),
                         )]),
+                        Action::Gate(g) => Obj(vec![(
+                            "gate".into(),
+                            Obj(vec![
+                                ("input".into(), s(gate_input_id(g.input))),
+                                ("text".into(), s(g.text)),
+                            ]),
+                        )]),
+                        Action::Checkpoint => Obj(vec![("checkpoint".into(), Bool(true))]),
+                        Action::Disarm => Obj(vec![("disarm".into(), Bool(true))]),
                     })
                     .collect();
                 Obj(vec![

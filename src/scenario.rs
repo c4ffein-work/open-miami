@@ -180,8 +180,14 @@ pub struct PropPlacement {
 pub enum Trigger {
     /// The floor starts.
     Start,
-    /// The player is inside the zone with this id.
-    EnterZone(&'static str),
+    /// The player is inside the zone with this id. With `before`, the step
+    /// is DISARMED forever once that other step fires — for scene beats that
+    /// only make sense before a point of no return (floor 1's "not past the
+    /// line" block only plays before the desk scene).
+    EnterZone {
+        zone: &'static str,
+        before: Option<&'static str>,
+    },
     /// At least `count` rogues are dead on this floor.
     Kills(usize),
     /// Every rogue (including spawned waves) is dead.
@@ -262,6 +268,100 @@ pub struct LookAtDef {
     pub seconds: f32,
 }
 
+/// The player input a tutorial `gate` waits for. A gate releases only when
+/// the action SUCCEEDS (the punch connects, the finisher completes, ...) —
+/// matched against the frame's [`GameEvent`]s in [`ScenarioState::gate_notify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateInput {
+    /// An unarmed strike that connects ([`GameEvent::PunchLanded`]).
+    Punch,
+    /// A finisher runs to completion ([`GameEvent::FinisherDone`]).
+    Finish,
+    /// A weapon picked up off the floor ([`GameEvent::Pickup`]).
+    Pickup,
+    /// An armed melee hit that connects ([`GameEvent::StrikeLanded`]).
+    Strike,
+    /// A gun shot fired ([`GameEvent::PlayerFired`], non-melee).
+    Fire,
+    /// A thrown weapon that connects ([`GameEvent::ThrownImpact`]).
+    Throw,
+}
+
+impl GateInput {
+    /// Parse the JSON `gate.input`; unknown = `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "punch" => Some(GateInput::Punch),
+            "finish" => Some(GateInput::Finish),
+            "pickup" => Some(GateInput::Pickup),
+            "strike" => Some(GateInput::Strike),
+            "fire" => Some(GateInput::Fire),
+            "throw" => Some(GateInput::Throw),
+            _ => None,
+        }
+    }
+
+    /// Whether the left-click attack is the gated input, given what the
+    /// player holds: only the EXACT gated action passes — a `punch` gate
+    /// swings only bare fists, a `strike` gate only an armed melee weapon, a
+    /// `fire` gate only a gun. The same button with the wrong tool stays
+    /// masked (a stray shot during a `strike` gate could kill the target the
+    /// gate needs).
+    pub fn allows_primary(self, weapon: Option<crate::components::WeaponType>) -> bool {
+        match self {
+            GateInput::Punch => weapon.is_none(),
+            GateInput::Strike => weapon.is_some_and(|w| w.is_melee()),
+            GateInput::Fire => weapon.is_some_and(|w| !w.is_melee()),
+            _ => false,
+        }
+    }
+
+    /// Whether a left click may start a finisher.
+    pub fn allows_finisher(self) -> bool {
+        self == GateInput::Finish
+    }
+
+    /// Whether the pick-up key works. Besides the `pickup` gate itself,
+    /// every gate whose action needs the RIGHT weapon in hand keeps E live
+    /// as a recovery path (a missed throw leaves the weapon on the floor; a
+    /// `strike` gate reached holding a gun needs a way to swap to the bar).
+    /// Only `punch` (must stay unarmed) and `finish` (works with anything)
+    /// mask it.
+    pub fn allows_pickup(self) -> bool {
+        matches!(
+            self,
+            GateInput::Pickup | GateInput::Strike | GateInput::Fire | GateInput::Throw
+        )
+    }
+
+    /// Whether the right-click throw works.
+    pub fn allows_throw(self) -> bool {
+        self == GateInput::Throw
+    }
+
+    /// Whether this frame `event` satisfies the gate.
+    pub fn satisfied_by(self, event: &crate::components::GameEvent) -> bool {
+        use crate::components::GameEvent;
+        match (self, event) {
+            (GateInput::Punch, GameEvent::PunchLanded) => true,
+            (GateInput::Finish, GameEvent::FinisherDone) => true,
+            (GateInput::Pickup, GameEvent::Pickup) => true,
+            (GateInput::Strike, GameEvent::StrikeLanded) => true,
+            (GateInput::Fire, GameEvent::PlayerFired(t)) => !t.is_melee(),
+            (GateInput::Throw, GameEvent::ThrownImpact) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A `gate` action: freeze the world and wait for one specific player input
+/// to SUCCEED (tutorial beats). `text` is the on-screen prompt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GateDef {
+    pub input: GateInput,
+    pub text: &'static str,
+}
+
 /// What a step does when it fires.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -279,6 +379,16 @@ pub enum Action {
     Hold(HoldDef),
     /// Cinematic camera nudge.
     LookAt(LookAtDef),
+    /// TUTORIAL GATE: freeze the world until the gated input succeeds. The
+    /// step's actions AFTER the gate run on release, and the step only
+    /// counts as done (`step_done` / `timer.after`) once the gate releases.
+    Gate(GateDef),
+    /// Snapshot the run (world + scenario) — death restores it (see the
+    /// game loop). `{ "checkpoint": true }` in the JSON.
+    Checkpoint,
+    /// Take the player's held weapon away (the checkpoint desk keeps it).
+    /// `{ "disarm": true }` in the JSON.
+    Disarm,
 }
 
 /// A scenario step: a trigger plus the actions it runs, once.
@@ -537,6 +647,27 @@ pub struct ScenarioState {
     /// or the step has no `talk`). A `timer { after }` on a talking step
     /// counts from this instead of the fire time.
     talk_done_at: Vec<Option<f32>>,
+    /// The active tutorial `gate`, if any: the world is frozen and the
+    /// scenario clock stops until [`ScenarioState::gate_notify`] sees the
+    /// gated input succeed.
+    gate: Option<GateState>,
+    /// Per step: the time its (last) `gate` released (`None` = not yet or no
+    /// gate). `step_done` / `timer { after }` on a gated step wait for this.
+    gate_done_at: Vec<Option<f32>>,
+    /// A `checkpoint` action ran since the last
+    /// [`ScenarioState::take_checkpoint_request`].
+    checkpoint_requested: bool,
+}
+
+/// Live state of a tutorial `gate`: what it waits for, which step owns it,
+/// and the actions of that step still to run once it releases.
+#[derive(Debug, Clone, Copy)]
+struct GateState {
+    def: GateDef,
+    step_idx: usize,
+    /// The owning step's actions AFTER the gate (run on release; may install
+    /// the step's next gate, chaining within one step).
+    rest: &'static [Action],
 }
 
 /// Live state of a `talk` conversation: the line on screen, the lines still
@@ -611,6 +742,9 @@ impl ScenarioState {
             look: None,
             dialogue: None,
             talk_done_at: vec![None; floor.scenario.len()],
+            gate: None,
+            gate_done_at: vec![None; floor.scenario.len()],
+            checkpoint_requested: false,
         }
     }
 
@@ -704,6 +838,44 @@ impl ScenarioState {
         }
     }
 
+    /// The active tutorial gate, if any (the world must be frozen: the game
+    /// loop runs only the player-driven systems and masks every input but
+    /// the gated one — see `sim::gate_frozen_step`).
+    pub fn gate_view(&self) -> Option<GateDef> {
+        self.gate.map(|g| g.def)
+    }
+
+    /// Feed the frame's drained [`GameEvent`]s to the active gate: when one
+    /// satisfies it, the gate releases — the owning step's remaining actions
+    /// run (possibly installing the step's next gate) and the step counts as
+    /// done for `step_done` / `timer { after }` chains.
+    ///
+    /// [`GameEvent`]: crate::components::GameEvent
+    pub fn gate_notify(&mut self, world: &mut World, events: &[crate::components::GameEvent]) {
+        let Some(g) = self.gate else { return };
+        if events.iter().any(|e| g.def.input.satisfied_by(e)) {
+            self.gate = None;
+            self.gate_done_at[g.step_idx] = Some(self.time);
+            self.run_actions(world, g.rest, g.step_idx);
+        }
+    }
+
+    /// Debug escape hatch (the `?debug` **G** key): release the active gate
+    /// as if its input had succeeded, so a mis-designed gate with no possible
+    /// target can never softlock a session.
+    pub fn gate_skip(&mut self, world: &mut World) {
+        if let Some(g) = self.gate.take() {
+            self.gate_done_at[g.step_idx] = Some(self.time);
+            self.run_actions(world, g.rest, g.step_idx);
+        }
+    }
+
+    /// Whether a `checkpoint` action ran since the last call: the game loop
+    /// snapshots the world + this scenario when it returns true.
+    pub fn take_checkpoint_request(&mut self) -> bool {
+        std::mem::take(&mut self.checkpoint_requested)
+    }
+
     /// Queue one `talk` line (from step `step_idx`). Starts a conversation if
     /// none is up; otherwise appends to the running one — so consecutive
     /// `talk` actions (and same-tick steps) form a single conversation.
@@ -776,6 +948,16 @@ impl ScenarioState {
     /// same pass, and the counts are recomputed after every fired step, so a
     /// `spawn` in the same tick can never let `all_dead` slip through.
     pub fn tick(&mut self, world: &mut World, dt: f32) {
+        // A tutorial gate freezes the whole scenario: the clock and every
+        // trigger hold their breath (timers must not advance) until the
+        // gated input succeeds ([`ScenarioState::gate_notify`]). Only the
+        // comms typewriter keeps playing — the lines a gated step queued
+        // BEFORE its gate (the beat's flavour) still type out under the
+        // prompt; the frozen clock keeps delayed lines waiting.
+        if self.gate.is_some() {
+            self.comms.update(self.time, dt);
+            return;
+        }
         self.time += dt;
 
         let player_pos = world
@@ -815,6 +997,12 @@ impl ScenarioState {
                         self.run_actions(world, step.actions, i);
                         counts = count_rogues(world);
                         fired_any = true;
+                        if self.gate.is_some() {
+                            // A gate just installed: the world (and this
+                            // scenario) freeze mid-tick. Nothing else fires
+                            // until the gate releases.
+                            return;
+                        }
                     }
                 }
             }
@@ -839,10 +1027,16 @@ impl ScenarioState {
     fn trigger_holds(&self, trigger: Trigger, ctx: &TriggerCtx) -> bool {
         match trigger {
             Trigger::Start => true,
-            Trigger::EnterZone(zone) => match (ctx.player_pos, self.floor.zone(zone)) {
-                (Some(p), Some(z)) => z.rect.contains(p),
-                _ => false,
-            },
+            Trigger::EnterZone { zone, before } => {
+                // `before`: disarmed forever once that other step fires.
+                if before.is_some_and(|id| self.fired_time(id).is_some()) {
+                    return false;
+                }
+                match (ctx.player_pos, self.floor.zone(zone)) {
+                    (Some(p), Some(z)) => z.rect.contains(p),
+                    _ => false,
+                }
+            }
             Trigger::Kills(n) => ctx.kills >= n,
             Trigger::AllDead => ctx.alive == 0,
             Trigger::Timer { seconds, after } => {
@@ -857,7 +1051,7 @@ impl ScenarioState {
             }
             Trigger::ExitOpen(None) => !self.opened_exits.is_empty(),
             Trigger::ExitOpen(Some(id)) => self.opened_exits.contains(&id),
-            Trigger::StepDone(id) => self.fired_time(id).is_some(),
+            Trigger::StepDone(id) => self.step_done_time(id).is_some(),
             Trigger::BossDead => ctx.boss_dead,
             Trigger::Extracted => ctx.extracted,
         }
@@ -872,10 +1066,31 @@ impl ScenarioState {
             .and_then(|(_, f)| *f)
     }
 
+    /// When step `id` counts as DONE for a `step_done` trigger: for a step
+    /// with `gate` actions, the moment its (last) gate released (`None`
+    /// while it is pending — triggers are never evaluated while a gate is
+    /// active, so a released gate here is the step's final one); for any
+    /// other step, the moment it fired.
+    fn step_done_time(&self, id: &str) -> Option<f32> {
+        let (i, step) = self
+            .floor
+            .scenario
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.id == id)?;
+        let fired = self.fired_at[i]?;
+        if step.actions.iter().any(|a| matches!(a, Action::Gate(_))) {
+            self.gate_done_at[i]
+        } else {
+            Some(fired)
+        }
+    }
+
     /// The base time a `timer { after: id }` counts from: for a step with
-    /// `talk` actions, the moment its conversation ENDED (panel dismissed;
-    /// `None` while it is still up — the player paces it); for any other
-    /// step, the moment it fired.
+    /// `gate` actions, the moment its gate released; for a step with `talk`
+    /// actions, the moment its conversation ENDED (panel dismissed; `None`
+    /// while it is still up — the player paces it); for any other step, the
+    /// moment it fired.
     fn after_time(&self, id: &str) -> Option<f32> {
         let (i, step) = self
             .floor
@@ -884,7 +1099,9 @@ impl ScenarioState {
             .enumerate()
             .find(|(_, s)| s.id == id)?;
         let fired = self.fired_at[i]?;
-        if step.actions.iter().any(|a| matches!(a, Action::Talk(_))) {
+        if step.actions.iter().any(|a| matches!(a, Action::Gate(_))) {
+            self.gate_done_at[i]
+        } else if step.actions.iter().any(|a| matches!(a, Action::Talk(_))) {
             self.talk_done_at[i]
         } else {
             Some(fired)
@@ -892,8 +1109,27 @@ impl ScenarioState {
     }
 
     fn run_actions(&mut self, world: &mut World, actions: &'static [Action], step_idx: usize) {
-        for action in actions {
+        for (i, action) in actions.iter().enumerate() {
             match *action {
+                Action::Gate(def) => {
+                    // Install the gate and STOP: the remaining actions run
+                    // when it releases (`gate_notify`), so gates chain
+                    // within one step. One gate at a time by construction —
+                    // the scenario clock halts while one is active, so no
+                    // other step can fire under it.
+                    self.gate = Some(GateState {
+                        def,
+                        step_idx,
+                        rest: &actions[i + 1..],
+                    });
+                    return;
+                }
+                Action::Checkpoint => self.checkpoint_requested = true,
+                Action::Disarm => {
+                    if let Some(&p) = world.query::<Player>().first() {
+                        world.remove_component::<crate::components::Weapon>(p);
+                    }
+                }
                 Action::Say(say) => {
                     self.comms.enqueue(say.who, say.text, self.time + say.delay);
                 }
@@ -1071,7 +1307,10 @@ mod tests {
         },
         StepDef {
             id: "zone",
-            trigger: Trigger::EnterZone("z"),
+            trigger: Trigger::EnterZone {
+                zone: "z",
+                before: None,
+            },
             actions: &[Action::Spawn(&T_WAVE), Action::Objective("wave")],
         },
         StepDef {
@@ -1529,7 +1768,10 @@ mod tests {
         },
         StepDef {
             id: "lot",
-            trigger: Trigger::EnterZone("lot"),
+            trigger: Trigger::EnterZone {
+                zone: "lot",
+                before: None,
+            },
             actions: &[Action::Alert(AlertTarget::Zone("lot"))],
         },
         StepDef {
@@ -1981,6 +2223,505 @@ mod tests {
         // 13½'s car goes to the surface; nothing else does.
         let boss = crate::levels::floor_def(crate::levels::BOSS_LEVEL);
         assert!(boss.exits.iter().all(|e| e.to == SURFACE_EXIT));
+    }
+
+    // ---- tutorial gates + checkpoints ---------------------------------
+
+    use crate::components::{GameEvent, Weapon, WeaponType};
+    use crate::sim::Simulation;
+
+    #[test]
+    fn gate_input_parse_masking_and_satisfaction() {
+        assert_eq!(GateInput::parse("punch"), Some(GateInput::Punch));
+        assert_eq!(GateInput::parse("finish"), Some(GateInput::Finish));
+        assert_eq!(GateInput::parse("pickup"), Some(GateInput::Pickup));
+        assert_eq!(GateInput::parse("strike"), Some(GateInput::Strike));
+        assert_eq!(GateInput::parse("fire"), Some(GateInput::Fire));
+        assert_eq!(GateInput::parse("throw"), Some(GateInput::Throw));
+        assert_eq!(GateInput::parse("dance"), None);
+
+        // The left click only works with the matching tool in hand.
+        assert!(GateInput::Punch.allows_primary(None));
+        assert!(!GateInput::Punch.allows_primary(Some(WeaponType::Melee)));
+        assert!(GateInput::Strike.allows_primary(Some(WeaponType::Melee)));
+        assert!(!GateInput::Strike.allows_primary(Some(WeaponType::Pistol)));
+        assert!(!GateInput::Strike.allows_primary(None));
+        assert!(GateInput::Fire.allows_primary(Some(WeaponType::Shotgun)));
+        assert!(!GateInput::Fire.allows_primary(Some(WeaponType::Melee)));
+        assert!(!GateInput::Pickup.allows_primary(None));
+        assert!(GateInput::Finish.allows_finisher());
+        assert!(!GateInput::Punch.allows_finisher());
+        // E stays live on every weapon-dependent gate (recovery path).
+        assert!(GateInput::Pickup.allows_pickup());
+        assert!(GateInput::Strike.allows_pickup());
+        assert!(GateInput::Fire.allows_pickup());
+        assert!(GateInput::Throw.allows_pickup());
+        assert!(!GateInput::Punch.allows_pickup());
+        assert!(!GateInput::Finish.allows_pickup());
+        assert!(GateInput::Throw.allows_throw());
+        assert!(!GateInput::Pickup.allows_throw());
+
+        // Success events, one per gate kind.
+        assert!(GateInput::Punch.satisfied_by(&GameEvent::PunchLanded));
+        assert!(!GateInput::Punch.satisfied_by(&GameEvent::StrikeLanded));
+        assert!(GateInput::Finish.satisfied_by(&GameEvent::FinisherDone));
+        assert!(GateInput::Pickup.satisfied_by(&GameEvent::Pickup));
+        assert!(GateInput::Strike.satisfied_by(&GameEvent::StrikeLanded));
+        assert!(!GateInput::Strike.satisfied_by(&GameEvent::EnemyHit {
+            by: WeaponType::Melee
+        }));
+        assert!(GateInput::Fire.satisfied_by(&GameEvent::PlayerFired(WeaponType::Pistol)));
+        assert!(
+            !GateInput::Fire.satisfied_by(&GameEvent::PlayerFired(WeaponType::Melee)),
+            "a melee swing is not a shot"
+        );
+        assert!(GateInput::Throw.satisfied_by(&GameEvent::ThrownImpact));
+        assert!(
+            !GateInput::Throw.satisfied_by(&GameEvent::Throw),
+            "a throw satisfies only when it CONNECTS"
+        );
+    }
+
+    // A tutorial-style floor: entering the zone disarms the player, drops a
+    // checkpoint, spawns a lone rogue and gates on PUNCH, then chains a
+    // FINISH gate through step_done, with timers watching the frozen clock.
+    const GT_WAVE: [SpawnDef; 1] = [SpawnDef::hostile(650.0, 650.0, EnemyType::Idle)];
+    const GT_STEPS: [StepDef; 4] = [
+        StepDef {
+            id: "teach",
+            trigger: Trigger::EnterZone {
+                zone: "z",
+                before: None,
+            },
+            actions: &[
+                Action::Disarm,
+                Action::Checkpoint,
+                Action::Spawn(&GT_WAVE),
+                Action::Gate(GateDef {
+                    input: GateInput::Punch,
+                    text: "LEFT CLICK — PUNCH",
+                }),
+                Action::Objective("punched"),
+            ],
+        },
+        StepDef {
+            id: "next",
+            trigger: Trigger::StepDone("teach"),
+            actions: &[
+                Action::Gate(GateDef {
+                    input: GateInput::Finish,
+                    text: "LEFT CLICK — FINISH",
+                }),
+                Action::Objective("finished"),
+            ],
+        },
+        StepDef {
+            id: "late",
+            trigger: Trigger::Timer {
+                seconds: 0.5,
+                after: Some("teach"),
+            },
+            actions: &[Action::Sfx("ping")],
+        },
+        StepDef {
+            id: "clock",
+            trigger: Trigger::Timer {
+                seconds: 0.3,
+                after: None,
+            },
+            actions: &[Action::Sfx("clock")],
+        },
+    ];
+    const GT_FLOOR: FloorDef = FloorDef {
+        spawns: &[],
+        scenario: &GT_STEPS,
+        ..T_FLOOR
+    };
+
+    const DT: f32 = 1.0 / 60.0;
+
+    fn sim_for(floor: &'static FloorDef) -> (Simulation, ScenarioState) {
+        (
+            Simulation::from_world(world_for(floor)),
+            ScenarioState::new(floor),
+        )
+    }
+
+    fn teleport(sim: &mut Simulation, to: Vec2) {
+        let p = sim.player().unwrap();
+        *sim.world.get_component_mut::<Position>(p).unwrap() = Position::from_vec2(to);
+    }
+
+    /// Advance `frames` full frames; returns the checkpoint snapshot taken
+    /// at the frame a `checkpoint` action requested one (if any).
+    fn run(
+        sim: &mut Simulation,
+        sc: &mut ScenarioState,
+        frames: usize,
+    ) -> Option<(World, ScenarioState)> {
+        let mut cp = None;
+        for _ in 0..frames {
+            if sim.scenario_step(sc, DT) {
+                cp = Some((sim.world.clone(), sc.clone()));
+            }
+        }
+        cp
+    }
+
+    #[test]
+    fn gate_freezes_the_world_and_releases_on_the_punch() {
+        let (mut sim, mut sc) = sim_for(&GT_FLOOR);
+        // Walk into the zone: the teach step disarms, checkpoints, spawns
+        // the target and freezes on the PUNCH gate.
+        teleport(&mut sim, Vec2::new(650.0, 620.0));
+        let cp = run(&mut sim, &mut sc, 1);
+        assert!(sc.step_fired("teach"));
+        let gate = sc.gate_view().expect("gate installed");
+        assert_eq!(gate.input, GateInput::Punch);
+        assert_eq!(gate.text, "LEFT CLICK — PUNCH");
+        assert!(cp.is_some(), "the checkpoint action requested a snapshot");
+        let player = sim.player().unwrap();
+        assert!(
+            sim.world.get_component::<Weapon>(player).is_none(),
+            "disarmed"
+        );
+        assert_eq!(sc.objective, "start", "post-gate actions did NOT run yet");
+        let t_frozen = sc.time();
+
+        // Make the enemy hostile and shoving-fast: under the freeze it still
+        // never moves and never attacks, and the clock never advances.
+        let enemy = sim.world.query::<Enemy>()[0];
+        sim.world.get_component_mut::<AI>(enemy).unwrap().state = AIState::SurePlayerSeen;
+        sim.world
+            .get_component_mut::<crate::components::Velocity>(enemy)
+            .map(|v| {
+                v.x = 150.0;
+                v.y = 0.0;
+            })
+            .unwrap();
+        let enemy_pos = *sim.world.get_component::<Position>(enemy).unwrap();
+        let health_before = crate::game::get_player_health(&sim.world);
+        run(&mut sim, &mut sc, 90); // 1.5 s frozen
+        assert_eq!(sc.time(), t_frozen, "scenario clock frozen under the gate");
+        assert!(
+            !sc.step_fired("clock"),
+            "absolute timers do not advance under a gate"
+        );
+        let now = *sim.world.get_component::<Position>(enemy).unwrap();
+        assert_eq!((now.x, now.y), (enemy_pos.x, enemy_pos.y), "enemy pinned");
+        assert_eq!(
+            crate::game::get_player_health(&sim.world),
+            health_before,
+            "no enemy attacks under the freeze"
+        );
+
+        // The PLAYER still moves under the freeze (to close the distance).
+        let before = sim.player_position().unwrap();
+        sim.set_player_velocity(Vec2::new(0.0, 200.0));
+        run(&mut sim, &mut sc, 6);
+        assert!(sim.player_position().unwrap().y > before.y + 10.0);
+
+        // The punch connects: the gate releases, the post-gate actions run.
+        teleport(&mut sim, Vec2::new(650.0, 620.0));
+        sim.set_player_velocity(Vec2::zero());
+        assert!(sim.player_fire(Vec2::new(650.0, 650.0)), "punch landed");
+        run(&mut sim, &mut sc, 1);
+        assert!(sc.gate_view().is_none() || sc.gate_view().unwrap().input != GateInput::Punch);
+        assert_eq!(sc.objective, "punched");
+        assert!(
+            sim.world.has_component::<crate::components::Stunned>(enemy),
+            "knocked down"
+        );
+
+        // step_done chains only now: the FINISH gate installs on the next
+        // tick, and the after-teach timer counts from the RELEASE.
+        run(&mut sim, &mut sc, 1);
+        assert!(sc.step_fired("next"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Finish);
+        assert!(!sc.step_fired("late"));
+
+        // The victim never gets back up under the freeze, however long the
+        // player dawdles (KNOCKDOWN_SECS is 3).
+        run(&mut sim, &mut sc, 300); // 5 s frozen
+        assert!(sim.world.has_component::<crate::components::Stunned>(enemy));
+
+        // Finish it: step over the body (the punch shoved it away) — the
+        // finisher animation runs THROUGH the freeze.
+        let ep = *sim.world.get_component::<Position>(enemy).unwrap();
+        teleport(&mut sim, Vec2::new(ep.x - 30.0, ep.y));
+        assert!(sim.player_finisher(), "finisher started on the downed bot");
+        run(&mut sim, &mut sc, 60);
+        assert!(sc.gate_view().is_none(), "finish gate released");
+        assert_eq!(sc.objective, "finished");
+        assert!(sim.world.get_component::<Health>(enemy).unwrap().is_dead());
+
+        // Unfrozen again: both timers resume from the frozen clock.
+        run(&mut sim, &mut sc, 40); // ~0.66 s
+        assert!(sc.step_fired("late"), "0.5 s after teach's gate release");
+        assert!(sc.step_fired("clock"));
+    }
+
+    #[test]
+    fn gate_skip_releases_like_a_success() {
+        let (mut sim, mut sc) = sim_for(&GT_FLOOR);
+        teleport(&mut sim, Vec2::new(650.0, 620.0));
+        run(&mut sim, &mut sc, 1);
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Punch);
+        sc.gate_skip(&mut sim.world);
+        assert!(sc.gate_view().is_none());
+        assert_eq!(sc.objective, "punched");
+        run(&mut sim, &mut sc, 1);
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Finish);
+        sc.gate_skip(&mut sim.world);
+        assert_eq!(sc.objective, "finished");
+        run(&mut sim, &mut sc, 40);
+        assert!(sc.step_fired("late"));
+    }
+
+    #[test]
+    fn checkpoint_restores_the_run_on_death() {
+        let (mut sim, mut sc) = sim_for(&GT_FLOOR);
+        teleport(&mut sim, Vec2::new(650.0, 620.0));
+        let (cp_world, cp_sc) = run(&mut sim, &mut sc, 1).expect("checkpoint requested");
+
+        // Play on: punch the bot down, then "die".
+        assert!(sim.player_fire(Vec2::new(650.0, 650.0)));
+        run(&mut sim, &mut sc, 2);
+        assert_eq!(sc.objective, "punched");
+        let player = sim.player().unwrap();
+        sim.world
+            .get_component_mut::<Health>(player)
+            .unwrap()
+            .take_damage(9999);
+        assert!(!sim.player_alive());
+
+        // Death -> restore the snapshot: the run is back at the gate.
+        sim.world = cp_world.clone();
+        sc = cp_sc.clone();
+        assert!(sim.player_alive());
+        assert_eq!(
+            crate::game::get_player_health(&sim.world),
+            100,
+            "health restored"
+        );
+        assert!(
+            sim.world
+                .get_component::<Weapon>(sim.player().unwrap())
+                .is_none(),
+            "still disarmed, as snapshotted"
+        );
+        assert!(
+            sc.step_fired("teach"),
+            "fired steps travel with the snapshot"
+        );
+        assert!(!sc.step_fired("next"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Punch);
+        assert_eq!(sc.objective, "start", "post-gate objective rolled back");
+        let enemy = sim.world.query::<Enemy>()[0];
+        assert!(
+            !sim.world.has_component::<crate::components::Stunned>(enemy),
+            "the knockdown after the snapshot rolled back"
+        );
+        let pos = sim.world.get_component::<Position>(enemy).unwrap();
+        assert_eq!((pos.x, pos.y), (650.0, 650.0), "enemy back at its spawn");
+        // The restored run plays out normally.
+        assert!(sim.player_fire(Vec2::new(650.0, 650.0)));
+        run(&mut sim, &mut sc, 2);
+        assert_eq!(sc.objective, "punched");
+    }
+
+    #[test]
+    fn enter_zone_before_disarms_once_the_other_step_fires() {
+        const B_STEPS: [StepDef; 2] = [
+            StepDef {
+                id: "blocked",
+                trigger: Trigger::EnterZone {
+                    zone: "z",
+                    before: Some("point"),
+                },
+                actions: &[Action::Objective("blocked")],
+            },
+            StepDef {
+                id: "point",
+                trigger: Trigger::Timer {
+                    seconds: 1.0,
+                    after: None,
+                },
+                actions: &[Action::Sfx("pt")],
+            },
+        ];
+        const B_FLOOR: FloorDef = FloorDef {
+            spawns: &[],
+            scenario: &B_STEPS,
+            ..T_FLOOR
+        };
+        // Entering the zone BEFORE the point fires the step...
+        let mut world = world_for(&B_FLOOR);
+        let mut sc = ScenarioState::new(&B_FLOOR);
+        move_player(&mut world, Vec2::new(650.0, 650.0));
+        sc.tick(&mut world, 0.016);
+        assert!(sc.step_fired("blocked"));
+
+        // ...but once the point has fired, the step is disarmed forever.
+        let mut world = world_for(&B_FLOOR);
+        let mut sc = ScenarioState::new(&B_FLOOR);
+        while sc.time() < 1.1 {
+            sc.tick(&mut world, 0.1);
+        }
+        assert!(sc.step_fired("point"));
+        move_player(&mut world, Vec2::new(650.0, 650.0));
+        for _ in 0..20 {
+            sc.tick(&mut world, 0.016);
+        }
+        assert!(!sc.step_fired("blocked"));
+    }
+
+    #[test]
+    fn floor_1_tutorial_plays_through_headlessly() {
+        let floor = crate::levels::floor_def(1);
+        let mut sim = Simulation::new(1);
+        let mut sc = ScenarioState::new(floor);
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("intro"));
+        assert_eq!(sim.enemies_alive(), 4, "the passive lobby crowd");
+
+        // Straight to the desk: the cover-blown conversation opens.
+        teleport(&mut sim, Vec2::new(500.0, 420.0));
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("desk"));
+        assert!(sc.dialogue_active());
+        // Click through the CORRUPTOR scene.
+        for _ in 0..30 {
+            if !sc.dialogue_active() {
+                break;
+            }
+            sc.dialogue_advance();
+            run(&mut sim, &mut sc, 5);
+        }
+        assert!(!sc.dialogue_active(), "conversation dismissed");
+
+        // 0.4 s later: disarm + checkpoint + the lone SENTINEL + PUNCH gate.
+        let cp1 = run(&mut sim, &mut sc, 40);
+        assert!(sc.step_fired("tut_punch"));
+        assert!(cp1.is_some(), "first checkpoint taken");
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Punch);
+        assert!(sim
+            .world
+            .get_component::<Weapon>(sim.player().unwrap())
+            .is_none());
+        let t_frozen = sc.time();
+        run(&mut sim, &mut sc, 30);
+        assert_eq!(sc.time(), t_frozen, "frozen on the prompt");
+
+        // PUNCH the rushing SENTINEL (spawned at 580,380).
+        teleport(&mut sim, Vec2::new(545.0, 380.0));
+        assert!(sim.player_fire(Vec2::new(580.0, 380.0)));
+        run(&mut sim, &mut sc, 2);
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Finish);
+
+        // FINISH it (pound — bare hands): step over the shoved body first.
+        let downed1 = sim
+            .world
+            .query::<Enemy>()
+            .into_iter()
+            .find(|&e| sim.world.has_component::<crate::components::Stunned>(e))
+            .expect("the punched SENTINEL is down");
+        let d1 = *sim.world.get_component::<Position>(downed1).unwrap();
+        teleport(&mut sim, Vec2::new(d1.x - 30.0, d1.y));
+        assert!(sim.player_finisher());
+        run(&mut sim, &mut sc, 70);
+        assert!(sc.step_fired("tut_bar"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Pickup);
+
+        // TAKE THE BAR (the melee pickup by the desk).
+        teleport(&mut sim, Vec2::new(420.0, 370.0));
+        assert_eq!(sim.player_pickup(), Some(WeaponType::Melee));
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("tut_strike"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Strike);
+
+        // SWING THE BAR at the second bot (600,320).
+        teleport(&mut sim, Vec2::new(560.0, 320.0));
+        assert!(sim.player_fire(Vec2::new(600.0, 320.0)));
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("tut_throw"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Throw);
+
+        // THROW THE BAR at the third bot (400,300): flies under the freeze.
+        teleport(&mut sim, Vec2::new(340.0, 300.0));
+        assert!(sim.player_throw(Vec2::new(400.0, 300.0)));
+        run(&mut sim, &mut sc, 30);
+        assert!(sc.step_fired("tut_retrieve"), "the throw connected");
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Pickup);
+
+        // GET IT BACK: the bar landed as a pickup where it struck.
+        let bar = sim
+            .world
+            .query::<crate::components::WeaponPickup>()
+            .into_iter()
+            .find(|&e| {
+                sim.world
+                    .get_component::<crate::components::WeaponPickup>(e)
+                    .is_some_and(|p| p.weapon_type == WeaponType::Melee)
+            })
+            .expect("the thrown bar is on the floor");
+        let bar_pos = *sim.world.get_component::<Position>(bar).unwrap();
+        teleport(&mut sim, Vec2::new(bar_pos.x, bar_pos.y));
+        assert_eq!(sim.player_pickup(), Some(WeaponType::Melee));
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("tut_overhead"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Finish);
+
+        // OVERHEAD on the downed bot (kept down by the frozen knockdown).
+        let downed = sim
+            .world
+            .query::<Enemy>()
+            .into_iter()
+            .find(|&e| {
+                sim.world.has_component::<crate::components::Stunned>(e)
+                    && sim
+                        .world
+                        .get_component::<Health>(e)
+                        .is_some_and(|h| h.is_alive())
+            })
+            .expect("the thrown-down bot");
+        let dp = *sim.world.get_component::<Position>(downed).unwrap();
+        teleport(&mut sim, Vec2::new(dp.x - 30.0, dp.y));
+        assert!(sim.player_finisher());
+        let cp2 = run(&mut sim, &mut sc, 80);
+        assert!(sc.gate_view().is_none(), "tutorial complete");
+        assert!(sc.step_fired("wake"));
+        let cp2 = cp2.expect("second checkpoint at the free wave");
+        assert_eq!(
+            sim.enemies_alive(),
+            7,
+            "4 alerted lobby bots + the free wave of 3"
+        );
+        assert_eq!(sc.objective, "They know. Purge reception.");
+
+        // Die in the free fight -> restore: straight back to the wave.
+        let player = sim.player().unwrap();
+        sim.world
+            .get_component_mut::<Health>(player)
+            .unwrap()
+            .take_damage(9999);
+        assert!(!sim.player_alive());
+        sim.world = cp2.0.clone();
+        sc = cp2.1.clone();
+        assert!(sim.player_alive());
+        assert!(sc.step_fired("wake"));
+        assert_eq!(sim.enemies_alive(), 7, "the wave is inside the snapshot");
+        assert_eq!(
+            crate::game::get_player_weapon(&sim.world),
+            Some(WeaponType::Melee),
+            "the bar came back with the snapshot"
+        );
+
+        // Clear the floor: the lift opens.
+        crate::game::purge_all_enemies(&mut sim.world);
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("clear"));
+        assert!(exit_open(&sim.world, "lift"));
     }
 
     #[test]

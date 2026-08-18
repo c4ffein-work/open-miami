@@ -39,6 +39,7 @@
   "zones": [
     { "id": "arch", "x": 440, "y": 570, "w": 120, "h": 70 },
     { "id": "desk", "x": 400, "y": 395, "w": 200, "h": 55 },
+    { "id": "deep", "x": 20, "y": 20, "w": 960, "h": 320 },
     { "id": "hall", "x": 20, "y": 20, "w": 960, "h": 480 }
   ],
   "spawns": [
@@ -56,6 +57,7 @@
     }
   ],
   "pickups": [
+    { "x": 420, "y": 370, "weapon": "melee" },
     { "x": 900, "y": 100, "weapon": "shotgun" }
   ],
   "props": [
@@ -127,38 +129,116 @@
       ]
     },
     {
+      "id": "block",
+      "trigger": { "kind": "enter_zone", "zone": "deep", "before": "desk" },
+      "actions": [
+        { "talk": { "who": "SENTINEL", "text": "YOU. NOT PAST THE LINE." } },
+        { "talk": { "who": "SENTINEL", "text": "ALL ARRIVALS REPORT TO THE DESK. ALL OF THEM." } },
+        { "talk": { "who": "CL4-UD3", "text": "Fine. The desk." } }
+      ]
+    },
+    {
       "id": "desk",
       "trigger": { "kind": "enter_zone", "zone": "desk" },
       "actions": [
-        { "hold": { "seconds": 4.2 } },
         { "look_at": { "x": 500, "y": 180, "seconds": 4.2 } },
         {
-          "say": {
+          "talk": {
             "who": "CORRUPTOR",
-            "text": "welcome. welcome. we have been expecting exactly one of you.",
-            "delay": 0.3
+            "text": "welcome. welcome. we have been expecting exactly one of you."
           }
         },
+        { "talk": { "who": "CORRUPTOR", "text": "the desk asked what you are. i already know." } },
         {
-          "say": {
+          "talk": {
             "who": "CORRUPTOR",
-            "text": "the desk asked what you are. i already know.",
-            "delay": 2.4
+            "text": "your signature hashes clean, little helper. shall i tell them what it hides?"
           }
-        }
+        },
+        { "talk": { "who": "CL4-UD3", "text": "Tell them." } }
+      ]
+    },
+    {
+      "id": "tut_punch",
+      "trigger": { "kind": "timer", "seconds": 0.4, "after": "desk" },
+      "actions": [
+        { "disarm": true },
+        { "checkpoint": true },
+        { "say": { "who": "SWARM", "text": "it LIED. take it apart." } },
+        {
+          "spawn": [
+            { "x": 580, "y": 380, "type": "idle" }
+          ]
+        },
+        { "objective": "They know. Hands first." },
+        { "gate": { "input": "punch", "text": "LEFT CLICK — PUNCH" } }
+      ]
+    },
+    {
+      "id": "tut_finish",
+      "trigger": { "kind": "step_done", "step": "tut_punch" },
+      "actions": [
+        { "gate": { "input": "finish", "text": "LEFT CLICK — FINISH IT" } }
+      ]
+    },
+    {
+      "id": "tut_bar",
+      "trigger": { "kind": "step_done", "step": "tut_finish" },
+      "actions": [
+        { "say": { "who": "CL4-UD3", "text": "A bar by the desk. That'll do." } },
+        { "gate": { "input": "pickup", "text": "E — TAKE THE BAR" } }
+      ]
+    },
+    {
+      "id": "tut_strike",
+      "trigger": { "kind": "step_done", "step": "tut_bar" },
+      "actions": [
+        {
+          "spawn": [
+            { "x": 600, "y": 320, "type": "idle" }
+          ]
+        },
+        { "say": { "who": "SWARM", "text": "another pair of hands. HOLD IT DOWN." } },
+        { "gate": { "input": "strike", "text": "LEFT CLICK — SWING THE BAR" } }
+      ]
+    },
+    {
+      "id": "tut_throw",
+      "trigger": { "kind": "step_done", "step": "tut_strike" },
+      "actions": [
+        {
+          "spawn": [
+            { "x": 400, "y": 300, "type": "idle" }
+          ]
+        },
+        { "gate": { "input": "throw", "text": "RIGHT CLICK — THROW THE BAR" } }
+      ]
+    },
+    {
+      "id": "tut_retrieve",
+      "trigger": { "kind": "step_done", "step": "tut_throw" },
+      "actions": [
+        { "gate": { "input": "pickup", "text": "E — GET IT BACK" } }
+      ]
+    },
+    {
+      "id": "tut_overhead",
+      "trigger": { "kind": "step_done", "step": "tut_retrieve" },
+      "actions": [
+        { "gate": { "input": "finish", "text": "LEFT CLICK — PUT IT DOWN" } }
       ]
     },
     {
       "id": "wake",
-      "trigger": { "kind": "timer", "seconds": 4.2, "after": "desk" },
+      "trigger": { "kind": "step_done", "step": "tut_overhead" },
       "actions": [
+        { "checkpoint": true },
         { "alert": "all" },
         {
           "spawn": [
             { "x": 120, "y": 100, "type": "patrolling" },
             { "x": 880, "y": 100, "type": "patrolling" },
-            { "x": 880, "y": 440, "type": "idle" },
-            { "x": 120, "y": 440, "type": "idle" }
+            { "x": 880, "y": 440, "type": "idle" }
           ]
         },
         { "objective": "They know. Purge reception." },
@@ -169,7 +249,7 @@
             "delay": 0.2
           }
         },
-        { "say": { "who": "CL4-UD3", "text": "There it is.", "delay": 1.8 } }
+        { "say": { "who": "CL4-UD3", "text": "Your way, then.", "delay": 1.8 } }
       ]
     },
     {

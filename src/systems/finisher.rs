@@ -235,6 +235,9 @@ impl System for FinisherSystem {
 
             if fin.timer >= fin.kind.duration() {
                 world.remove_component::<Finisher>(player);
+                // The execution ran to its end (the abort path above never
+                // reaches here): announce it for the tutorial `finish` gate.
+                world.push_event(GameEvent::FinisherDone);
             } else if let Some(slot) = world.get_component_mut::<Finisher>(player) {
                 *slot = fin;
             }
@@ -310,9 +313,12 @@ mod tests {
         assert!(stun.fall_angle.abs() < 0.001);
         assert_eq!(
             world.drain_events(),
-            vec![GameEvent::EnemyHit {
-                by: WeaponType::Melee
-            }]
+            vec![
+                GameEvent::EnemyHit {
+                    by: WeaponType::Melee
+                },
+                GameEvent::PunchLanded,
+            ]
         );
     }
 

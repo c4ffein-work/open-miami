@@ -1,10 +1,13 @@
+use super::component::AnyComponent;
 use super::{Component, Entity};
 use crate::components::GameEvent;
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::collections::HashMap;
 
-/// ComponentStorage stores all components of a specific type
-type ComponentStorage = HashMap<Entity, Box<dyn Any>>;
+/// ComponentStorage stores all components of a specific type. The boxes are
+/// clonable ([`AnyComponent`]) so the whole world can be snapshotted (the
+/// `checkpoint` scenario action).
+type ComponentStorage = HashMap<Entity, Box<dyn AnyComponent>>;
 
 /// Wall obstacle represented as a rectangle
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,7 +29,12 @@ impl Wall {
     }
 }
 
-/// World manages all entities and their components
+/// World manages all entities and their components.
+///
+/// `Clone` produces a full deep snapshot (entities, components, walls, RNG
+/// state, pending events) — the `checkpoint` scenario action stores one and
+/// death restores it.
+#[derive(Clone)]
 pub struct World {
     next_entity_id: u64,
     // Map from ComponentId to storage for that component type
@@ -124,8 +132,9 @@ impl World {
         entity
     }
 
-    /// Add a component to an entity
-    pub fn add_component<T: Component>(&mut self, entity: Entity, component: T) {
+    /// Add a component to an entity. Components must be `Clone` so the world
+    /// can be snapshotted (see the struct docs).
+    pub fn add_component<T: Component + Clone>(&mut self, entity: Entity, component: T) {
         let type_id = TypeId::of::<T>();
         let storage = self.components.entry(type_id).or_default();
         storage.insert(entity, Box::new(component));
@@ -134,19 +143,20 @@ impl World {
     /// Get an immutable reference to a component
     pub fn get_component<T: Component>(&self, entity: Entity) -> Option<&T> {
         let type_id = TypeId::of::<T>();
-        self.components
-            .get(&type_id)?
-            .get(&entity)?
+        AnyComponent::as_any(self.components.get(&type_id)?.get(&entity)?.as_ref())
             .downcast_ref::<T>()
     }
 
     /// Get a mutable reference to a component
     pub fn get_component_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
         let type_id = TypeId::of::<T>();
-        self.components
-            .get_mut(&type_id)?
-            .get_mut(&entity)?
-            .downcast_mut::<T>()
+        AnyComponent::as_any_mut(
+            self.components
+                .get_mut(&type_id)?
+                .get_mut(&entity)?
+                .as_mut(),
+        )
+        .downcast_mut::<T>()
     }
 
     /// Check if an entity has a component
@@ -164,6 +174,7 @@ impl World {
         self.components
             .get_mut(&type_id)?
             .remove(&entity)?
+            .into_any()
             .downcast::<T>()
             .ok()
             .map(|boxed| *boxed)
@@ -464,6 +475,39 @@ mod tests {
         assert_eq!(world.pending_events().len(), MAX_PENDING_EVENTS);
         world.clear();
         assert!(world.pending_events().is_empty());
+    }
+
+    #[test]
+    fn test_clone_is_a_deep_snapshot() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.add_component(e, Position { x: 100.0, y: 200.0 });
+        world.add_wall(0.0, 0.0, 50.0, 50.0);
+        world.push_event(GameEvent::Pickup);
+        world.next_random();
+
+        let snapshot = world.clone();
+
+        // Mutate the original: the snapshot must not follow.
+        world.get_component_mut::<Position>(e).unwrap().x = 999.0;
+        let e2 = world.spawn();
+        world.add_component(e2, Velocity { x: 1.0, y: 1.0 });
+        world.despawn(e);
+
+        assert_eq!(snapshot.entities().len(), 1);
+        let pos = snapshot.get_component::<Position>(e).unwrap();
+        assert_eq!(pos.x, 100.0);
+        assert!(snapshot.query::<Velocity>().is_empty());
+        assert_eq!(snapshot.walls().len(), 1);
+        assert_eq!(snapshot.pending_events(), &[GameEvent::Pickup]);
+        // RNG state travels with the snapshot: both sides produce the same
+        // next number.
+        let mut a = snapshot.clone();
+        let mut b = snapshot.clone();
+        assert_eq!(a.next_random(), b.next_random());
+        // Entity ids keep counting from where the snapshot was taken.
+        let mut c = snapshot.clone();
+        assert_eq!(c.spawn().id(), e2.id());
     }
 
     #[test]

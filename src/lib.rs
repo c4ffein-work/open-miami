@@ -71,7 +71,8 @@ mod wasm_entry {
     };
     use crate::render::*;
     use crate::render_comms::{
-        render_comms, render_elevators, render_hold_caption, render_objective, render_zones_debug,
+        render_comms, render_elevators, render_gate_prompt, render_hold_caption, render_objective,
+        render_zones_debug,
     };
     use crate::render_dialogue::render_dialogue;
     use crate::scenario::{ScenarioState, SURFACE_EXIT};
@@ -555,6 +556,15 @@ mod wasm_entry {
         over
     }
 
+    /// A mid-floor `checkpoint` snapshot: the full world (entities,
+    /// components, walls, RNG) plus the scenario state (fired steps, opened
+    /// exits, comms, objective) at the moment the action ran. Restored on
+    /// death instead of a full floor restart.
+    struct Checkpoint {
+        world: World,
+        scenario: ScenarioState,
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum MenuOption {
         Play,
@@ -588,6 +598,9 @@ mod wasm_entry {
         elevator_system: ElevatorSystem,
         /// The running floor scenario (steps, comms feed, objective).
         scenario: Option<ScenarioState>,
+        /// The latest mid-floor `checkpoint` snapshot: death restores it
+        /// instead of restarting the floor. Cleared on every floor load.
+        checkpoint: Option<Checkpoint>,
         /// Set once the player has extracted: the destination floor id
         /// (`SURFACE_EXIT` = surface). The completion card plays, then the
         /// floor loads.
@@ -673,6 +686,7 @@ mod wasm_entry {
                 boss_system: BossSystem,
                 elevator_system: ElevatorSystem,
                 scenario: None,
+                checkpoint: None,
                 extracting: None,
                 level: Level::new(),
                 camera: Camera::new(),
@@ -746,16 +760,35 @@ mod wasm_entry {
             self.world.clear();
             initialize_game(&mut self.world, self.selected_level);
             self.scenario = Some(ScenarioState::new(floor_def(self.selected_level)));
+            self.checkpoint = None;
             self.level
                 .set_surface(floor_def(self.selected_level).surface);
+            self.reset_run_state();
+        }
+
+        /// Restore the latest mid-floor `checkpoint` (same floor): the world
+        /// and scenario come back exactly as snapshotted. Returns whether a
+        /// checkpoint existed.
+        fn restore_checkpoint(&mut self) -> bool {
+            let Some(cp) = &self.checkpoint else {
+                return false;
+            };
+            self.world = cp.world.clone();
+            self.scenario = Some(cp.scenario.clone());
+            self.reset_run_state();
+            true
+        }
+
+        /// Shared tail of `load_floor` / `restore_checkpoint`: camera, run
+        /// flags, and the previous-frame sound-effect trackers (seeded from
+        /// the fresh world so the first frame fires no spurious sounds).
+        fn reset_run_state(&mut self) {
             self.camera.set_cinematic(None);
             self.extracting = None;
             self.outro = None;
             self.death_time = 0.0;
             self.level_complete_time = 0.0;
-
-            // Seed the sound-effect trackers from the fresh world so the first
-            // frame does not fire spurious sounds.
+            self.kill_flash = 0.0;
             self.prev_player_alive = is_player_alive(&self.world);
             self.mg_sfx_cooldown = 0.0;
             self.prev_enemies_alive = count_alive_enemies(&self.world);
@@ -2107,39 +2140,69 @@ mod wasm_entry {
             // fire / throw / pickup, until the animation completes.
             let finishing = FinisherSystem::active(&self.world);
 
+            // The active tutorial GATE, if any: the world freezes (only the
+            // player-driven systems run, below) and every input except the
+            // gated one is masked. Aim and movement stay live so the player
+            // can close the distance to the frozen target.
+            let gate = self.scenario.as_ref().and_then(|sc| sc.gate_view());
+
             // Handle input (only if the player is alive and hasn't left in
             // the car yet)
-            if player_alive && self.extracting.is_none() && held && !finishing {
-                InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
-                stop_player(&mut self.world);
-            }
             if player_alive && self.extracting.is_none() && finishing {
                 stop_player(&mut self.world);
             }
-            if player_alive && self.extracting.is_none() && !held && !finishing {
-                InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
-                InputSystem::update_player_movement(&mut self.world);
-                // A fresh click over a DOWNED enemy in reach executes a
-                // FINISHER instead of a normal attack; otherwise the trigger
-                // behaves exactly as before.
-                let finisher_started = input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
-                    && FinisherSystem::try_start(&mut self.world);
-                if !finisher_started {
-                    InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
-                }
+            if player_alive && self.extracting.is_none() && !finishing {
+                if let Some(g) = gate {
+                    InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
+                    InputSystem::update_player_movement(&mut self.world);
+                    if g.input.allows_finisher()
+                        && input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
+                    {
+                        FinisherSystem::try_start(&mut self.world);
+                    }
+                    if g.input.allows_primary(get_player_weapon(&self.world)) {
+                        InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
+                    }
+                    if g.input.allows_pickup() && input::is_key_pressed("e") {
+                        PickupSystem::swap_for_player(&mut self.world);
+                    }
+                    if g.input.allows_throw()
+                        && input::is_mouse_button_pressed(input::mouse_buttons::RIGHT)
+                    {
+                        if let Some(player_pos) = get_player_position(&self.world) {
+                            let aim = mouse_world_pos - player_pos;
+                            ThrownWeaponSystem::throw_from_player(&mut self.world, aim);
+                        }
+                    }
+                } else if held {
+                    InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
+                    stop_player(&mut self.world);
+                } else {
+                    InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
+                    InputSystem::update_player_movement(&mut self.world);
+                    // A fresh click over a DOWNED enemy in reach executes a
+                    // FINISHER instead of a normal attack; otherwise the trigger
+                    // behaves exactly as before.
+                    let finisher_started =
+                        input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
+                            && FinisherSystem::try_start(&mut self.world);
+                    if !finisher_started {
+                        InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
+                    }
 
-                // Press E to pick up / swap the weapon the player is standing on
-                // (the Pickup event it emits plays the sound below).
-                if input::is_key_pressed("e") {
-                    PickupSystem::swap_for_player(&mut self.world);
-                }
+                    // Press E to pick up / swap the weapon the player is standing on
+                    // (the Pickup event it emits plays the sound below).
+                    if input::is_key_pressed("e") {
+                        PickupSystem::swap_for_player(&mut self.world);
+                    }
 
-                // Right-click to throw the held weapon toward the cursor (the
-                // Throw event it emits plays the sound below).
-                if input::is_mouse_button_pressed(input::mouse_buttons::RIGHT) {
-                    if let Some(player_pos) = get_player_position(&self.world) {
-                        let aim = mouse_world_pos - player_pos;
-                        ThrownWeaponSystem::throw_from_player(&mut self.world, aim);
+                    // Right-click to throw the held weapon toward the cursor (the
+                    // Throw event it emits plays the sound below).
+                    if input::is_mouse_button_pressed(input::mouse_buttons::RIGHT) {
+                        if let Some(player_pos) = get_player_position(&self.world) {
+                            let aim = mouse_world_pos - player_pos;
+                            ThrownWeaponSystem::throw_from_player(&mut self.world, aim);
+                        }
                     }
                 }
             }
@@ -2158,25 +2221,40 @@ mod wasm_entry {
             if self.debug_enabled && self.show_infos && input::is_key_pressed("b") {
                 crate::systems::boss::crack_boss_masks(&mut self.world);
             }
+            // Debug: G skips the active tutorial gate (releases it as if the
+            // gated input had succeeded) so a gate can never softlock.
+            if self.debug_enabled && self.show_infos && input::is_key_pressed("g") {
+                if let Some(sc) = self.scenario.as_mut() {
+                    sc.gate_skip(&mut self.world);
+                }
+            }
 
-            // Run game systems (the finisher goes first so it can keep its
-            // victim pinned before the stun tick).
-            self.finisher_system.run(&mut self.world, dt);
-            self.stun_system.run(&mut self.world, dt);
-            self.weapon_system.run(&mut self.world, dt);
-            self.ai_system.run(&mut self.world, dt);
-            self.boss_system.run(&mut self.world, dt);
-            self.movement_system.run(&mut self.world, dt);
-            self.combat_system.run(&mut self.world, dt);
-            self.bullet_system.run(&mut self.world, dt);
-            self.thrown_system.run(&mut self.world, dt);
-            self.projectile_system.run(&mut self.world, dt);
-            // Drop weapons from downed enemies (player collects via the E key)
-            self.pickup_system.run(&mut self.world, dt);
+            if gate.is_some() {
+                // TUTORIAL FREEZE: only the player-driven systems advance
+                // (same list as the headless sim — see sim::gate_frozen_step).
+                crate::sim::gate_frozen_step(&mut self.world, dt);
+            } else {
+                // Run game systems (the finisher goes first so it can keep its
+                // victim pinned before the stun tick).
+                self.finisher_system.run(&mut self.world, dt);
+                self.stun_system.run(&mut self.world, dt);
+                self.weapon_system.run(&mut self.world, dt);
+                self.ai_system.run(&mut self.world, dt);
+                self.boss_system.run(&mut self.world, dt);
+                self.movement_system.run(&mut self.world, dt);
+                self.combat_system.run(&mut self.world, dt);
+                self.bullet_system.run(&mut self.world, dt);
+                self.thrown_system.run(&mut self.world, dt);
+                self.projectile_system.run(&mut self.world, dt);
+                // Drop weapons from downed enemies (player collects via the E key)
+                self.pickup_system.run(&mut self.world, dt);
+            }
 
             // Scenario (triggers -> dialogue / waves / doors / objective) and
             // elevator extraction. Both keep running while the completion
-            // card plays so the doors stay lit.
+            // card plays so the doors stay lit. (While a gate is active the
+            // scenario tick is a no-op — the clock is frozen — and the
+            // elevators hold too.)
             if let Some(sc) = self.scenario.as_mut() {
                 sc.tick(&mut self.world, dt);
                 for sfx in sc.drain_sfx() {
@@ -2191,7 +2269,9 @@ mod wasm_entry {
                     }
                 }
             }
-            self.elevator_system.run(&mut self.world, dt);
+            if gate.is_none() {
+                self.elevator_system.run(&mut self.world, dt);
+            }
             if self.extracting.is_none() && player_alive {
                 if let Some(to) = ElevatorSystem::extraction(&self.world) {
                     self.extracting = Some(to);
@@ -2331,7 +2411,21 @@ mod wasm_entry {
                 crate::components::WeaponType::Shotgun => 2,
                 crate::components::WeaponType::Melee => 3,
             };
-            for event in self.world.drain_events() {
+            let events = self.world.drain_events();
+            // Bridge the frame's events into the scenario: a success on the
+            // gated input releases the active tutorial gate (running the rest
+            // of its step), and a `checkpoint` action that ran this frame is
+            // snapshotted here, after the whole tick settled.
+            if let Some(sc) = self.scenario.as_mut() {
+                sc.gate_notify(&mut self.world, &events);
+                if sc.take_checkpoint_request() {
+                    self.checkpoint = Some(Checkpoint {
+                        world: self.world.clone(),
+                        scenario: sc.clone(),
+                    });
+                }
+            }
+            for event in events {
                 use crate::components::{GameEvent, WeaponType};
                 match event {
                     GameEvent::PlayerFired(t) => {
@@ -2397,6 +2491,9 @@ mod wasm_entry {
                     GameEvent::DryFire => {
                         // TODO: no dry-fire click in the audio engine yet.
                     }
+                    // Gate signals: their companion events above already
+                    // carry the sounds.
+                    GameEvent::PunchLanded | GameEvent::StrikeLanded | GameEvent::FinisherDone => {}
                 }
             }
             if boss_enraged && !self.prev_boss_enraged {
@@ -2455,6 +2552,13 @@ mod wasm_entry {
                         render_hold_caption(graphics, text, accent, sc.time());
                     }
                 }
+                // The tutorial gate prompt ("LEFT CLICK — PUNCH"): a centred
+                // lower-third caption while the world is frozen on a gate.
+                if let Some(g) = sc.gate_view() {
+                    if player_alive && !level_complete {
+                        render_gate_prompt(graphics, &g, accent, self.last_time as f32 / 1000.0);
+                    }
+                }
                 // The visual-novel dialogue panel (`talk` conversations),
                 // over everything else on the HUD layer.
                 if let Some(view) = sc.dialogue_view() {
@@ -2505,9 +2609,14 @@ mod wasm_entry {
                 }
             }
 
-            // Handle restart
+            // Handle restart: death goes back to the latest `checkpoint`
+            // snapshot when the floor set one, otherwise the floor restarts
+            // from scratch (the death feedback — flash, sfx, WASTED card —
+            // already played; R is the resume).
             if !player_alive && input::is_key_down("r") {
-                self.load_floor();
+                if !self.restore_checkpoint() {
+                    self.load_floor();
+                }
                 // Restart the music (it was stopped on death).
                 self.audio.start_music();
             }
