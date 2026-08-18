@@ -139,7 +139,9 @@ mod wasm_entry {
     const ROBOT_POSE_IDLE: u32 = 0;
     const ROBOT_POSE_WALK: u32 = 1;
     const ROBOT_POSE_SHOOT: u32 = 2;
+    #[allow(dead_code)]
     const ROBOT_POSE_HIT: u32 = 3;
+    const ROBOT_POSE_DOWNED: u32 = 4;
 
     /// Map a held weapon to the robot-core weapon model index
     /// (0 fist, 1 pistol, 2 machinegun, 3 shotgun).
@@ -153,9 +155,10 @@ mod wasm_entry {
         }
     }
 
-    /// The hit-flinch cycle length in robot-core's posePlan (seconds). Used to
-    /// park dead bots on a settled late frame instead of looping the flinch.
-    const ROBOT_HIT_PERIOD: f32 = 1.3;
+    /// Downed-pose time (seconds) a body with no live knockdown clock is
+    /// parked at: past the fall transition and the landing wobble, so corpses
+    /// lie still, fully settled, from the first frame.
+    const ROBOT_DOWNED_SETTLED: f32 = 2.0;
 
     /// Draw the player and rogue enemies as baked 3D sprites on top of the
     /// primitive draw. Must be called while the camera transform is applied so
@@ -172,15 +175,13 @@ mod wasm_entry {
     fn draw_robot_entities(world: &World, graphics: &Graphics, now: f32) {
         use crate::components::{AIState, EnemyType};
         use crate::components::{
-            Boss, Enemy, Health, Player, Position, Rotation, Stunned, Velocity, Weapon, AI,
+            Boss, Enemy, Finisher, FinisherKind, Health, Player, Position, Rotation, Stunned,
+            Velocity, Weapon, AI,
         };
-        use crate::systems::thrown::STUN_DURATION;
 
-        // Determines a pose index from motion / combat / knockdown state.
-        fn pose_for(speed: f32, prone: bool, attacking: bool) -> u32 {
-            if prone {
-                ROBOT_POSE_HIT
-            } else if attacking {
+        // Determines a standing pose index from motion / combat state.
+        fn pose_for(speed: f32, attacking: bool) -> u32 {
+            if attacking {
                 ROBOT_POSE_SHOOT
             } else if speed > 6.0 {
                 ROBOT_POSE_WALK
@@ -209,26 +210,38 @@ mod wasm_entry {
                 EnemyType::Patrolling => 3, // HUNTER - magenta
             };
             let stunned = world.get_component::<Stunned>(entity);
+            // Dead OR knocked down: sprawled flat in the DOWNED pose.
             let prone = health.is_dead() || stunned.is_some();
             let speed = world
                 .get_component::<Velocity>(entity)
                 .map(|v| (v.x * v.x + v.y * v.y).sqrt())
                 .unwrap_or(0.0);
             let attacking = ai.state == AIState::SurePlayerSeen && ai.attack_timer > 0.0;
-            let pose_idx = pose_for(speed, prone, attacking);
+            let pose_idx = if prone {
+                ROBOT_POSE_DOWNED
+            } else {
+                pose_for(speed, attacking)
+            };
             let weapon_idx =
                 robot_weapon_idx(world.get_component::<Weapon>(entity).map(|w| w.weapon_type));
             // De-sync the squad: each bot's animation clock starts at a
             // different phase derived from its entity id.
             let phase = (entity.0 % 97) as f32 * 0.173;
-            let time = if health.is_dead() {
-                // Park dead bots on a settled late flinch frame (the flinch
-                // envelope has fully decayed by then) instead of looping it.
-                ROBOT_HIT_PERIOD * 0.9
-            } else if let Some(stun) = stunned {
-                // Time since the knockdown landed, so the flinch spike plays
-                // exactly once at impact and settles while the stun runs out.
-                (STUN_DURATION - stun.timer).clamp(0.0, ROBOT_HIT_PERIOD * 0.9)
+            // Downed bodies face the blow's origin: the pose's backward topple
+            // then lays them out along `fall_angle` — away from the blow. A
+            // corpse without a live knockdown clock keeps its `Rotation` (the
+            // stun system wrote the matching facing there when the stun ended).
+            let angle = match stunned {
+                Some(stun) => stun.fall_angle + std::f32::consts::PI,
+                None => rot.angle,
+            };
+            let time = if let Some(stun) = stunned {
+                // Seconds since the knockdown landed: plays the fall
+                // transition once, then the body lies still.
+                stun.age()
+            } else if health.is_dead() {
+                // Dead with no knockdown clock: parked fully settled.
+                ROBOT_DOWNED_SETTLED
             } else {
                 now + phase
             };
@@ -237,7 +250,7 @@ mod wasm_entry {
                 pose_idx,
                 weapon_idx,
                 Vec2::new(pos.x, pos.y),
-                rot.angle + ROBOT_ANGLE_OFFSET,
+                angle + ROBOT_ANGLE_OFFSET,
                 ROBOT_TILE_PX,
                 time,
             );
@@ -249,7 +262,7 @@ mod wasm_entry {
             let health = world.get_component::<Health>(player);
             if let (Some(pos), Some(health)) = (pos, health) {
                 if !health.is_dead() {
-                    let angle = world
+                    let mut angle = world
                         .get_component::<Rotation>(player)
                         .map(|r| r.angle)
                         .unwrap_or(0.0);
@@ -259,7 +272,23 @@ mod wasm_entry {
                         .unwrap_or(0.0);
                     let firing =
                         crate::input::is_mouse_button_down(crate::input::mouse_buttons::LEFT);
-                    let pose_idx = pose_for(speed, false, firing);
+                    let mut pose_idx = pose_for(speed, firing);
+                    let mut draw_pos = Vec2::new(pos.x, pos.y);
+                    // Mid-finisher: locked over the victim in the strike pose,
+                    // lunging into each blow (one surge for the bar / the
+                    // point-blank shot, a pulse per pound when unarmed).
+                    if let Some(fin) = world.get_component::<Finisher>(player) {
+                        let progress = (fin.timer / fin.kind.duration()).clamp(0.0, 1.0);
+                        let lunge = match fin.kind {
+                            FinisherKind::Pound => {
+                                8.0 * (progress * 3.0 * std::f32::consts::PI).sin().abs()
+                            }
+                            _ => 10.0 * (progress * std::f32::consts::PI).sin(),
+                        };
+                        pose_idx = ROBOT_POSE_SHOOT;
+                        angle = fin.dir_y.atan2(fin.dir_x);
+                        draw_pos = Vec2::new(pos.x + fin.dir_x * lunge, pos.y + fin.dir_y * lunge);
+                    }
                     let weapon_idx = robot_weapon_idx(
                         world.get_component::<Weapon>(player).map(|w| w.weapon_type),
                     );
@@ -267,7 +296,7 @@ mod wasm_entry {
                         ROBOT_COLOR_CORAL,
                         pose_idx,
                         weapon_idx,
-                        Vec2::new(pos.x, pos.y),
+                        draw_pos,
                         angle + ROBOT_ANGLE_OFFSET,
                         ROBOT_TILE_PX,
                         now,
@@ -553,6 +582,7 @@ mod wasm_entry {
         projectile_system: ProjectileTrailSystem,
         pickup_system: PickupSystem,
         thrown_system: ThrownWeaponSystem,
+        finisher_system: FinisherSystem,
         stun_system: StunSystem,
         boss_system: BossSystem,
         elevator_system: ElevatorSystem,
@@ -638,6 +668,7 @@ mod wasm_entry {
                 projectile_system: ProjectileTrailSystem,
                 pickup_system: PickupSystem,
                 thrown_system: ThrownWeaponSystem,
+                finisher_system: FinisherSystem,
                 stun_system: StunSystem,
                 boss_system: BossSystem,
                 elevator_system: ElevatorSystem,
@@ -2071,16 +2102,31 @@ mod wasm_entry {
                 }
             }
 
+            // A running finisher locks the player out of everything: no
+            // movement, no aiming (they stay turned onto the victim), no
+            // fire / throw / pickup, until the animation completes.
+            let finishing = FinisherSystem::active(&self.world);
+
             // Handle input (only if the player is alive and hasn't left in
             // the car yet)
-            if player_alive && self.extracting.is_none() && held {
+            if player_alive && self.extracting.is_none() && held && !finishing {
                 InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
                 stop_player(&mut self.world);
             }
-            if player_alive && self.extracting.is_none() && !held {
+            if player_alive && self.extracting.is_none() && finishing {
+                stop_player(&mut self.world);
+            }
+            if player_alive && self.extracting.is_none() && !held && !finishing {
                 InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
                 InputSystem::update_player_movement(&mut self.world);
-                InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
+                // A fresh click over a DOWNED enemy in reach executes a
+                // FINISHER instead of a normal attack; otherwise the trigger
+                // behaves exactly as before.
+                let finisher_started = input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
+                    && FinisherSystem::try_start(&mut self.world);
+                if !finisher_started {
+                    InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
+                }
 
                 // Press E to pick up / swap the weapon the player is standing on
                 // (the Pickup event it emits plays the sound below).
@@ -2113,7 +2159,9 @@ mod wasm_entry {
                 crate::systems::boss::crack_boss_masks(&mut self.world);
             }
 
-            // Run game systems
+            // Run game systems (the finisher goes first so it can keep its
+            // victim pinned before the stun tick).
+            self.finisher_system.run(&mut self.world, dt);
             self.stun_system.run(&mut self.world, dt);
             self.weapon_system.run(&mut self.world, dt);
             self.ai_system.run(&mut self.world, dt);

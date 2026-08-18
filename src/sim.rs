@@ -28,13 +28,14 @@ use crate::game::{
 use crate::math::Vec2;
 use crate::pathfinding::NavigationGrid;
 use crate::systems::{
-    AISystem, BossSystem, BulletSystem, CombatSystem, MovementSystem, PickupSystem,
+    AISystem, BossSystem, BulletSystem, CombatSystem, FinisherSystem, MovementSystem, PickupSystem,
     ProjectileTrailSystem, StunSystem, ThrownWeaponSystem, WeaponUpdateSystem,
 };
 
 /// A headless instance of the full game engine.
 pub struct Simulation {
     pub world: World,
+    finisher: FinisherSystem,
     stun: StunSystem,
     weapon: WeaponUpdateSystem,
     ai: AISystem,
@@ -223,6 +224,7 @@ impl Simulation {
     pub fn from_world(world: World) -> Self {
         Simulation {
             world,
+            finisher: FinisherSystem,
             stun: StunSystem,
             weapon: WeaponUpdateSystem,
             ai: AISystem::default(),
@@ -243,6 +245,9 @@ impl Simulation {
     /// Advance the whole simulation by `dt` seconds — one engine tick, running
     /// every gameplay system in the same order as the browser loop.
     pub fn step(&mut self, dt: f32) {
+        // The finisher runs before the stun tick so it can keep its victim
+        // pinned (same order as the browser loop).
+        self.finisher.run(&mut self.world, dt);
         self.stun.run(&mut self.world, dt);
         self.weapon.run(&mut self.world, dt);
         self.ai.run(&mut self.world, dt);
@@ -296,6 +301,12 @@ impl Simulation {
     /// Pick up / swap the weapon under the player (as the E key would).
     pub fn player_pickup(&mut self) -> Option<WeaponType> {
         PickupSystem::swap_for_player(&mut self.world)
+    }
+
+    /// Try to start a finisher on a downed enemy in reach (as the left click
+    /// does in the browser before it falls back to a normal attack).
+    pub fn player_finisher(&mut self) -> bool {
+        FinisherSystem::try_start(&mut self.world)
     }
 
     // --- Queries ---

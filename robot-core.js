@@ -46,7 +46,7 @@ export const PALETTES = {
   violet:  {body:[0.55,0.35,0.90], accent:[0.75,0.60,1.0], trim:[0.18,0.12,0.34]},
 };
 
-export const POSES = ["idle", "walk", "shoot", "hit"];
+export const POSES = ["idle", "walk", "shoot", "hit", "downed"];
 
 /* ---------- weapons ----------
    Box-built weapon models in the same style as the robot. Each model is a small
@@ -340,6 +340,25 @@ function posePlan(pose, time){
       P.legA  = -0.25*env; P.legB = 0.18*env;
       P.armRaise = 0.9*env;                 // arms fling up defensively
       P.armLp = 0.2; P.armRp = 0.2;
+      break;
+    }
+
+    case "downed": {
+      // knocked flat on its back, limbs askew. `time` is seconds since the
+      // knockdown landed: the first ~0.25s eases from upright to sprawled
+      // (the fall), with a decaying landing wobble, then the body lies still.
+      // The game sets the facing so the body topples AWAY from the blow
+      // (the lean rotates it backward, i.e. opposite the sprite's facing).
+      const k = Math.min(time/0.25, 1);
+      const e = k*k*(3-2*k);                // smoothstep fall
+      const s = time > 0.25
+        ? Math.sin((time-0.25)*9.0)*Math.exp(-(time-0.25)*3.0) : 0;
+      P.lean  = 1.42*e + 0.10*s;            // topple flat onto its back
+      P.zback = 0.35*e;                     // slide with the blow's momentum
+      P.bob   = -0.06*e;
+      P.legA  = 0.55*e; P.legB = -0.38*e;   // legs splayed
+      P.armLp = -0.45*e; P.armRp = 0.35*e;  // arms askew...
+      P.armRaise = 1.25*e;                  // ...flung up past the head
       break;
     }
 

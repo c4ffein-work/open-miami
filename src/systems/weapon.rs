@@ -1,7 +1,7 @@
-use crate::components::Weapon;
+use crate::components::{Fists, Weapon};
 use crate::ecs::{System, World};
 
-/// System that updates weapon timers
+/// System that updates weapon timers (and the bare-fist punch cooldown).
 pub struct WeaponUpdateSystem;
 
 impl System for WeaponUpdateSystem {
@@ -11,6 +11,15 @@ impl System for WeaponUpdateSystem {
         for entity in entities {
             if let Some(weapon) = world.get_component_mut::<Weapon>(entity) {
                 weapon.update(dt);
+            }
+        }
+
+        // The unarmed punch cooldown lives on its own small component.
+        for entity in world.query::<Fists>() {
+            if let Some(fists) = world.get_component_mut::<Fists>(entity) {
+                if fists.timer > 0.0 {
+                    fists.timer -= dt;
+                }
             }
         }
     }

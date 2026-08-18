@@ -413,20 +413,113 @@ impl Default for Boss {
 }
 
 /// Marks an entity as knocked down / incapacitated for a limited time. While an
-/// enemy is stunned it does not move, chase, or attack, and can be finished off.
+/// enemy is stunned it does not move, chase, or attack, and can be finished off
+/// (see [`Finisher`] / `systems::finisher`). When the timer runs out the enemy
+/// gets back up and resumes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stunned {
     pub timer: f32,
+    /// The full knockdown length, so `age()` can tell how long ago the blow
+    /// landed (drives the fall animation of the sprawled sprite).
+    pub duration: f32,
+    /// World direction (radians) the body fell TOWARD — away from the blow
+    /// (attacker -> victim, or a thrown weapon's travel direction). The render
+    /// layer lays the sprawled sprite out along it, and the stun system writes
+    /// the matching facing back into `Rotation` on get-up.
+    pub fall_angle: f32,
 }
 
 impl Stunned {
     pub fn new(duration: f32) -> Self {
-        Stunned { timer: duration }
+        Self::with_fall(duration, 0.0)
+    }
+
+    /// A knockdown that fell toward `fall_angle` (radians, world space).
+    pub fn with_fall(duration: f32, fall_angle: f32) -> Self {
+        Stunned {
+            timer: duration,
+            duration,
+            fall_angle,
+        }
     }
 
     pub fn is_active(&self) -> bool {
         self.timer > 0.0
     }
+
+    /// Seconds since the knockdown landed.
+    pub fn age(&self) -> f32 {
+        (self.duration - self.timer).max(0.0)
+    }
+}
+
+/// Bare-hand punch cooldown for the player (the unarmed "weapon" has no
+/// [`Weapon`] component to carry a fire timer, so this small component does).
+/// Ticked by `systems::weapon::WeaponUpdateSystem`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fists {
+    /// Seconds until the next punch may land.
+    pub timer: f32,
+}
+
+impl Fists {
+    pub fn new(timer: f32) -> Self {
+        Fists { timer }
+    }
+
+    pub fn ready(&self) -> bool {
+        self.timer <= 0.0
+    }
+}
+
+/// The flavour of a finisher, decided by what the player holds when they
+/// trigger it (see `systems::finisher::FinisherSystem`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FinisherKind {
+    /// Unarmed: drop onto the downed bot and pound — three quick hits.
+    Pound,
+    /// Metal bar (or an empty gun swung like one): one overhead blow.
+    Overhead,
+    /// A loaded gun: one point-blank shot straight down. Costs a round.
+    Execute(WeaponType),
+}
+
+impl FinisherKind {
+    /// Total length of the animation; the player is locked for all of it.
+    pub fn duration(self) -> f32 {
+        match self {
+            FinisherKind::Pound => 0.7,
+            FinisherKind::Overhead => 0.5,
+            FinisherKind::Execute(_) => 0.4,
+        }
+    }
+
+    /// When (seconds from the start) each blow lands. The LAST impact is the
+    /// killing one — the victim dies at that moment, not at the start.
+    pub fn impacts(self) -> &'static [f32] {
+        match self {
+            FinisherKind::Pound => &[0.15, 0.40, 0.65],
+            FinisherKind::Overhead => &[0.35],
+            FinisherKind::Execute(_) => &[0.25],
+        }
+    }
+}
+
+/// A running finisher, held by the PLAYER while they execute a downed enemy.
+/// The player is movement/fire-locked for its duration; the victim is kept
+/// pinned down and dies at the final impact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Finisher {
+    /// The downed enemy being finished.
+    pub target: crate::ecs::Entity,
+    pub kind: FinisherKind,
+    /// Seconds since the finisher started.
+    pub timer: f32,
+    /// Unit direction player -> victim (the lunge / shove axis).
+    pub dir_x: f32,
+    pub dir_y: f32,
+    /// How many of `kind.impacts()` have already landed.
+    pub hits_done: usize,
 }
 
 /// A short-lived directional impulse layered on top of an entity's normal

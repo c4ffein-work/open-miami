@@ -462,9 +462,13 @@ fn test_thrown_weapon_keeps_its_ammo_and_can_be_retrieved() {
     ));
     assert!(world.get_component::<Weapon>(player).is_none()); // unarmed
     assert_eq!(get_player_weapon(&world), None);
-    // Unarmed: the trigger does nothing at all (no event either).
+    // Unarmed: the trigger throws a bare-fist punch — no one is in reach, so
+    // it whiffs (returns false), but the swing is still announced.
     assert!(!fire_player_weapon(&mut world, Vec2::new(500.0, 0.0)));
-    assert_eq!(world.drain_events(), vec![GameEvent::Throw]);
+    assert_eq!(
+        world.drain_events(),
+        vec![GameEvent::Throw, GameEvent::PlayerFired(WeaponType::Melee)]
+    );
 
     let mut thrown = ThrownWeaponSystem;
     for _ in 0..300 {

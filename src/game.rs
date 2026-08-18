@@ -185,13 +185,50 @@ pub fn get_player_ammo(world: &World) -> i32 {
         .unwrap_or(0)
 }
 
+/// Cadence of the bare-fist punch (seconds between jabs).
+pub const PUNCH_COOLDOWN: f32 = 0.45;
+
+/// An UNARMED left click: a bare-fist jab that KNOCKS the struck enemy DOWN
+/// (chip damage + a ~3 s sprawl — see `CombatSystem::process_punch`) instead
+/// of dealing real damage. Paced by the [`Fists`] cooldown component (ticked
+/// by the weapon-update system). Emits [`GameEvent::PlayerFired`] (melee — the
+/// swing whoosh) per jab; `process_punch` emits the per-enemy impacts.
+fn punch_from_player(
+    world: &mut World,
+    player: Entity,
+    player_pos: Position,
+    target_pos: Position,
+) -> bool {
+    let ready = world
+        .get_component::<Fists>(player)
+        .map(|f| f.ready())
+        .unwrap_or(true);
+    if !ready {
+        return false;
+    }
+    match world.get_component_mut::<Fists>(player) {
+        Some(f) => f.timer = PUNCH_COOLDOWN,
+        None => world.add_component(player, Fists::new(PUNCH_COOLDOWN)),
+    }
+    world.push_event(GameEvent::PlayerFired(WeaponType::Melee));
+    CombatSystem::process_punch(
+        world,
+        player_pos,
+        target_pos,
+        crate::systems::combat::PUNCH_DAMAGE,
+        crate::systems::combat::PUNCH_RANGE,
+    )
+}
+
 /// Fire the player's currently held weapon toward a world position. Melee hits
 /// instantly (returns whether it connected); ranged weapons spawn a bullet
-/// entity (returns `false`, since bullets resolve asynchronously). Does nothing
-/// if the weapon is on cooldown; an empty gun only clicks (a
-/// [`GameEvent::DryFire`] once per would-be shot — the cooldown is restarted so
-/// a held trigger does not spam it) — nothing ever refills it: throw it and
-/// take another. Emits [`GameEvent::PlayerFired`] for every round that leaves.
+/// entity (returns `false`, since bullets resolve asynchronously). An UNARMED
+/// player throws a bare-fist punch that knocks its target down (see
+/// [`punch_from_player`]). Does nothing if the weapon is on cooldown; an empty
+/// gun only clicks (a [`GameEvent::DryFire`] once per would-be shot — the
+/// cooldown is restarted so a held trigger does not spam it) — nothing ever
+/// refills it: throw it and take another. Emits [`GameEvent::PlayerFired`] for
+/// every round that leaves.
 ///
 /// This is the input-independent core of shooting so it can be driven both by
 /// the browser input layer and by the headless [`crate::sim::Simulation`].
@@ -206,7 +243,11 @@ pub fn fire_player_weapon(world: &mut World, target_world_pos: Vec2) -> bool {
     };
     let (weapon_type, damage, can_fire, is_dry) = match world.get_component::<Weapon>(player) {
         Some(w) => (w.weapon_type, w.damage, w.can_fire(), w.is_dry()),
-        None => return false, // unarmed
+        None => {
+            // Unarmed: swing a fist instead.
+            let target = Position::from_vec2(target_world_pos);
+            return punch_from_player(world, player, player_pos, target);
+        }
     };
 
     if is_dry {
@@ -486,6 +527,42 @@ mod tests {
         assert!(events
             .iter()
             .all(|e| *e == GameEvent::PlayerFired(WeaponType::Melee)));
+    }
+
+    #[test]
+    fn test_unarmed_click_punches_and_knocks_down() {
+        let mut world = World::new();
+        let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+        world.remove_component::<Weapon>(player); // unarmed
+
+        let enemy = spawn_enemy(&mut world, Vec2::new(30.0, 0.0));
+
+        assert!(fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
+        // Knocked down, not dead: chip damage only.
+        let health = world.get_component::<Health>(enemy).unwrap();
+        assert!(health.is_alive());
+        assert!(health.current < health.max);
+        assert!(world.has_component::<Stunned>(enemy));
+        assert_eq!(
+            world.drain_events(),
+            vec![
+                GameEvent::PlayerFired(WeaponType::Melee),
+                GameEvent::EnemyHit {
+                    by: WeaponType::Melee
+                }
+            ]
+        );
+
+        // The punch is on cooldown: an immediate second click does nothing.
+        assert!(!fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
+        assert!(world.drain_events().is_empty());
+        // ...until the fists cooldown is ticked away.
+        crate::ecs::System::run(
+            &mut crate::systems::WeaponUpdateSystem,
+            &mut world,
+            PUNCH_COOLDOWN + 0.01,
+        );
+        assert!(fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
     }
 
     #[test]

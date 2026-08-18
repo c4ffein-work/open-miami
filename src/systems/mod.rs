@@ -3,6 +3,7 @@ pub mod ai;
 pub mod boss;
 pub mod combat;
 pub mod elevator;
+pub mod finisher;
 #[cfg(target_arch = "wasm32")]
 pub mod input;
 pub mod movement;
@@ -17,6 +18,7 @@ pub use ai::AISystem;
 pub use boss::BossSystem;
 pub use combat::CombatSystem;
 pub use elevator::ElevatorSystem;
+pub use finisher::FinisherSystem;
 #[cfg(target_arch = "wasm32")]
 pub use input::InputSystem;
 pub use movement::MovementSystem;

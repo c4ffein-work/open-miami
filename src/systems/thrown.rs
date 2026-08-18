@@ -134,7 +134,9 @@ impl System for ThrownWeaponSystem {
                 if let Some(health) = world.get_component_mut::<Health>(enemy) {
                     health.take_damage(tw.damage);
                 }
-                world.add_component(enemy, Stunned::new(STUN_DURATION));
+                // Knocked down sprawling along the weapon's flight direction.
+                let fall = tw.vy.atan2(tw.vx);
+                world.add_component(enemy, Stunned::with_fall(STUN_DURATION, fall));
                 world.push_event(GameEvent::ThrownImpact);
                 Self::land(world, thrown, new_pos, &tw);
                 continue;

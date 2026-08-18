@@ -1,9 +1,10 @@
-use crate::components::{Stunned, Velocity};
+use crate::components::{Rotation, Stunned, Velocity};
 use crate::ecs::{Entity, System, World};
 
 /// System that ticks down knockdown timers. While stunned, an entity is held in
 /// place (velocity zeroed); when the timer runs out the `Stunned` marker is
-/// removed and the entity resumes normal behaviour.
+/// removed and the entity resumes normal behaviour, getting up facing back
+/// along its fall (toward whoever knocked it over).
 pub struct StunSystem;
 
 impl System for StunSystem {
@@ -20,12 +21,19 @@ impl System for StunSystem {
             if let Some(stun) = world.get_component_mut::<Stunned>(entity) {
                 stun.timer -= dt;
                 if !stun.is_active() {
-                    expired.push(entity);
+                    expired.push((entity, stun.fall_angle));
                 }
             }
         }
 
-        for entity in expired {
+        for (entity, fall_angle) in expired {
+            // Get up facing the blow's origin (the sprawled sprite already
+            // faces that way — see `Stunned::fall_angle` — so the standing
+            // sprite continues from the same on-screen orientation; a dead
+            // body keeps its sprawl orientation through this too).
+            if let Some(rot) = world.get_component_mut::<Rotation>(entity) {
+                rot.angle = fall_angle + std::f32::consts::PI;
+            }
             world.remove_component::<Stunned>(entity);
         }
     }

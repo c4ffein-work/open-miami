@@ -106,7 +106,7 @@ const TEXT_SEP = "\u001f";
 
 /* ---- robot tables (indices mirror src/graphics.rs draw_robot) ----------- */
 const ROBOT_COLORS = ["coral", "red", "violet", "magenta"];
-const ROBOT_POSES = ["idle", "walk", "shoot", "hit"];
+const ROBOT_POSES = ["idle", "walk", "shoot", "hit", "downed"];
 const ROBOT_WEAPONS = ["fist", "pistol", "machinegun", "shotgun"];
 const ROBOT_TILE = 128; // per-robot tile resolution (px) in the scratch atlas
 const ROBOT_PX = 3; // robot-core pixelation block size at this tile size
