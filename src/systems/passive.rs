@@ -23,8 +23,8 @@
 use std::f32::consts::PI;
 
 use crate::components::{
-    AIState, DebugPath, Enemy, Health, PassiveAI, Player, Position, Radius, Rotation, Speed,
-    Stunned, Velocity, Weapon, Zone, AI,
+    AIState, Enemy, Health, PassiveAI, Player, Position, Radius, Rotation, Speed, Stunned,
+    Velocity, Weapon, Zone, AI,
 };
 use crate::ecs::world::Wall;
 use crate::ecs::{Entity, World};
@@ -264,19 +264,22 @@ pub fn update_passive(
                         walls,
                         WALL_PADDING,
                     );
+                    // The stroll target is a fixed point in the zone, so the
+                    // cached path is recomputed even less often than a
+                    // chaser's (see `ai::PASSIVE_REPATH_INTERVAL`).
                     let waypoint = if clear {
+                        crate::systems::ai::clear_path_cache(world, entity);
                         goal
-                    } else if let Some(path) = nav_grid.find_path(here, goal) {
-                        if world.has_component::<DebugPath>(entity) {
-                            if let Some(dp) = world.get_component_mut::<DebugPath>(entity) {
-                                *dp = DebugPath::new(path.clone(), goal);
-                            }
-                        } else {
-                            world.add_component(entity, DebugPath::new(path.clone(), goal));
-                        }
-                        NavigationGrid::next_waypoint_in_path(&path, here, goal)
                     } else {
-                        goal
+                        crate::systems::ai::throttled_path_target(
+                            world,
+                            entity,
+                            nav_grid,
+                            here,
+                            goal,
+                            crate::systems::ai::PASSIVE_REPATH_INTERVAL,
+                            dt,
+                        )
                     };
                     let d = waypoint - here;
                     let len = d.length();
@@ -410,6 +413,7 @@ mod tests {
             walk_to,
             face: Some(-90.0),
             group: Some("crowd"),
+            unarmed: false,
         };
         let b = SpawnDef {
             x: 700.0,
@@ -419,6 +423,7 @@ mod tests {
             walk_to,
             face: None,
             group: None,
+            unarmed: false,
         };
         spawn_passive(&mut world, &a);
         spawn_passive(&mut world, &b);

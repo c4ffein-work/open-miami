@@ -57,7 +57,7 @@
       "actions": [
         {
           "say": {
-            "who": "CORRUPTOR",
+            "who": "SWARM",
             "text": "ring zero, little helper. nothing between us now but the floor.",
             "delay": 0.8
           }

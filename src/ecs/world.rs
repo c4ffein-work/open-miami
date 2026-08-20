@@ -49,6 +49,11 @@ pub struct World {
     rng_state: u32,
     // One-shot gameplay events queued this frame (see `push_event`).
     events: Vec<GameEvent>,
+    // Whether debug visualisation is being shown this frame (the `?debug` + I
+    // overlays). Set once per frame by the browser layer; `false` by default
+    // (headless sims, tests). Systems skip recording debug-only structures
+    // (DebugPath / DebugTrail) while this is off.
+    debug_viz: bool,
 }
 
 /// Upper bound on queued events. A consumer that never drains (e.g. the
@@ -65,7 +70,19 @@ impl World {
             walls: Vec::new(),
             rng_state: 12345,
             events: Vec::new(),
+            debug_viz: false,
         }
+    }
+
+    /// Whether debug visualisation is on this frame (see the field docs).
+    pub fn debug_viz(&self) -> bool {
+        self.debug_viz
+    }
+
+    /// Set by the browser layer once per frame when the debug overlays are
+    /// visible; everything headless leaves it `false`.
+    pub fn set_debug_viz(&mut self, on: bool) {
+        self.debug_viz = on;
     }
 
     /// Queue a one-shot gameplay event for whoever drains the queue this frame

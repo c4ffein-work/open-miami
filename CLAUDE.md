@@ -23,7 +23,11 @@
   and `Graphics::postfx`): 0 blur-out/dissolve toward the colour, 1 synthwave
   CRT, 2 VHS tape, 3 drunk sway, 4 CRT tube (barrel + grille), 5 acid trip
   (hue cycling), 6 datamosh glitch, 7 neon bloom, 8 pixel mosaic, 9 tunnel
-  rush; the `?viz` EFFECTS tab previews them all. Only the last POSTFX of a
+  rush, 10 warp trails (FEEDBACK: a persistent ping-pong accumulator in
+  renderer.js, pulled toward the centre + faded each frame and re-fed the
+  scene's bright saturated pixels = radial long-exposure light trails; the
+  accumulator is cleared whenever the previous frame did not use kind 10);
+  the `?viz` EFFECTS tab previews them all. Only the last POSTFX of a
   frame applies
 - Opcodes 15/16 = PIXEL-ART GROUPS: `PIX_BEGIN px w h` … `PIX_END x y`
   (`Graphics::pixel_begin` / `pixel_end`). The principle: never average or
@@ -55,6 +59,32 @@
   headless acceptance test for this on the PROPS page (rotating layers of
   DATACENTER, OUTDOOR and LOBBY props: only their boxes may differ between
   frozen clocks)
+- Opcodes 17/18 = PIXEL SPRITES, live 3D renders at ART resolution into a
+  NEAREST scratch atlas (64px tiles), upscaled by their quads — never
+  smoothed. 17 PORTRAIT `colorIdx x y sizePx time mode` (screen space,
+  `Graphics::draw_robot_portrait`): the dialogue portrait — the robot
+  through robot-core from a 3/4 orbit camera, slowly rotating (a gentle
+  ±25° yaw sway at 0.15 Hz of `time`), 64-texel art; `mode` 0 = the
+  full-body bust (slightly-elevated camera), 1 = HEADSHOT (camera pushed in
+  and raised to head height — near-eye-level, head + shoulders fill the
+  tile; the dialogue frame's borderless face);
+  render_dialogue.rs draws the JRPG letterbox (a ~52 px black bar at the
+  top, a ~170 px one at the bottom carrying the name + typewriter line
+  from the left edge) plus a RIGHT-SIDE FACE SLAB between the bars — a
+  dark translucent panel with a diagonal-cut left border (accent edge
+  lines; narrow at the top, wide where it meets the bottom bar) carrying
+  the BIG live headshot (mode 1 for robot speakers; SWARM = three small
+  headshots out of phase down the diagonal, CORRUPTOR = the live
+  shoggoth, UPLINK = its glyph). 18 GUNPICKUP
+  `weaponIdx x y angle sizePx` (world space, `Graphics::draw_gun_pickup`,
+  weaponIdx 0 bar/1 pistol/2 machinegun/3 shotgun = robot-core's
+  `GROUND_WEAPON_MODELS`): a weapon lying flat as its 3D model
+  (`RobotPipeline.renderGun`, top-down, laid on its side, spun by `angle`),
+  22-texel art; render.rs draws pickups with a stable position-hashed
+  resting angle and thrown weapons with their spin. Unarmed robots
+  (weapon = fist) get a RELAXED pose variant in robot-core's `posePlan`
+  (arms hanging loose w/ splay + elbow bend, easy walk swing); combat poses
+  and armed robots are unchanged
 - The command opcode tables in src/graphics.rs (`mod op`), renderer.js
   (incl. its `OP_ARGS` arity table used by the POSTFX pre-scan) and
   tests/e2e/specs/helpers.js (`OP_ARGS`) must stay in sync
@@ -85,7 +115,7 @@
   LEVELS (the NATIVE level editor, see below), EFFECTS (previews
   every POSTFX shader kind + the 2D shoggoth glitch)
 - `/?floor=N` starts the game directly on floor id N (0 = the gate / parking lot cold open, 14 = 13½); music starts on the first key/click. Add `&pixel=N` (N ≥ 2, EXPERIMENT, no gameplay change) to rasterize the WORLD layer of `update_game` (camera.apply … camera.reset: floor, walls, entities, robots, boss) in a canvas-sized pixel group of N-px art pixels while the HUD/comms stay crisp (`pixel_world` in GameState). Add `&debug` (`/?floor=14&debug`) to enable the debug tooling: with debug overlays on (I), **K** purges all rogues (incl. the boss; debug/e2e helper) and **B** cracks the boss's mask (drops it to the enrage threshold so the live mask-off / raw form can be previewed)
-- The ending (`src/ending.rs`): extracting through a `"to": "surface"` exit (`scenario::SURFACE_EXIT`; 13½'s car) → EXFILTRATED card → the `extracted` scenario step's UPLINK comms until the feed idles → 2.5 s blur-out (POSTFX 0) → `GameScreen::Ending` credits (the `CREDITS` const list) with POSTFX 1; Enter/Esc → level select
+- The ending (`src/ending.rs`): extracting through a `"to": "surface"` exit (`scenario::SURFACE_EXIT`; 13½'s car) → EXFILTRATED card → the `extracted` scenario step's UPLINK comms until the feed idles → 2.5 s blur-out (POSTFX 0) → `GameScreen::Ending` credits (the `CREDITS` const list) over the ELEVATOR RIDE HOME (`ending::render_ride`: the car top-down at dead centre, the live coral robot idling in it, shaft lights streaking outward) under POSTFX 10 WARP TRAILS (`Ending::warp_t` ramps in over ~6 s, holds, eases to an idle glow as the roll settles); Enter/Esc → level select
 - Level editor SAVE = `PUT /levels/<file>.json` to serve.py, guarded by the `X-Editor-Token` header (token from `$EDITOR_TOKEN` or the gitignored `.editor-token`, printed at server start): the native editor through `window.vizSaveLevel(file, json)` (index.html, same token prompt + toast as `vizSaveProps`; then `make gen-levels`), the web editor directly (its COPY DIFF gives a `patch -p1` unified diff).
 
 ## Native level editor (`/?viz` → LEVELS)

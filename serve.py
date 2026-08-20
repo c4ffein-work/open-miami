@@ -291,7 +291,13 @@ class NoCache(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
     print("editor write token (X-Editor-Token): %s" % editor_token(), flush=True)
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", port), NoCache) as httpd:
+    # ThreadingTCPServer: the browser fetches the wasm, renderer.js and the
+    # game font CONCURRENTLY at page load; a single-threaded server serializes
+    # those and Chromium aborts the starved font body mid-read (a 200 followed
+    # by NetworkError -> the FontFace ends in "error" and canvas text bakes
+    # zero-width glyphs). One thread per request fixes it.
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    socketserver.ThreadingTCPServer.daemon_threads = True
+    with socketserver.ThreadingTCPServer(("0.0.0.0", port), NoCache) as httpd:
         print("serving :%d (no-store) — PUT/DELETE enabled under /levels/, PUT /props/props.json" % port)
         httpd.serve_forever()

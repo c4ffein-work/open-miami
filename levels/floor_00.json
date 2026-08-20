@@ -125,6 +125,8 @@
       "id": "scan",
       "trigger": { "kind": "start" },
       "actions": [
+        { "combat": false },
+        { "disarm": true },
         { "look_at": { "x": 500, "y": 110, "seconds": 3.2 } },
         {
           "talk": {

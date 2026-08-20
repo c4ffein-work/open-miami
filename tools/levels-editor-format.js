@@ -42,7 +42,7 @@
     timer: ["seconds", "after"], exit_open: ["exit"], step_done: ["step"],
     boss_dead: [], extracted: [],
   };
-  const ACTION_KINDS = ["say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at", "gate", "checkpoint", "disarm"];
+  const ACTION_KINDS = ["say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold", "look_at", "gate", "checkpoint", "disarm", "combat"];
   const SFX_NAMES = ["elevator", "mask_crack", "level_clear", "pickup", "throw", "enemy_down"];
   /* tutorial gate inputs (mirrors scenario.rs GateInput::parse) */
   const GATE_INPUTS = ["punch", "finish", "pickup", "strike", "fire", "throw"];
@@ -57,7 +57,7 @@
     wall: ["x", "y", "w", "h"],
     room: ["id", "label", "x", "y", "w", "h"],
     zone: ["id", "x", "y", "w", "h"],
-    spawn: ["x", "y", "type", "walk_to", "face", "look", "group"],
+    spawn: ["x", "y", "type", "walk_to", "face", "look", "group", "unarmed"],
     pickup: ["x", "y", "weapon"],
     /* placed props (decoration; edited by the NATIVE editor in the ?viz LEVELS
        tab, not here): kept verbatim, only key-ordered */
@@ -133,6 +133,7 @@
       if (PASSIVE_LOOKS.includes(s.look)) out.look = s.look;
     }
     if (s && s.group != null && s.group !== "") out.group = str(s.group, "");
+    if (out.type !== "passive" && s && s.unarmed === true) out.unarmed = true;
     return extras(s, out, ORDER.spawn);
   }
   /* exit.to: a floor id, or "surface" (end of run) */
@@ -179,6 +180,7 @@
       return { gate: { input: GATE_INPUTS.includes(g.input) ? g.input : "punch", text: str(g.text, "") } };
     }
     if ("checkpoint" in a) return { checkpoint: true };
+    if ("combat" in a) return { combat: a.combat === true };
     if ("disarm" in a) return { disarm: true };
     return null;
   }
@@ -360,6 +362,8 @@
     (f.zones || []).forEach((z, i) => { if (!(z.w > 0 && z.h > 0)) err("zones[" + i + "]", "zone \"" + z.id + "\" must have positive size"); });
     const checkSpawn = (s, p) => {
       if (!SPAWN_TYPES.includes(s.type)) err(p, "unknown spawn type " + s.type);
+      if (s.unarmed != null && typeof s.unarmed !== "boolean") err(p + ".unarmed", "unarmed must be a boolean");
+      if (s.unarmed != null && s.type === "passive") err(p + ".unarmed", "unarmed is only valid on a hostile spawn");
       if (s.type === "passive") {
         if (s.walk_to != null && !zoneIds.has(s.walk_to)) err(p + ".walk_to", "passive walk_to zone \"" + s.walk_to + "\" does not exist");
         if (s.look != null && !PASSIVE_LOOKS.includes(s.look)) err(p + ".look", "passive look must be one of " + PASSIVE_LOOKS.join("|"));
@@ -430,6 +434,8 @@
           if (a.checkpoint !== true) err(q, label + ": checkpoint must be true");
         } else if ("disarm" in a) {
           if (a.disarm !== true) err(q, label + ": disarm must be true");
+        } else if ("combat" in a) {
+          if (typeof a.combat !== "boolean") err(q, label + ": combat must be a boolean");
         } else if ("objective" in a) {
           if (!a.objective.trim()) warn(q, label + ": objective text is empty");
         } else if ("sfx" in a) {

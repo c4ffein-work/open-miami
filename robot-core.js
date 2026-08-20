@@ -10,6 +10,10 @@
      POSES                          - list of pose names
      WEAPONS                        - list of weapon names (fist/pistol/machinegun/shotgun)
      WEAPON_MODELS                  - name -> array of box parts (the 3D weapon models)
+     GROUND_WEAPON_MODELS           - [bar, pistol, machinegun, shotgun] box models
+                                      as they lie on the ground (pickups / thrown);
+                                      RobotPipeline.renderGun draws one flat,
+                                      top-down, spun to a resting angle
      M4                             - the pooled column-major mat4 helpers
      orbitVP / topDownVP            - camera builders (view-projection matrices)
      SpritePipeline                 - the pass-1 target + post pass base class that
@@ -68,6 +72,19 @@ export const WEAPONS = ["fist", "pistol", "machinegun", "shotgun"];
 const GUN_METAL = [0.44, 0.46, 0.52]; // body
 const GUN_DARK  = [0.24, 0.25, 0.30]; // grip / mag / dark parts
 
+/* Ground models: the weapons as they lie on the floor (pickups / thrown
+   weapons), indexed to match the Rust WeaponType mapping used by the
+   GUNPICKUP opcode: 0 bar (melee), 1 pistol, 2 machinegun, 3 shotgun.
+   The three guns reuse the held models; the BAR (the melee weapon, which is
+   never rendered in-hand) gets its own box model. `GROUND_WEAPON_CENTER` is
+   the local +Y shift that centres each model on its midpoint so a resting /
+   spinning weapon rotates around its own centre. */
+const BAR_MODEL = [
+  {t:[0,-0.02, 0.0], s:[0.13,1.10,0.13], c:GUN_METAL, id:0.90}, // the bar itself
+  {t:[0, 0.42, 0.0], s:[0.17,0.26,0.17], c:GUN_DARK,  id:0.88}, // taped grip
+  {t:[0,-0.53, 0.0], s:[0.15,0.12,0.15], c:"accent",  id:0.98}, // scuffed tip
+];
+
 export const WEAPON_MODELS = {
   fist: [],
   pistol: [
@@ -89,6 +106,18 @@ export const WEAPON_MODELS = {
     {t:[0, 0.12,-0.11], s:[0.12,0.24,0.17], c:GUN_DARK,  id:0.88}, // grip / stock
   ],
 };
+
+export const GROUND_WEAPON_MODELS = [
+  BAR_MODEL,               // 0 = melee bar
+  WEAPON_MODELS.pistol,    // 1
+  WEAPON_MODELS.machinegun,// 2
+  WEAPON_MODELS.shotgun,   // 3
+];
+// Local +Y shift that centres each ground model (the guns' mass sits toward
+// the muzzle in the gun-hand frame).
+const GROUND_WEAPON_CENTER = [0.0, 0.06, 0.20, 0.14];
+// Muzzle-glow accent used for weapons on the ground (no owner to tint them).
+const GROUND_ACCENT = [1.0, 0.75, 0.55];
 
 /* ---------- tiny mat4 math (column-major, like GL) ----------
    Every matrix comes out of a bump-allocated scratch pool that is reset at the
@@ -197,6 +226,8 @@ uniform float uPx;     // pixel block size in px
 uniform vec2 uSize;    // texture size
 uniform float uTransparent; // 1.0 -> background blocks output alpha 0
 uniform float uEdge;   // luma-gradient threshold that inks an edge
+uniform float uAiInk;  // 1.0 = ink part-id boundaries (0 for tiny art, where
+                       //  every texel borders one and would come out black)
 float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
 vec4 samp(vec2 uv){ return texture2D(uTex, uv); }
 void main(){
@@ -231,7 +262,7 @@ void main(){
     silh = near>0.02 ? 1.0 : 0.0;
   }
 
-  float edge = max(max(step(uEdge, lumEdge), step(0.03, ai)), silh);
+  float edge = max(max(step(uEdge, lumEdge), step(0.03, ai) * uAiInk), silh);
 
   float levels = 4.0;
   col = floor(col*levels + 0.5)/levels;
@@ -292,7 +323,10 @@ export function orbitVP(yaw, pitch, halfV, center){
 
 /* ---------- pose -> skeleton drive ---------- */
 // Returns the per-frame joint angles / offsets for a pose at a given time.
-function posePlan(pose, time){
+// `relaxed` (no weapon held) softens idle/walk into an off-duty stance: arms
+// hanging loose at the sides, slightly splayed out from the hips with a soft
+// elbow bend, and an easy walk swing. Combat/impact poses ignore it.
+function posePlan(pose, time, relaxed){
   const walkPhase = time*2.0*Math.PI;
   const swing  = Math.sin(walkPhase)*0.6;
   const swing2 = Math.sin(walkPhase+Math.PI)*0.6;
@@ -303,6 +337,8 @@ function posePlan(pose, time){
     legA:0, legB:0,
     armLp:0.05, armRp:0.05, shoot:false,
     armRaise:0,          // extra shoulder-raise for both arms (defensive/idle)
+    armOut:0,            // sideways splay of both arms (relaxed hang)
+    elbow:0,             // forearm bend at the elbow (relaxed hang)
     recoil:0,
   };
 
@@ -311,6 +347,11 @@ function posePlan(pose, time){
       P.bob = Math.abs(Math.sin(walkPhase))*0.08;
       P.legA = swing;  P.legB = swing2;
       P.armLp = swing2; P.armRp = swing;   // arms counter-swing to legs
+      if(relaxed){
+        // natural unarmed walk: an easy half swing, arms loose at the sides
+        P.armLp = swing2*0.55; P.armRp = swing*0.55;
+        P.armOut = 0.10; P.elbow = 0.28;
+      }
       break;
 
     case "shoot":
@@ -326,6 +367,13 @@ function posePlan(pose, time){
       P.legA  = 0.015; P.legB = -0.015;     // weight shift, feet planted
       P.armLp = 0.08 + breath*0.05;         // arms sway slightly out of phase
       P.armRp = 0.08 - breath*0.05;
+      if(relaxed){
+        // at ease: arms hang straight down the sides, breathing gently
+        P.armLp = 0.02 + breath*0.03;
+        P.armRp = 0.02 - breath*0.03;
+        P.armOut = 0.14 + breath*0.02;
+        P.elbow = 0.14;
+      }
       break;
     }
 
@@ -414,6 +462,7 @@ export class SpritePipeline {
       uSize: gl.getUniformLocation(this.postProg,"uSize"),
       uTransparent: gl.getUniformLocation(this.postProg,"uTransparent"),
       uEdge: gl.getUniformLocation(this.postProg,"uEdge"),
+      uAiInk: gl.getUniformLocation(this.postProg,"uAiInk"),
     };
     this.quadBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER,this.quadBuf);
@@ -491,7 +540,9 @@ export class SpritePipeline {
   //   overwritten (background comes out as the dark floor color, or as
   //   (0,0,0,0) when transparent), so the caller never needs to clear it.
   //   Omitted -> the whole canvas (default framebuffer), cleared first.
-  _postPass(target, px, transparent){
+  // `aiInk` (default 1) scales the part-id-boundary ink term — pass 0 for
+  // tiny art where every texel borders a part and would come out black.
+  _postPass(target, px, transparent, aiInk){
     const gl=this.gl;
     gl.disable(gl.DEPTH_TEST);
     if(target){
@@ -511,6 +562,7 @@ export class SpritePipeline {
     gl.uniform1f(this.pLoc.uPx, Math.max(1, px || 5));
     gl.uniform1f(this.pLoc.uTransparent, transparent ? 1.0 : 0.0);
     gl.uniform1f(this.pLoc.uEdge, this.edge);
+    gl.uniform1f(this.pLoc.uAiInk, aiInk === undefined ? 1.0 : aiInk);
     gl.bindBuffer(gl.ARRAY_BUFFER,this.quadBuf); gl.enableVertexAttribArray(this.pLoc.aPos); gl.vertexAttribPointer(this.pLoc.aPos,2,gl.FLOAT,false,0,0);
     gl.drawArrays(gl.TRIANGLES,0,6);
   }
@@ -605,10 +657,18 @@ class RobotPipeline extends SpritePipeline {
         rot = M4.mul(shoulder, M4.rotX(-1.35 + recoil));
       } else {
         rot = M4.mul(shoulder, M4.rotX(ph - plan.armRaise));
+        if(plan.armOut){
+          // relaxed hang: splay the whole arm slightly outward from the hips
+          rot = M4.mul(rot, M4.rotZ(sideX > 0 ? plan.armOut : -plan.armOut));
+        }
       }
       const upper = M4.mul(rot, M4.mul(M4.translate(0,-0.26,0), M4.scale(0.24,0.55,0.26)));
       self._drawPart(VP, upper, body, accent, 0.6+sideX);
-      const elbow = M4.mul(rot, M4.translate(0,-0.52,0));
+      let elbow = M4.mul(rot, M4.translate(0,-0.52,0));
+      if(!forward && plan.elbow){
+        // relaxed hang: a soft natural bend at the elbow
+        elbow = M4.mul(elbow, M4.rotX(plan.elbow));
+      }
       const fore = M4.mul(elbow, M4.mul(M4.translate(0,-0.24,0), M4.scale(0.2,0.5,0.22)));
       self._drawPart(VP, fore, trim, accent, 0.65+sideX);
       if(gunHand && holdingWeapon){
@@ -627,7 +687,7 @@ class RobotPipeline extends SpritePipeline {
 
   /* render one robot.
      opts: {pose, color|pal, px, time, facingDeg, weapon, transparent,
-            orbit:{yaw,pitch,halfV}, halfV}
+            orbit:{yaw,pitch,halfV,center}, halfV}
        weapon: one of WEAPONS ("fist" | "pistol" | "machinegun" | "shotgun")
        time:   continuous seconds — every value renders a distinct frame
      target (optional): {fbo, x, y, w, h} — see SpritePipeline._postPass. */
@@ -642,9 +702,10 @@ class RobotPipeline extends SpritePipeline {
     // pass 1: scene -> FBO
     this._beginScene();
     const VP = opts.orbit
-      ? orbitVP(opts.orbit.yaw||0, opts.orbit.pitch||0, opts.orbit.halfV)
+      ? orbitVP(opts.orbit.yaw||0, opts.orbit.pitch||0, opts.orbit.halfV, opts.orbit.center)
       : topDownVP(opts.halfV);
-    const plan = posePlan(pose, time);
+    // Unarmed robots stand / walk at ease rather than in the combat rig.
+    const plan = posePlan(pose, time, weapon === "fist");
     gl.useProgram(this.sceneProg);
     gl.bindBuffer(gl.ARRAY_BUFFER,this.posBuf); gl.enableVertexAttribArray(this.sLoc.aPos); gl.vertexAttribPointer(this.sLoc.aPos,3,gl.FLOAT,false,0,0);
     gl.bindBuffer(gl.ARRAY_BUFFER,this.nrmBuf); gl.enableVertexAttribArray(this.sLoc.aNormal); gl.vertexAttribPointer(this.sLoc.aNormal,3,gl.FLOAT,false,0,0);
@@ -654,6 +715,54 @@ class RobotPipeline extends SpritePipeline {
 
     // pass 2: post -> target rect (or the whole canvas)
     this._postPass(target, opts.px, !!opts.transparent);
+  }
+
+  /* render one WEAPON lying flat on the ground (a pickup, or a thrown weapon
+     spinning across the floor), seen by the same true top-down camera as the
+     robots so it composes into the world at matching perspective. The model
+     is laid on its side (thickness axis up -> the recognizable side profile
+     faces the camera) and rotated by `angle` around the vertical axis.
+     opts: {weaponIdx (0 bar / 1 pistol / 2 machinegun / 3 shotgun),
+            angle (radians, screen convention: 0 = muzzle toward +x,
+            positive = clockwise on screen), px, transparent, halfV}
+     target: see SpritePipeline._postPass. */
+  renderGun(opts, target){
+    const gl=this.gl;
+    const idx = opts.weaponIdx|0;
+    const parts = GROUND_WEAPON_MODELS[idx] || GROUND_WEAPON_MODELS[0];
+
+    this._beginScene();
+    const VP = topDownVP(opts.halfV || 0.72);
+    gl.useProgram(this.sceneProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER,this.posBuf); gl.enableVertexAttribArray(this.sLoc.aPos); gl.vertexAttribPointer(this.sLoc.aPos,3,gl.FLOAT,false,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER,this.nrmBuf); gl.enableVertexAttribArray(this.sLoc.aNormal); gl.vertexAttribPointer(this.sLoc.aNormal,3,gl.FLOAT,false,0,0);
+    this._lastColor = null; this._lastAccent = null;
+
+    // Ground frame: lift to the camera's focus height, spin around vertical
+    // (negated: world +z is screen +y/down, so -yaw = clockwise on screen),
+    // lay the model on its side (gun local X/thickness -> world up, the
+    // barrel's local -Y -> world +x) and centre it on its midpoint.
+    let base = M4.mul(M4.translate(0,0.9,0), M4.rotY(-(opts.angle||0)));
+    base = M4.mul(base, M4.mul(M4.rotZ(Math.PI/2), M4.translate(0, GROUND_WEAPON_CENTER[idx]||0, 0)));
+    for(const b of parts){
+      const local = M4.mul(base, M4.mul(M4.translate(b.t[0],b.t[1],b.t[2]),
+                                        M4.scale(b.s[0],b.s[1],b.s[2])));
+      const col = (b.c === "accent") ? GROUND_ACCENT : b.c;
+      // One shared part id: at the tiny ground-art resolution every texel
+      // neighbours a part boundary, so per-part ids would ink the whole
+      // weapon black. The silhouette pass still outlines it.
+      this._drawPart(VP, local, col, GROUND_ACCENT, 0.9);
+    }
+    gl.disableVertexAttribArray(this.sLoc.aNormal);
+
+    // No interior linework at all (the art is a handful of texels): raise the
+    // luma-ink threshold out of reach and disable the id-boundary ink; only
+    // the outer silhouette ring survives, which keeps the weapon readable on
+    // any floor without eating its fill.
+    const prevEdge = this.edge;
+    this.edge = 9.0;
+    this._postPass(target, opts.px, !!opts.transparent, 0.0);
+    this.edge = prevEdge;
   }
 }
 

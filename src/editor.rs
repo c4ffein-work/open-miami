@@ -63,6 +63,8 @@ pub struct Spawn {
     pub face: Option<f32>,
     /// `alert { "group": id }` group.
     pub group: Option<String>,
+    /// Hostile only: spawns bare-fisted, its corpse drops nothing.
+    pub unarmed: bool,
 }
 
 /// A weapon on the floor at level start.
@@ -276,6 +278,7 @@ impl EditableFloor {
                     walk_to: s.walk_to.map(str::to_string),
                     face: s.face,
                     group: s.group.map(str::to_string),
+                    unarmed: s.unarmed,
                 })
                 .collect(),
             pickups: f
@@ -596,6 +599,7 @@ impl EditableFloor {
             walk_to: None,
             face: None,
             group: None,
+            unarmed: false,
         });
         Item::Spawn(self.spawns.len() - 1)
     }
@@ -779,13 +783,15 @@ impl EditableFloor {
             .collect();
         // Spawns: hostile = {x, y, type}; passive civilians = {x, y, type: "passive",
         // look, walk_to?, face?}; either may carry a `group`.
+        #[allow(clippy::too_many_arguments)]
         let spawn_json = |x: f32,
                           y: f32,
                           kind: EnemyType,
                           passive: bool,
                           walk_to: Option<&str>,
                           face: Option<f32>,
-                          group: Option<&str>| {
+                          group: Option<&str>,
+                          unarmed: bool| {
             let mut kv = vec![("x".to_string(), n(x)), ("y".into(), n(y))];
             if passive {
                 kv.push(("type".into(), s("passive")));
@@ -802,6 +808,9 @@ impl EditableFloor {
             if let Some(g) = group {
                 kv.push(("group".into(), s(g)));
             }
+            if unarmed {
+                kv.push(("unarmed".into(), Bool(true)));
+            }
             Obj(kv)
         };
         let spawns = self
@@ -816,6 +825,7 @@ impl EditableFloor {
                     sp.walk_to.as_deref(),
                     sp.face,
                     sp.group.as_deref(),
+                    sp.unarmed,
                 )
             })
             .collect();
@@ -911,6 +921,7 @@ impl EditableFloor {
                                 .map(|w| {
                                     spawn_json(
                                         w.x, w.y, w.kind, w.passive, w.walk_to, w.face, w.group,
+                                        w.unarmed,
                                     )
                                 })
                                 .collect()),
@@ -954,6 +965,7 @@ impl EditableFloor {
                         )]),
                         Action::Checkpoint => Obj(vec![("checkpoint".into(), Bool(true))]),
                         Action::Disarm => Obj(vec![("disarm".into(), Bool(true))]),
+                        Action::Combat(on) => Obj(vec![("combat".into(), Bool(*on))]),
                     })
                     .collect();
                 Obj(vec![

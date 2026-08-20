@@ -4,15 +4,9 @@ use crate::components::{
 };
 use crate::ecs::{Entity, System, World};
 
-/// Damage an enemy deals to the player per contact attack. Kept high so a swarm
-/// is genuinely lethal (a few hits kills the player), matching the fast, fragile
-/// feel of the genre while still giving the player a chance to react.
-pub const ENEMY_ATTACK_DAMAGE: i32 = 25;
-
-/// Contact damage from the boss while its mask is still on (menacing but slow).
-pub const BOSS_MASK_DAMAGE: i32 = 15;
-/// Contact damage from the boss once the mask cracks off (frantic and deadly).
-pub const BOSS_ENRAGED_DAMAGE: i32 = 45;
+// The player dies to ANY connected enemy hit (one-hit death — the genre's
+// core loop; death is cheap: checkpoint restore / hold-R restart). The old
+// per-hit damage tiers are retired.
 
 /// Impulse speed (px/s) a single bullet imparts to the enemy it strikes, thrown
 /// along the bullet's travel direction. With the movement system's decay this is
@@ -27,8 +21,18 @@ pub const MELEE_KNOCKBACK: f32 = 1000.0;
 /// is a scratch (it still flips passive civilians hostile, like any hurt).
 pub const PUNCH_DAMAGE: i32 = 10;
 
-/// Reach of a punch: a touch shorter than the metal bar's 50 px swing.
-pub const PUNCH_RANGE: f32 = 45.0;
+/// Reach of the player's armed melee swing (the metal bar), centre to centre.
+/// Robots are drawn as 60 px tiles, so two sprites standing visibly adjacent
+/// are ~60 px apart at the centres: the old 50 px reach forced the player to
+/// physically overlap the target before a swing could connect (a whiff gives
+/// no feedback beyond the whoosh), which soft-locked the floor-1 `strike`
+/// tutorial gate in the browser. 70 px lands the swing from a natural
+/// point-blank stance while still demanding contact range.
+pub const MELEE_RANGE: f32 = 70.0;
+
+/// Reach of a punch: a touch shorter than the metal bar's
+/// [`MELEE_RANGE`] swing.
+pub const PUNCH_RANGE: f32 = 65.0;
 
 /// The shove of a punch: between a bullet and the metal bar.
 pub const PUNCH_KNOCKBACK: f32 = 700.0;
@@ -62,6 +66,25 @@ impl CombatSystem {
         } else {
             world.add_component(entity, Knockback::new(ix, iy));
         }
+    }
+
+    /// A killing blow landed on `entity` travelling along `(dx, dy)`
+    /// (attacker -> victim / the projectile's flight): record the direction as
+    /// the corpse's fall so the body sprawls along the shot, head pointing
+    /// AWAY from the attacker — the same convention as [`Stunned::with_fall`]
+    /// knockdowns (the render layer draws a downed body facing
+    /// `fall_angle + PI` and the pose topples it onto its back, so the head
+    /// ends up along `+fall_angle`). Reuses [`Stunned`]: on a corpse it only
+    /// drives the fall animation and final orientation (the stun system's
+    /// get-up writes the matching facing into `Rotation`, which the dead-robot
+    /// draw keeps — a dead entity never stands back up). The boss keeps its
+    /// own draw and is exempt, like it is from knockdowns.
+    pub(crate) fn record_corpse_fall(world: &mut World, entity: Entity, dx: f32, dy: f32) {
+        if world.has_component::<Boss>(entity) {
+            return;
+        }
+        let fall = dy.atan2(dx);
+        world.add_component(entity, Stunned::with_fall(KNOCKDOWN_SECS, fall));
     }
 
     /// Check if a line segment (bullet) intersects with a circle (enemy)
@@ -134,11 +157,15 @@ impl CombatSystem {
                 // Deal damage
                 if let Some(health) = world.get_component_mut::<Health>(enemy) {
                     health.take_damage(damage);
+                    let killed = health.is_dead();
                     // Shove the enemy along the bullet's travel direction
                     // (shooter -> target), i.e. away from the shooter.
                     let dir_x = target_pos.x - shooter_pos.x;
                     let dir_y = target_pos.y - shooter_pos.y;
                     Self::apply_knockback(world, enemy, dir_x, dir_y, BULLET_KNOCKBACK);
+                    if killed {
+                        Self::record_corpse_fall(world, enemy, dir_x, dir_y);
+                    }
                     return true; // Hit confirmed
                 }
             }
@@ -204,8 +231,10 @@ impl CombatSystem {
             }
 
             if Self::in_melee_cone(attacker_pos, target_angle, enemy_pos, range) {
+                let mut killed = false;
                 if let Some(health) = world.get_component_mut::<Health>(enemy) {
                     health.take_damage(damage);
+                    killed = health.is_dead();
                     hit_any = true;
                     world.push_event(GameEvent::EnemyHit {
                         by: WeaponType::Melee,
@@ -216,6 +245,9 @@ impl CombatSystem {
                 let dir_x = enemy_pos.x - attacker_pos.x;
                 let dir_y = enemy_pos.y - attacker_pos.y;
                 Self::apply_knockback(world, enemy, dir_x, dir_y, MELEE_KNOCKBACK);
+                if killed {
+                    Self::record_corpse_fall(world, enemy, dir_x, dir_y);
+                }
             }
         }
 
@@ -330,16 +362,11 @@ impl CombatSystem {
             if ai.state == AIState::SurePlayerSeen && ai.can_attack() {
                 let distance = enemy_pos.distance_to(&player_pos);
                 if distance < ai.attack_range {
-                    // The boss hits harder than a regular rogue (harder still
-                    // once its mask is off).
-                    let damage = match world.get_component::<Boss>(enemy) {
-                        Some(boss) if boss.enraged => BOSS_ENRAGED_DAMAGE,
-                        Some(_) => BOSS_MASK_DAMAGE,
-                        None => ENEMY_ATTACK_DAMAGE,
-                    };
-                    // Deal damage to player
+                    // ONE-HIT DEATH: any connected hit ends the run — the
+                    // genre's whole loop (die instantly, R restarts in a
+                    // heartbeat). Boss and rogue alike.
                     if let Some(health) = world.get_component_mut::<Health>(player_entity) {
-                        health.take_damage(damage);
+                        health.take_damage(health.max.max(health.current));
                     }
                     world.push_event(GameEvent::PlayerHurt);
 
@@ -566,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn test_combat_system_enemy_attacks_player() {
+    fn test_combat_system_enemy_attack_is_lethal() {
         let mut world = World::new();
 
         // Create player
@@ -587,8 +614,9 @@ mod tests {
         let mut system = CombatSystem;
         system.run(&mut world, 0.016);
 
+        // ONE-HIT DEATH: a single connected hit ends the run.
         let player_health = world.get_component::<Health>(player).unwrap();
-        assert_eq!(player_health.current, 100 - ENEMY_ATTACK_DAMAGE);
+        assert!(player_health.is_dead());
     }
 
     #[test]

@@ -1,6 +1,10 @@
 use crate::graphics::Graphics;
 use crate::math::Vec2;
 
+// The pure culling predicate + rect live in src/math.rs so their tests run on
+// the host (this module is wasm-only); re-exported here for the renderers.
+pub use crate::math::{rect_visible, ViewCull, CULL_MARGIN};
+
 /// Default zoom: how many screen pixels one world unit covers. >1 pulls the
 /// camera in closer to the characters.
 pub const DEFAULT_ZOOM: f32 = 1.6;
@@ -151,6 +155,13 @@ impl Camera {
             Vec2::new(f.x - half_w, f.y - half_h),
             Vec2::new(f.x + half_w, f.y + half_h),
         )
+    }
+
+    /// The visible bounds inflated by `CULL_MARGIN`, packaged for the world
+    /// renderers to skip off-screen sprites (see `ViewCull`).
+    pub fn view_cull(&self, screen_width: f32, screen_height: f32) -> ViewCull {
+        let (min, max) = self.visible_bounds(screen_width, screen_height);
+        ViewCull::new(min, max)
     }
 
     pub fn screen_to_world(&self, screen_pos: Vec2) -> Vec2 {

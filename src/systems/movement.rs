@@ -17,6 +17,23 @@ const KNOCKBACK_DECAY_TAU: f32 = 0.06;
 /// the component is removed to stop it nudging the entity forever.
 const KNOCKBACK_MIN_SPEED: f32 = 8.0;
 
+/// Hard cap on movement sub-steps per frame (safety valve for absurd speeds;
+/// with it a stacked multi-kill shove still resolves in a handful of steps).
+const MAX_SUBSTEPS: usize = 32;
+
+/// A knockback impulse slamming into a wall faster than this (px/s along the
+/// wall normal) BOUNCES off it instead of stopping dead. Only the tagged
+/// `Knockback` vector ever bounces — ordinary walking `Velocity` still slides
+/// and pins against walls — and the threshold keeps the decayed tail of a
+/// spent shove from jittering against a wall it is resting on.
+const BOUNCE_MIN_NORMAL_SPEED: f32 = 250.0;
+
+/// How much of the into-wall speed survives a bounce (reflected back out).
+const BOUNCE_RESTITUTION: f32 = 0.45;
+
+/// How much of the along-wall speed survives a bounce (slight scrub).
+const BOUNCE_TANGENT_DAMPING: f32 = 0.9;
+
 /// System that applies velocity to position
 pub struct MovementSystem;
 
@@ -38,18 +55,35 @@ impl System for MovementSystem {
                 .map(|r| r.value)
                 .unwrap_or(0.0);
 
-            // Then get position (mutable borrow) and update it
-            if let (Some(pos), Some(vel)) = (world.get_component_mut::<Position>(entity), vel) {
-                // Layer the knockback impulse on top of the normal velocity so
-                // the shove travels through the same wall/bounds clamping below.
-                let (kb_x, kb_y) = knockback.map(|k| (k.x, k.y)).unwrap_or((0.0, 0.0));
+            let pos0 = world.get_component::<Position>(entity).copied();
+            let (Some(pos0), Some(vel)) = (pos0, vel) else {
+                continue;
+            };
 
-                // Calculate desired new position
-                let new_x = pos.x + (vel.x + kb_x) * dt;
-                let new_y = pos.y + (vel.y + kb_y) * dt;
+            // Layer the knockback impulse on top of the normal velocity so the
+            // shove travels through the same wall/bounds clamping below. The
+            // impulse is worked on locally: a bounce below rewrites it.
+            let (mut kb_x, mut kb_y) = knockback.map(|k| (k.x, k.y)).unwrap_or((0.0, 0.0));
+            let mut final_x = pos0.x;
+            let mut final_y = pos0.y;
 
-                let mut final_x = new_x;
-                let mut final_y = new_y;
+            // Sub-step the motion so a fast mover can never jump clean over a
+            // thin wall in one integration step: each sub-step advances at most
+            // `radius`, which guarantees the endpoint check below always finds
+            // the collision and resolves it back out the side the mover came
+            // from (the centre can never reach a wall's midline in one step).
+            // Radius-less entities never collide with walls, so one step does.
+            let speed = ((vel.x + kb_x).powi(2) + (vel.y + kb_y).powi(2)).sqrt();
+            let steps = if radius > 0.0 && speed * dt > radius {
+                ((speed * dt / radius).ceil() as usize).clamp(1, MAX_SUBSTEPS)
+            } else {
+                1
+            };
+            let sub_dt = dt / steps as f32;
+
+            for _ in 0..steps {
+                final_x += (vel.x + kb_x) * sub_dt;
+                final_y += (vel.y + kb_y) * sub_dt;
 
                 // Check each wall and resolve collisions
                 for wall in &walls {
@@ -75,7 +109,12 @@ impl System for MovementSystem {
                         let dist_to_top = final_y - (wall.y - radius);
                         let dist_to_bottom = (wall_bottom + radius) - final_y;
 
-                        // Find the closest edge and push out
+                        // Find the closest edge and push out. When a knockback
+                        // impulse drives the mover into the wall fast enough, it
+                        // BOUNCES: the impulse component along the wall normal
+                        // reflects (damped by the restitution), the tangential
+                        // component is scrubbed slightly. Walking velocity is
+                        // never reflected — it keeps sliding/pinning as before.
                         let min_dist = dist_to_left
                             .min(dist_to_right)
                             .min(dist_to_top)
@@ -83,29 +122,48 @@ impl System for MovementSystem {
 
                         if min_dist == dist_to_left && dist_to_left > 0.0 {
                             final_x = wall.x - radius;
+                            if kb_x > BOUNCE_MIN_NORMAL_SPEED {
+                                kb_x = -kb_x * BOUNCE_RESTITUTION;
+                                kb_y *= BOUNCE_TANGENT_DAMPING;
+                            }
                         } else if min_dist == dist_to_right && dist_to_right > 0.0 {
                             final_x = wall_right + radius;
+                            if kb_x < -BOUNCE_MIN_NORMAL_SPEED {
+                                kb_x = -kb_x * BOUNCE_RESTITUTION;
+                                kb_y *= BOUNCE_TANGENT_DAMPING;
+                            }
                         } else if min_dist == dist_to_top && dist_to_top > 0.0 {
                             final_y = wall.y - radius;
+                            if kb_y > BOUNCE_MIN_NORMAL_SPEED {
+                                kb_y = -kb_y * BOUNCE_RESTITUTION;
+                                kb_x *= BOUNCE_TANGENT_DAMPING;
+                            }
                         } else if min_dist == dist_to_bottom && dist_to_bottom > 0.0 {
                             final_y = wall_bottom + radius;
+                            if kb_y < -BOUNCE_MIN_NORMAL_SPEED {
+                                kb_y = -kb_y * BOUNCE_RESTITUTION;
+                                kb_x *= BOUNCE_TANGENT_DAMPING;
+                            }
                         }
                     }
                 }
+            }
 
-                // Keep entities within the world bounds.
+            // Keep entities within the world bounds.
+            if let Some(pos) = world.get_component_mut::<Position>(entity) {
                 pos.x = final_x.clamp(0.0, WORLD_SIZE);
                 pos.y = final_y.clamp(0.0, WORLD_SIZE);
             }
 
-            // Decay the knockback impulse (frame-rate independent) after it has
-            // been applied, and drop it once it is spent so it stops nudging.
+            // Write back the (possibly bounced) impulse, decay it
+            // (frame-rate independent), and drop it once it is spent so it
+            // stops nudging the entity forever.
             if knockback.is_some() {
                 let decay = (-dt / KNOCKBACK_DECAY_TAU).exp();
                 let mut spent = false;
                 if let Some(kb) = world.get_component_mut::<Knockback>(entity) {
-                    kb.x *= decay;
-                    kb.y *= decay;
+                    kb.x = kb_x * decay;
+                    kb.y = kb_y * decay;
                     spent = kb.magnitude() < KNOCKBACK_MIN_SPEED;
                 }
                 if spent {

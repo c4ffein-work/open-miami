@@ -40,6 +40,8 @@ mod op {
     pub const POSTFX: f32 = 14.0; // kind t r g b  (full-screen post pass over the whole frame)
     pub const PIX_BEGIN: f32 = 15.0; // px w h  (open a pixel-art group: rasterize at art resolution)
     pub const PIX_END: f32 = 16.0; // x y  (close it: nearest-upscale the group at (x, y))
+    pub const PORTRAIT: f32 = 17.0; // colorIdx x y sizePx time mode  (slow-orbit 3D robot portrait, pixel-art; mode 0 = bust, 1 = headshot)
+    pub const GUN_PICKUP: f32 = 18.0; // weaponIdx x y angle sizePx  (3D weapon lying flat, pixel-art)
 }
 
 /// Separator between entries in the per-frame text arena. renderer.js splits
@@ -293,6 +295,58 @@ impl Graphics {
         ]);
     }
 
+    /// Draw a DIALOGUE PORTRAIT: the live 3D robot rendered by the JS
+    /// robot-core pipeline from a 3/4 orbit camera that slowly rotates
+    /// around the model's vertical axis (a gentle ~±25° sway at 0.15 Hz,
+    /// derived from `time`, so the lit face keeps toward the viewer),
+    /// rasterized at a small art resolution (64 texels) and upscaled
+    /// NEAREST — a pixelated, visibly rotating character portrait.
+    /// `mode` picks the framing: 0 = the full head-to-toe BUST (the
+    /// slightly-elevated camera), 1 = a HEADSHOT — the camera pushed in and
+    /// raised to head height so the face fills most of the tile (the
+    /// letterbox dialogue bar's face). `color_idx` follows the
+    /// [`draw_robot`](Self::draw_robot) colour table. Screen space (through
+    /// the current transform); the portrait is a square quad of `size_px`
+    /// px centered on `center`. `time` drives both the idle animation and
+    /// the sway.
+    pub fn draw_robot_portrait(
+        &self,
+        color_idx: u32,
+        center: Vec2,
+        size_px: f32,
+        time: f32,
+        mode: u32,
+    ) {
+        self.push(&[
+            op::PORTRAIT,
+            color_idx as f32,
+            center.x,
+            center.y,
+            size_px,
+            time,
+            mode as f32,
+        ]);
+    }
+
+    /// Draw a weapon LYING ON THE GROUND as its actual 3D model (the same
+    /// box-built guns the robots hold, plus the melee bar), seen from the
+    /// game's true top-down camera, laid flat on its side and spun to
+    /// `angle` (radians, screen convention: 0 = muzzle toward +x, positive
+    /// = clockwise), rasterized at a small art resolution and upscaled
+    /// NEAREST (pixel-art, like the portrait). World space (through the
+    /// current transform); a square quad of `size_px` px on `center`.
+    ///   weapon_idx: 0 bar (melee), 1 pistol, 2 machinegun, 3 shotgun
+    pub fn draw_gun_pickup(&self, weapon_idx: u32, center: Vec2, angle: f32, size_px: f32) {
+        self.push(&[
+            op::GUN_PICKUP,
+            weapon_idx as f32,
+            center.x,
+            center.y,
+            angle,
+            size_px,
+        ]);
+    }
+
     /// Draw the LIVE 3D shoggoth boss. The JS renderer runs the shoggoth-core
     /// 3D->2D pipeline (mass, smiley mask, tentacles + dot eyes) at continuous
     /// time `time` — every frame, no caching — into a scratch tile and draws it
@@ -347,6 +401,12 @@ impl Graphics {
     ///   kind 8 = PIXEL MOSAIC: chunky pixelation + dithered posterize
     ///   kind 9 = TUNNEL RUSH: radial zoom blur toward the centre, hot core,
     ///            edge vignette
+    ///   kind 10 = WARP TRAILS: feedback accumulator streaming the frame's
+    ///            bright pixels outward from the centre as long-exposure
+    ///            radial light trails (the ending elevator ride); `t` drives
+    ///            pull + decay, the colour tints the trails. The renderer
+    ///            clears the accumulator whenever the previous frame did not
+    ///            use kind 10.
     /// Only the last POSTFX of a frame applies. Any other kind is a no-op.
     pub fn postfx(&self, kind: u32, t: f32, color: Color) {
         self.push(&[op::POSTFX, kind as f32, t, color.r, color.g, color.b]);

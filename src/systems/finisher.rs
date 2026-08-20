@@ -381,7 +381,9 @@ mod tests {
         world.add_component(enemy, Position::new(30.0, 0.0));
         world.add_component(enemy, Health::new(50));
 
-        // The metal bar's damage (100) kills a 50 hp rogue outright.
+        // The metal bar's damage (100) kills a 50 hp rogue outright. The
+        // corpse carries a `Stunned` purely as the recorded fall (sprawled
+        // along the blow, attacker -> victim) — it is dead, not downed.
         let bar = Weapon::new(WeaponType::Melee);
         CombatSystem::process_melee(
             &mut world,
@@ -392,7 +394,25 @@ mod tests {
         );
 
         assert!(world.get_component::<Health>(enemy).unwrap().is_dead());
-        assert!(!world.has_component::<Stunned>(enemy));
+        let fall = world.get_component::<Stunned>(enemy).unwrap().fall_angle;
+        assert!(fall.abs() < 0.01, "the corpse fell along the swing");
+
+        // A rogue that SURVIVES the swing is hurt but never knocked down.
+        let tank = world.spawn();
+        world.add_component(tank, Enemy);
+        world.add_component(tank, Position::new(30.0, 0.0));
+        world.add_component(tank, Health::new(500));
+        CombatSystem::process_melee(
+            &mut world,
+            Position::new(0.0, 0.0),
+            Position::new(100.0, 0.0),
+            bar.damage,
+            50.0,
+        );
+        let health = world.get_component::<Health>(tank).unwrap();
+        assert!(health.is_alive());
+        assert!(health.current < health.max);
+        assert!(!world.has_component::<Stunned>(tank));
     }
 
     #[test]

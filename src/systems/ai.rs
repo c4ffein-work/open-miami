@@ -1,12 +1,122 @@
 use crate::collision::{has_line_of_sight, has_line_of_sight_with_padding};
 use crate::components::{
-    AIState, DebugPath, DebugTrail, Enemy, EnemyType, Health, Player, Position, Rotation, Speed,
-    Stunned, Velocity, WanderState, AI,
+    AIState, DebugPath, DebugTrail, Enemy, EnemyType, Health, NavPath, Player, Position, Rotation,
+    Speed, Stunned, Velocity, WanderState, AI,
 };
 use crate::ecs::world::Wall;
 use crate::ecs::{Entity, System, World};
-use crate::pathfinding::NavigationGrid;
+use crate::math::Vec2;
+use crate::pathfinding::{GridCoord, NavigationGrid};
 use std::f32::consts::PI;
+
+// --- Pathfinding throttle -----------------------------------------------------
+// A* is far too expensive to run per chaser per tick (an unreachable target —
+// e.g. the player tucked behind a wall — floods the whole grid before failing).
+// Chasers recompute their path at ~5 Hz, staggered per entity so a crowd
+// alerted on the same tick doesn't recompute in lockstep; between recomputes
+// they keep following the cached waypoints. A recompute is forced early when
+// the target has drifted away from the cached path's goal or the cached path
+// has been walked to its end.
+
+/// Base seconds between path recomputes for a chaser (~5 Hz).
+pub(crate) const REPATH_INTERVAL: f32 = 0.2;
+/// Base seconds between path recomputes for a strolling passive (its target
+/// is a fixed point in a zone, so ~1.5 Hz is plenty).
+pub(crate) const PASSIVE_REPATH_INTERVAL: f32 = 0.7;
+/// Recompute immediately when the target is this far from the cached goal.
+const REPATH_TARGET_DRIFT: f32 = 80.0;
+/// Per-entity stagger: entity id modulo this many slots...
+const REPATH_STAGGER_SLOTS: u64 = 8;
+/// ...times this much extra delay per slot (one 60 Hz tick).
+const REPATH_STAGGER_STEP: f32 = 1.0 / 60.0;
+/// A cached waypoint counts as reached within this distance (px); the
+/// follower then advances to the next one.
+const WAYPOINT_ARRIVE: f32 = 20.0;
+
+/// The movement target for an entity whose padded line of sight to `target`
+/// is blocked: follow the cached [`NavPath`], recomputing it only on the
+/// throttle described above. Writes the [`DebugPath`] visualization only when
+/// the world's debug flag is on ([`World::debug_viz`]).
+pub(crate) fn throttled_path_target(
+    world: &mut World,
+    entity: Entity,
+    nav_grid: &NavigationGrid,
+    here: Vec2,
+    target: Vec2,
+    interval: f32,
+    dt: f32,
+) -> Vec2 {
+    let debug_viz = world.debug_viz();
+    if !world.has_component::<NavPath>(entity) {
+        // Fresh cache: timer 0 forces an immediate first compute below.
+        world.add_component(entity, NavPath::default());
+    }
+    let (waypoint, debug_waypoints) = {
+        let stagger = (entity.0 % REPATH_STAGGER_SLOTS) as f32 * REPATH_STAGGER_STEP;
+        let cache = world.get_component_mut::<NavPath>(entity).unwrap();
+        cache.timer -= dt;
+        // Walked the cached path to its end but LOS is still blocked.
+        let exhausted = !cache.waypoints.is_empty() && cache.next >= cache.waypoints.len();
+        let drifted = cache.target.distance(target) > REPATH_TARGET_DRIFT;
+        if cache.timer <= 0.0 || drifted || exhausted {
+            // An unreachable target leaves the waypoints empty; the throttle
+            // then also rate-limits the (worst-case, full-flood) retries.
+            cache.waypoints = nav_grid.find_path(here, target).unwrap_or_default();
+            cache.target = target;
+            cache.next = 0;
+            cache.timer = interval + stagger;
+            cache.recomputes = cache.recomputes.saturating_add(1);
+        }
+        // Follow the cached path: consume waypoints we're standing in / on.
+        let here_cell = GridCoord::from_world_pos(here.x, here.y);
+        while let Some(wp) = cache.waypoints.get(cache.next) {
+            let reached = GridCoord::from_world_pos(wp.x, wp.y) == here_cell
+                || wp.distance(here) < WAYPOINT_ARRIVE;
+            if reached {
+                cache.next += 1;
+            } else {
+                break;
+            }
+        }
+        let waypoint = match cache.waypoints.get(cache.next) {
+            Some(wp) => *wp,
+            // No path (unreachable target) or path fully walked: head
+            // straight at the target (the previous behavior); an exhausted
+            // path forces a recompute on the next tick.
+            None => target,
+        };
+        let debug_waypoints =
+            debug_viz.then(|| cache.waypoints[cache.next.min(cache.waypoints.len())..].to_vec());
+        (waypoint, debug_waypoints)
+    };
+    if let Some(waypoints) = debug_waypoints {
+        if waypoints.is_empty() {
+            if let Some(dp) = world.get_component_mut::<DebugPath>(entity) {
+                *dp = DebugPath::clear();
+            }
+        } else if let Some(dp) = world.get_component_mut::<DebugPath>(entity) {
+            *dp = DebugPath::new(waypoints, target);
+        } else {
+            world.add_component(entity, DebugPath::new(waypoints, target));
+        }
+    }
+    waypoint
+}
+
+/// Called when an entity has clear (padded) line of sight and moves directly:
+/// expire its cached path so the next blocked tick recomputes immediately,
+/// and clear the debug overlay.
+pub(crate) fn clear_path_cache(world: &mut World, entity: Entity) {
+    if let Some(cache) = world.get_component_mut::<NavPath>(entity) {
+        cache.waypoints.clear();
+        cache.timer = 0.0;
+    }
+    if let Some(dp) = world.get_component_mut::<DebugPath>(entity) {
+        if !dp.waypoints.is_empty() {
+            *dp = DebugPath::clear();
+        }
+    }
+}
 
 // Pseudo-random number generation. The RNG state lives in the `World` (so every
 // `Simulation` is independently reproducible); these free helpers operate on a
@@ -426,40 +536,21 @@ impl System for AISystem {
                         wall_padding,
                     );
 
-                    // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
+                    // If clear line of sight (with inflated walls), move directly;
+                    // otherwise follow the (throttled) cached path
                     let movement_target = if has_clear_path {
-                        // Clear debug path when moving directly
-                        if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
-                            *debug_path = DebugPath::clear();
-                        }
+                        clear_path_cache(world, entity);
                         target.to_vec2()
-                    } else if let Some(full_path) =
-                        nav_grid.find_path(enemy_pos.to_vec2(), target.to_vec2())
-                    {
-                        // Store full path for debug visualization
-                        if world.has_component::<DebugPath>(entity) {
-                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
-                                *debug_path = DebugPath::new(full_path.clone(), target.to_vec2());
-                            }
-                        } else {
-                            world.add_component(
-                                entity,
-                                DebugPath::new(full_path.clone(), target.to_vec2()),
-                            );
-                        }
-
-                        // Get next waypoint from the already-computed path
-                        NavigationGrid::next_waypoint_in_path(
-                            &full_path,
+                    } else {
+                        throttled_path_target(
+                            world,
+                            entity,
+                            nav_grid,
                             enemy_pos.to_vec2(),
                             target.to_vec2(),
+                            REPATH_INTERVAL,
+                            dt,
                         )
-                    } else {
-                        // Clear debug path if no path found
-                        if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
-                            *debug_path = DebugPath::clear();
-                        }
-                        target.to_vec2()
                     };
 
                     let dx = movement_target.x - enemy_pos.x;
@@ -528,43 +619,21 @@ impl System for AISystem {
                             wall_padding,
                         );
 
-                        // If clear line of sight (with inflated walls), move directly; otherwise use pathfinding
+                        // If clear line of sight (with inflated walls), move directly;
+                        // otherwise follow the (throttled) cached path
                         let movement_target = if has_clear_path {
-                            // Clear debug path when moving directly
-                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
-                                *debug_path = DebugPath::clear();
-                            }
+                            clear_path_cache(world, entity);
                             target.to_vec2()
-                        } else if let Some(full_path) =
-                            nav_grid.find_path(enemy_pos.to_vec2(), target.to_vec2())
-                        {
-                            // Store full path for debug visualization
-                            if world.has_component::<DebugPath>(entity) {
-                                if let Some(debug_path) =
-                                    world.get_component_mut::<DebugPath>(entity)
-                                {
-                                    *debug_path =
-                                        DebugPath::new(full_path.clone(), target.to_vec2());
-                                }
-                            } else {
-                                world.add_component(
-                                    entity,
-                                    DebugPath::new(full_path.clone(), target.to_vec2()),
-                                );
-                            }
-
-                            // Get next waypoint from the already-computed path
-                            NavigationGrid::next_waypoint_in_path(
-                                &full_path,
+                        } else {
+                            throttled_path_target(
+                                world,
+                                entity,
+                                nav_grid,
                                 enemy_pos.to_vec2(),
                                 target.to_vec2(),
+                                REPATH_INTERVAL,
+                                dt,
                             )
-                        } else {
-                            // Clear debug path if no path found
-                            if let Some(debug_path) = world.get_component_mut::<DebugPath>(entity) {
-                                *debug_path = DebugPath::clear();
-                            }
-                            target.to_vec2()
                         };
 
                         let dx = movement_target.x - enemy_pos.x;
@@ -608,21 +677,25 @@ impl System for AISystem {
                 }
             }
 
-            // Record position in trail for debug visualization (only for chasing enemies)
-            if matches!(ai.state, AIState::SpottedUnsure | AIState::SurePlayerSeen) {
-                if world.has_component::<DebugTrail>(entity) {
-                    if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+            // Record position in trail for debug visualization (only for chasing
+            // enemies, and only while the debug overlays are actually visible —
+            // headless sims and normal play skip the bookkeeping entirely)
+            if world.debug_viz() {
+                if matches!(ai.state, AIState::SpottedUnsure | AIState::SurePlayerSeen) {
+                    if world.has_component::<DebugTrail>(entity) {
+                        if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                            trail.add_position(enemy_pos.to_vec2());
+                        }
+                    } else {
+                        let mut trail = DebugTrail::default();
                         trail.add_position(enemy_pos.to_vec2());
+                        world.add_component(entity, trail);
                     }
                 } else {
-                    let mut trail = DebugTrail::default();
-                    trail.add_position(enemy_pos.to_vec2());
-                    world.add_component(entity, trail);
-                }
-            } else {
-                // Clear trail when not chasing
-                if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
-                    trail.clear();
+                    // Clear trail when not chasing
+                    if let Some(trail) = world.get_component_mut::<DebugTrail>(entity) {
+                        trail.clear();
+                    }
                 }
             }
         }
@@ -1524,6 +1597,176 @@ mod tests {
             "feral wander should be erratic (saw {} distinct headings)",
             directions.len()
         );
+    }
+
+    /// Pin the enemy into the chase state (like the perf harness's
+    /// `alert_all`) so throttle tests exercise the pathfinding branch every
+    /// tick regardless of vision.
+    fn pin_chase(world: &mut World, enemy: Entity, player_pos: Position) {
+        if let Some(ai) = world.get_component_mut::<AI>(enemy) {
+            ai.state = AIState::SurePlayerSeen;
+            ai.last_known_player_position = Some(player_pos);
+            ai.state_timer = 1e9;
+        }
+    }
+
+    /// L-shaped corner world: player tucked behind the corner, enemy outside,
+    /// no (padded) line of sight between them.
+    fn corner_world() -> (World, Entity, Position) {
+        let mut world = World::new();
+        world.add_wall(200.0, 200.0, 400.0, 20.0); // horizontal wall
+        world.add_wall(200.0, 200.0, 20.0, 200.0); // vertical wall
+
+        let player_pos = Position::new(100.0, 300.0);
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, player_pos);
+
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, Position::new(300.0, 100.0));
+        world.add_component(enemy, AI::new());
+        world.add_component(enemy, Velocity::zero());
+        world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
+        (world, enemy, player_pos)
+    }
+
+    #[test]
+    fn test_throttled_chaser_still_reaches_player_around_corner() {
+        // With path recomputes throttled to ~5 Hz, a chaser must still round
+        // the corner and close on the player by following its cached path.
+        let (mut world, enemy, player_pos) = corner_world();
+        let initial_distance = world
+            .get_component::<Position>(enemy)
+            .unwrap()
+            .distance_to(&player_pos);
+
+        let mut system = AISystem::default();
+        for _ in 0..600 {
+            pin_chase(&mut world, enemy, player_pos);
+            system.run(&mut world, 0.016);
+            // Integrate velocity (stand-in for the movement system).
+            let vel = *world.get_component::<Velocity>(enemy).unwrap();
+            if let Some(pos) = world.get_component_mut::<Position>(enemy) {
+                pos.x += vel.x * 0.016;
+                pos.y += vel.y * 0.016;
+            }
+        }
+
+        let final_distance = world
+            .get_component::<Position>(enemy)
+            .unwrap()
+            .distance_to(&player_pos);
+        assert!(
+            final_distance < 120.0 && final_distance < initial_distance,
+            "chaser should round the corner: {initial_distance:.0} -> {final_distance:.0}"
+        );
+    }
+
+    #[test]
+    fn test_path_recompute_is_throttled() {
+        // A wall splits the world completely: the target is unreachable, so
+        // every recompute is a worst-case full A* flood. The throttle must
+        // keep that to a few recomputes per second, not one per tick (the
+        // old behavior: 60 recomputes over these 60 ticks).
+        let mut world = World::new();
+        world.add_wall(250.0, 0.0, 20.0, 2000.0);
+
+        let player_pos = Position::new(100.0, 1000.0);
+        let player = world.spawn();
+        world.add_component(player, Player);
+        world.add_component(player, player_pos);
+
+        let enemy = world.spawn();
+        world.add_component(enemy, Enemy);
+        world.add_component(enemy, Position::new(500.0, 1000.0));
+        world.add_component(enemy, AI::new());
+        world.add_component(enemy, Velocity::zero());
+        world.add_component(enemy, Speed::new(100.0));
+        world.add_component(enemy, Health::new(100));
+
+        let mut system = AISystem::default();
+        for _ in 0..60 {
+            pin_chase(&mut world, enemy, player_pos);
+            system.run(&mut world, 1.0 / 60.0);
+        }
+
+        let cache = world.get_component::<NavPath>(enemy).unwrap();
+        assert!(
+            cache.recomputes >= 2,
+            "the path must still be re-evaluated periodically ({} recomputes)",
+            cache.recomputes
+        );
+        assert!(
+            cache.recomputes <= 8,
+            "path recomputation must be throttled, got {} over 60 ticks (old code: 60)",
+            cache.recomputes
+        );
+    }
+
+    #[test]
+    fn test_throttle_repaths_immediately_when_target_moves_far() {
+        // The drift rule: when the chase target jumps far from the cached
+        // path's goal, the recompute happens NOW, not at the next 5 Hz slot.
+        let (mut world, enemy, player_pos) = corner_world();
+        let mut system = AISystem::default();
+        pin_chase(&mut world, enemy, player_pos);
+        system.run(&mut world, 0.016);
+        let before = world.get_component::<NavPath>(enemy).unwrap().recomputes;
+
+        // Teleport the chase target far away (still LOS-blocked, behind the
+        // vertical wall further down) and tick once.
+        let moved = Position::new(100.0, 390.0);
+        pin_chase(&mut world, enemy, moved);
+        system.run(&mut world, 0.016);
+        let after = world.get_component::<NavPath>(enemy).unwrap().recomputes;
+        assert_eq!(
+            after,
+            before + 1,
+            "a big target move must force an immediate repath"
+        );
+    }
+
+    #[test]
+    fn test_debug_structures_gated_by_debug_flag() {
+        // Flag off (the default): chasing must not record DebugPath/DebugTrail.
+        let (mut world, enemy, player_pos) = corner_world();
+        let mut system = AISystem::default();
+        for _ in 0..30 {
+            pin_chase(&mut world, enemy, player_pos);
+            system.run(&mut world, 0.016);
+        }
+        assert!(
+            !world.has_component::<DebugPath>(enemy),
+            "DebugPath must not be recorded with debug off"
+        );
+        assert!(
+            !world.has_component::<DebugTrail>(enemy),
+            "DebugTrail must not be recorded with debug off"
+        );
+
+        // Flag on: both appear (and the trail actually accumulates).
+        world.set_debug_viz(true);
+        for _ in 0..5 {
+            pin_chase(&mut world, enemy, player_pos);
+            system.run(&mut world, 0.016);
+        }
+        let dp = world.get_component::<DebugPath>(enemy).unwrap();
+        assert!(!dp.waypoints.is_empty(), "DebugPath recorded with debug on");
+        let trail = world.get_component::<DebugTrail>(enemy).unwrap();
+        assert!(!trail.positions.is_empty());
+    }
+
+    #[test]
+    fn test_debug_trail_is_a_ring_buffer() {
+        let mut trail = DebugTrail::new(3);
+        for i in 0..5 {
+            trail.add_position(Vec2::new(i as f32, 0.0));
+        }
+        assert_eq!(trail.positions.len(), 3);
+        assert_eq!(trail.positions[0].x, 2.0); // oldest two dropped
+        assert_eq!(trail.positions[2].x, 4.0);
     }
 
     #[test]

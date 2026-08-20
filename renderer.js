@@ -25,6 +25,11 @@
     14 POSTFX     kind t r g b                        (full-screen post pass)
     15 PIX_BEGIN  px w h                              (open a pixel-art group)
     16 PIX_END    x y                                 (close it, draw at x y)
+    17 PORTRAIT   colorIdx x y sizePx time mode       (dialogue portrait: slow-orbit
+                                                      3D robot, pixel-art; mode
+                                                      0 = bust, 1 = headshot)
+    18 GUNPICKUP  weaponIdx x y angle sizePx          (weapon lying on the floor
+                                                      as its 3D model, pixel-art)
 
    Everything is drawn as vertex-colored, textured triangles in one
    interleaved dynamic buffer (a 1x1 white texture stands in for solid
@@ -64,6 +69,13 @@
      7 NEON BLOOM    bright-pass glow, shadow tint toward the colour
      8 PIXEL MOSAIC  chunky pixelation + dithered posterize
      9 TUNNEL RUSH   radial zoom blur toward the centre (adrenaline)
+    10 WARP TRAILS   FEEDBACK: a persistent ping-pong accumulator is pulled
+                     toward the centre each frame (so its content streams
+                     OUTWARD), faded, and re-fed the scene's bright saturated
+                     pixels — long-exposure radial light trails (the ending
+                     elevator ride); the colour tints the trail decay. The
+                     accumulator is cleared whenever the previous frame did
+                     not use kind 10, so the effect always starts clean.
    All kinds share the args `kind t r g b` (t = 0..1 strength, rgb = the
    effect's colour where it uses one). Only the last POSTFX of a frame applies.
 
@@ -117,6 +129,31 @@ const SHOG_TILE = 384; // the boss is large (and drawn ~1:1 at the camera zoom)
 const SHOG_PX = 4; // shoggoth-core pixelation block size at this tile size
 const SHOG_ATLAS_SIZE = 768; // 2x2 = 4 bosses per batch (one is the norm)
 
+/* ---- pixel-sprite scratch tiles (PORTRAIT + GUNPICKUP) ----
+   Unlike the robot atlas (rendered ~1:1 and LINEAR-sampled), this atlas is
+   NEAREST-filtered and its tiles are rendered AT THE ART RESOLUTION, then
+   upscaled by the quad that samples them — true pixel art, never smoothed.
+   One 64px tile per sprite; a portrait uses the whole tile (64-texel art),
+   a ground gun only a GUN_ART-texel corner of it. */
+const FX_TILE = 64; // tile side = the portrait's art resolution (texels)
+const GUN_ART = 24; // ground-gun art resolution (texels) within a tile
+const FX_ATLAS_SIZE = 512; // 8x8 = 64 pixel-sprites per batch
+// The bust rotates as a gentle sway around a 3/4 base yaw (rather than a
+// full spin) so the lit face never turns away from the viewer.
+const PORTRAIT_YAW = 0.6; // 3/4 base yaw (rad)
+const PORTRAIT_SWAY = 0.44; // sway amplitude (rad, ~25 deg)
+const PORTRAIT_SWAY_W = 0.15 * Math.PI * 2; // sway angular speed (rad/s of `time`)
+const PORTRAIT_PITCH = 0.55; // slightly-elevated 3/4 camera (bust, mode 0)
+// HEADSHOT (mode 1): the camera pushed in and raised to head height so the
+// face fills most of the tile — near-eye-level, same gentle yaw sway.
+const HEADSHOT_YAW = 0.22; // near-frontal base yaw: the visor stays toward the viewer
+const HEADSHOT_SWAY = 0.24; // gentler sway (~14 deg): the face never turns away
+const HEADSHOT_PITCH = 0.12; // eye level, barely above: the face, not the head's top
+const HEADSHOT_HALFV = 0.52; // ortho half-extent: head + a hint of shoulders
+const HEADSHOT_CENTER = [0, 1.86, 0]; // orbit focus at head height (head y=1.95)
+const PORTRAIT_HALFV = 1.55; // bust ortho half-extent (whole robot)
+const PORTRAIT_CENTER = [0, 0.95, 0]; // bust orbit focus (robot-core default)
+
 /* ---- glyph atlas config ------------------------------------------------- */
 const GLYPH_FS = 48; // rasterization font size; quads scale from this
 const GLYPH_PAD = 2; // padding inside each glyph cell
@@ -148,7 +185,7 @@ void main(){
 
 /* ---- opcode argument counts (mirror of the table above); used by the POSTFX
    pre-scan, which has to walk the stream without executing it ---- */
-const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2];
+const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2, 6, 5];
 const OP_POSTFX = 14;
 
 /* ---- pixel-art group scratch target ---- */
@@ -347,7 +384,7 @@ void main(){
     float dith = (hash(id) - 0.5) / levels;
     c = mix(c, floor((c + dith) * levels + 0.5) / levels, t);
     c *= 1.0 - 0.08 * t * scan;
-  } else {
+  } else if (uKind < 9.5) {
     // ---- 9 TUNNEL RUSH: radial zoom blur toward the centre ----
     vec2 p = uv - 0.5;
     vec3 acc = vec3(0.0);
@@ -364,8 +401,136 @@ void main(){
     vec2 q = uv * (1.0 - uv);
     c *= pow(clamp(q.x * q.y * 18.0, 0.0, 1.0), 0.4 * t);
     c += (n - 0.5) * 0.06 * t;
+  } else if (uKind < 11.5) {
+    // ---- 11 UI GREY: the modal wash — what's under, desaturated to
+    // white/black, tape noise + scanlines + coarse horizontal grain,
+    // gently vignetted. (Kind 10 WARP TRAILS never reaches this shader:
+    // frameRender routes it to the feedback pass.)
+    c = texture2D(uScene, uv).rgb;
+    float g = luma(c);
+    c = mix(c, vec3(g), 0.85 * t);
+    c *= 1.0 - 0.10 * t * scan;
+    c += (n - 0.5) * 0.10 * t;
+    float ln = hash(vec2(floor(uv.y * uRes.y / 3.0), floor(uTime * 13.0)));
+    c += (ln - 0.5) * 0.06 * t;
+    vec2 q = uv * (1.0 - uv);
+    c *= pow(clamp(q.x * q.y * 20.0, 0.0, 1.0), 0.25 * t);
+    c = mix(c, c * uColor, 0.20 * t);
+  } else {
+    // ---- 12 MODAL STATIC: uColor.r/.g = the centred modal's HALF extents
+    // as fractions of the screen. INSIDE that rect: the kind-11 grey/tape
+    // wash (the modal itself). OUTSIDE: the scene blurred, desaturated and
+    // buried under t coverage of hard 6-px binary white noise — real
+    // dead-channel static, re-rolled every frame.
+    vec2 halfExt = vec2(uColor.r, uColor.g);
+    vec2 dc = abs(uv - 0.5);
+    // Distance outside the panel edge, in screen px (Chebyshev = square
+    // rings): a 6-px WHITE band then a 6-px BLACK band frame the panel
+    // before the static starts — one noise-pixel each.
+    vec2 opx = max(dc - halfExt, 0.0) * uRes;
+    float ring = max(opx.x, opx.y);
+    if (dc.x <= halfExt.x && dc.y <= halfExt.y) {
+      // The panel: scene passed through untouched (an opaque black fill
+      // with white text — no wash, no tint).
+      c = texture2D(uScene, uv).rgb;
+    } else if (ring <= 6.0) {
+      c = vec3(1.0);
+    } else if (ring <= 12.0) {
+      c = vec3(0.0);
+    } else {
+      vec2 px = 1.0 / uRes;
+      // The 6-px noise grid is ANCHORED TO THE PANEL CORNER, not the
+      // screen: with the panel size a multiple of 6, every cell around the
+      // rings is whole — no sliced pixels at the edges.
+      vec2 originPx = (vec2(0.5) - halfExt) * uRes;
+      vec2 cell = floor((gl_FragCoord.xy - originPx) / 6.0);
+      // Sinless hash (Hoskins hash13): the sin-based one is a scrambled
+      // PLANE WAVE, and at some phases its diagonal ridges de-scramble
+      // into visible bands for a moment. This one has no linear structure.
+      // frame is a third axis (phase, never a spatial slide), wrapped to
+      // keep floats small.
+      float frame = mod(floor(uTime * 60.0), 240.0);
+      vec3 p3 = fract(vec3(cell, frame) * 0.1031);
+      p3 += dot(p3, p3.zyx + 31.32);
+      float roll = fract((p3.x + p3.y) * p3.z);
+      vec3 q3 = fract(vec3(cell, frame + 61.0) * 0.1031);
+      q3 += dot(q3, q3.zyx + 31.32);
+      float bw = step(0.5, fract((q3.x + q3.y) * q3.z));
+      float cover = step(1.0 - t, roll);
+      if (cover > 0.5) {
+        // A static cell: 26% the average of the pixels under the whole
+        // cell (5 taps spread across its 6x6 px), 74% the random b/w.
+        vec2 cc = (originPx + (cell + 0.5) * 6.0) * px;
+        vec3 avg = texture2D(uScene, cc).rgb * 0.2;
+        avg += texture2D(uScene, cc + vec2( 2.0,  2.0) * px).rgb * 0.2;
+        avg += texture2D(uScene, cc + vec2(-2.0,  2.0) * px).rgb * 0.2;
+        avg += texture2D(uScene, cc + vec2( 2.0, -2.0) * px).rgb * 0.2;
+        avg += texture2D(uScene, cc + vec2(-2.0, -2.0) * px).rgb * 0.2;
+        c = 0.42 * avg + 0.58 * vec3(bw);
+      } else {
+        vec3 b = texture2D(uScene, uv).rgb * 0.28;
+        b += texture2D(uScene, uv + vec2(3.0, 0.0) * px).rgb * 0.18;
+        b += texture2D(uScene, uv - vec2(3.0, 0.0) * px).rgb * 0.18;
+        b += texture2D(uScene, uv + vec2(0.0, 3.0) * px).rgb * 0.18;
+        b += texture2D(uScene, uv - vec2(0.0, 3.0) * px).rgb * 0.18;
+        float g = luma(b);
+        c = mix(b, vec3(g), 0.65);
+      }
+    }
   }
   gl_FragColor = vec4(c, 1.0);
+}
+`;
+
+// POSTFX kind 10 (WARP TRAILS) — a separate two-mode feedback shader so the
+// single-pass POST_FS above stays byte-for-byte what kinds 0-9 always ran.
+//   mode 0 (combine, drawn into the write accumulator): sample the read
+//     accumulator with UVs pulled slightly TOWARD the centre — its content
+//     therefore appears pushed OUTWARD over time — decay it (tinted by
+//     uColor), then stamp in the scene's bright, saturated pixels. `t`
+//     drives both the pull distance and the decay.
+//   mode 1 (present, drawn to the canvas): the crisp scene screen-blended
+//     with the freshly written trails.
+const WARP_FS = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uScene;
+uniform sampler2D uPrev;
+uniform vec2 uRes;
+uniform float uT;
+uniform vec3 uColor;
+uniform float uMode;
+
+void main(){
+  float t = clamp(uT, 0.0, 1.0);
+  vec3 scn = texture2D(uScene, vUv).rgb;
+  if (uMode < 0.5) {
+    // ---- combine: push the accumulator outward, fade it, feed it ----
+    vec2 d = vUv - 0.5;
+    float pull = 0.006 + 0.040 * t;
+    vec3 prev = texture2D(uPrev, 0.5 + d * (1.0 - pull)).rgb;
+    // Decay, drifting the trail colour toward the tint (per-channel fade).
+    float fade = 0.982 - 0.030 * t;
+    prev *= fade * mix(vec3(1.0), uColor, 0.30 * t);
+    // Feed: bright pixels, gated hard on saturation (neon streaks grab,
+    // near-white credits text does not), attenuated in the central text
+    // column and masked out of the centre so the elevator car + the roll
+    // stay crisp.
+    float maxc = max(scn.r, max(scn.g, scn.b));
+    float minc = min(scn.r, min(scn.g, scn.b));
+    float satw = smoothstep(0.45, 0.80, maxc - minc);
+    float asp = uRes.x / max(uRes.y, 1.0);
+    float rad = length(vec2(d.x * asp, d.y));
+    float ring = smoothstep(0.10, 0.24, rad);
+    float colw = mix(0.40, 1.0, smoothstep(0.42, 0.60, abs(d.x * asp)));
+    vec3 feed = max(scn - 0.45, 0.0) * 1.8 * satw * ring * colw * t;
+    gl_FragColor = vec4(max(prev, feed), 1.0);
+  } else {
+    // ---- present: scene + trails, screen-blended so nothing clips ----
+    vec3 tr = texture2D(uPrev, vUv).rgb;
+    vec3 c = 1.0 - (1.0 - scn) * (1.0 - tr);
+    gl_FragColor = vec4(c, 1.0);
+  }
 }
 `;
 
@@ -375,6 +540,11 @@ export function initRenderer(canvas) {
     antialias: true,
     premultipliedAlpha: true,
     preserveDrawingBuffer: false,
+    // Low-latency canvas: where supported (Chrome + a compositor overlay
+    // path) the swap bypasses the compositor queue, saving up to one vsync
+    // of input->photon latency. Ignored by other browsers; if a platform
+    // ever shows tearing or a black canvas, delete this line.
+    desynchronized: true,
   });
   if (!gl) {
     throw new Error("WebGL is not available; the game cannot render.");
@@ -429,11 +599,12 @@ export function initRenderer(canvas) {
   gl.vertexAttribPointer(loc.aColor, 4, gl.FLOAT, false, STRIDE, 16);
 
   /* ---- textures ---- */
-  function makeTexture(size) {
+  function makeTexture(size, nearest) {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const filter = nearest ? gl.NEAREST : gl.LINEAR;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     if (size) {
@@ -497,6 +668,38 @@ export function initRenderer(canvas) {
     reveal: 0, time: 0, heading: 0, wander: false, px: SHOG_PX, transparent: true,
   };
   const shogTarget = { fbo: shogFbo, x: 0, y: 0, w: SHOG_TILE, h: SHOG_TILE };
+
+  /* ---- pixel-sprite scratch atlas (PORTRAIT + GUNPICKUP): NEAREST tiles
+     rendered at art resolution, upscaled by their quads ---- */
+  const fxTex = makeTexture(FX_ATLAS_SIZE, true);
+  const fxCols = Math.floor(FX_ATLAS_SIZE / FX_TILE);
+  const fxSlots = fxCols * fxCols;
+  const fxFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fxFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fxTex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    throw new Error("Pixel-sprite atlas framebuffer is incomplete; the game cannot render.");
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  // Sprites queued for the current batch: (kind, a, b) per slot —
+  // kind 0 = portrait bust (a = colorIdx, b = time), kind 1 = ground gun
+  // (a = weaponIdx, b = angle), kind 2 = portrait headshot (as kind 0 but
+  // the close head-level camera). Rendered by renderQueuedSprites.
+  const fxQueue = new Float32Array(fxSlots * 3);
+  let fxUsed = 0;
+  const portraitOpts = {
+    pose: "idle", color: "coral", weapon: "fist", time: 0, facingDeg: 0,
+    // rt/FX_TILE post blocks: one output texel per block = 64-texel art
+    px: ROBOT_TILE / FX_TILE, transparent: true,
+    orbit: {
+      yaw: PORTRAIT_YAW, pitch: PORTRAIT_PITCH, halfV: PORTRAIT_HALFV,
+      center: PORTRAIT_CENTER,
+    },
+  };
+  const gunOpts = {
+    weaponIdx: 0, angle: 0, px: ROBOT_TILE / GUN_ART, transparent: true,
+  };
+  const fxTarget = { fbo: fxFbo, x: 0, y: 0, w: FX_TILE, h: FX_TILE };
 
   /* ---- POSTFX: offscreen scene target + the full-screen post program ---- */
   const postProg = gl.createProgram();
@@ -594,6 +797,110 @@ export function initRenderer(canvas) {
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindTexture(gl.TEXTURE_2D, null);
     if (postLoc.aPos !== loc.aPos) gl.disableVertexAttribArray(postLoc.aPos);
+    batchFbo = null;
+    batchW = w;
+    batchH = h;
+    bindBatchState();
+    gl.uniform1i(loc.uTex, 0);
+  }
+
+  /* ---- POSTFX kind 10 (WARP TRAILS): ping-pong feedback accumulator ---- */
+  const warpProg = gl.createProgram();
+  gl.attachShader(warpProg, compile(gl.VERTEX_SHADER, POST_VS));
+  gl.attachShader(warpProg, compile(gl.FRAGMENT_SHADER, WARP_FS));
+  gl.linkProgram(warpProg);
+  if (!gl.getProgramParameter(warpProg, gl.LINK_STATUS)) {
+    throw new Error("Warp program link failed: " + gl.getProgramInfoLog(warpProg));
+  }
+  const warpLoc = {
+    aPos: gl.getAttribLocation(warpProg, "aPos"),
+    uScene: gl.getUniformLocation(warpProg, "uScene"),
+    uPrev: gl.getUniformLocation(warpProg, "uPrev"),
+    uRes: gl.getUniformLocation(warpProg, "uRes"),
+    uT: gl.getUniformLocation(warpProg, "uT"),
+    uColor: gl.getUniformLocation(warpProg, "uColor"),
+    uMode: gl.getUniformLocation(warpProg, "uMode"),
+  };
+  // Two canvas-sized LINEAR accumulators (the sub-texel pull needs bilinear
+  // sampling), created lazily on the first warp frame, reallocated on resize.
+  const warpTex = [null, null];
+  const warpFbo = [null, null];
+  let warpW = 0, warpH = 0;
+  let warpRead = 0; // index of the accumulator holding last frame's trails
+  let warpLive = false; // did the PREVIOUS frame run the warp pass?
+  function ensureWarpTargets(w, h) {
+    if (warpW === w && warpH === h) return;
+    for (let i = 0; i < 2; i++) {
+      if (!warpTex[i]) {
+        warpTex[i] = makeTexture();
+        warpFbo[i] = gl.createFramebuffer();
+      }
+      gl.bindTexture(gl.TEXTURE_2D, warpTex[i]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, warpFbo[i]);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, warpTex[i], 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        throw new Error("Warp framebuffer is incomplete; the trails cannot render.");
+      }
+    }
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    warpW = w;
+    warpH = h;
+    warpLive = false; // fresh (or resized) buffers hold garbage: clear first
+  }
+  function clearWarpAccum() {
+    for (let i = 0; i < 2; i++) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, warpFbo[i]);
+      gl.viewport(0, 0, warpW, warpH);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  // The kind-10 replacement for runPostPass: pass A folds last frame's
+  // trails (pulled toward the centre = streaming outward) + the scene's
+  // bright pixels into the write accumulator, pass B presents scene+trails
+  // to the canvas, then read/write swap. State handed back to the batch
+  // pipeline exactly like runPostPass.
+  function runWarpPass(w, h) {
+    ensureWarpTargets(w, h);
+    if (!warpLive) clearWarpAccum(); // the effect was off last frame: start clean
+    const write = 1 - warpRead;
+    gl.disable(gl.BLEND);
+    gl.useProgram(warpProg);
+    gl.disableVertexAttribArray(loc.aUv);
+    gl.disableVertexAttribArray(loc.aColor);
+    gl.bindBuffer(gl.ARRAY_BUFFER, postVbo);
+    gl.enableVertexAttribArray(warpLoc.aPos);
+    gl.vertexAttribPointer(warpLoc.aPos, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform1i(warpLoc.uScene, 0);
+    gl.uniform1i(warpLoc.uPrev, 1);
+    gl.uniform2f(warpLoc.uRes, w, h);
+    gl.uniform1f(warpLoc.uT, postfx.t);
+    gl.uniform3f(warpLoc.uColor, postfx.r, postfx.g, postfx.b);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, warpTex[warpRead]);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+    // Pass A: combine into the write accumulator.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, warpFbo[write]);
+    gl.viewport(0, 0, w, h);
+    gl.uniform1f(warpLoc.uMode, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    // Pass B: present the scene + the fresh trails on the canvas.
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, warpTex[write]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    gl.uniform1f(warpLoc.uMode, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    if (warpLoc.aPos !== loc.aPos) gl.disableVertexAttribArray(warpLoc.aPos);
+    warpRead = write;
+    warpLive = true;
     batchFbo = null;
     batchW = w;
     batchH = h;
@@ -773,6 +1080,35 @@ export function initRenderer(canvas) {
       shogTarget.y = Math.floor(i / shogCols) * SHOG_TILE;
       shogPipe.render(shogOpts, shogTarget);
     }
+    for (let i = 0; i < fxUsed; i++) {
+      const q = i * 3;
+      fxTarget.x = (i % fxCols) * FX_TILE;
+      fxTarget.y = Math.floor(i / fxCols) * FX_TILE;
+      const kind = fxQueue[q];
+      if (kind < 0.5 || kind > 1.5) {
+        // portrait: slow rotation (a gentle sway) around the vertical axis;
+        // kind 2 = headshot (the camera pushed in / raised to head height)
+        const headshot = kind > 1.5;
+        portraitOpts.color = ROBOT_COLORS[fxQueue[q + 1] | 0] || ROBOT_COLORS[0];
+        portraitOpts.time = fxQueue[q + 2];
+        portraitOpts.orbit.yaw = headshot
+          ? HEADSHOT_YAW + HEADSHOT_SWAY * Math.sin(fxQueue[q + 2] * PORTRAIT_SWAY_W)
+          : PORTRAIT_YAW + PORTRAIT_SWAY * Math.sin(fxQueue[q + 2] * PORTRAIT_SWAY_W);
+        portraitOpts.orbit.pitch = headshot ? HEADSHOT_PITCH : PORTRAIT_PITCH;
+        portraitOpts.orbit.halfV = headshot ? HEADSHOT_HALFV : PORTRAIT_HALFV;
+        portraitOpts.orbit.center = headshot ? HEADSHOT_CENTER : PORTRAIT_CENTER;
+        fxTarget.w = FX_TILE;
+        fxTarget.h = FX_TILE;
+        robotPipe.render(portraitOpts, fxTarget);
+      } else {
+        // ground gun: tiny art-resolution rect in the tile's corner
+        gunOpts.weaponIdx = fxQueue[q + 1] | 0;
+        gunOpts.angle = fxQueue[q + 2];
+        fxTarget.w = GUN_ART;
+        fxTarget.h = GUN_ART;
+        robotPipe.renderGun(gunOpts, fxTarget);
+      }
+    }
     // The pipelines sampled their own scene texture on TEXTURE0; drop it so an
     // atlas is never both bound for sampling and attached to a framebuffer.
     gl.bindTexture(gl.TEXTURE_2D, null);
@@ -785,10 +1121,11 @@ export function initRenderer(canvas) {
   let boundTex = null;
   function flush() {
     // before the batch that samples them
-    if (robotUsed > 0 || shogUsed > 0) renderQueuedSprites();
+    if (robotUsed > 0 || shogUsed > 0 || fxUsed > 0) renderQueuedSprites();
     if (vCount === 0) {
       robotUsed = 0;
       shogUsed = 0;
+      fxUsed = 0;
       return;
     }
     gl.bindTexture(gl.TEXTURE_2D, boundTex || whiteTex);
@@ -798,6 +1135,7 @@ export function initRenderer(canvas) {
     vCount = 0;
     robotUsed = 0; // the quads sampling this batch's tiles are submitted: recycle
     shogUsed = 0;
+    fxUsed = 0;
   }
 
   function setTexture(tex) {
@@ -1170,6 +1508,52 @@ export function initRenderer(canvas) {
     quad(x - h, y - h, sizePx, sizePx, u0, v0, u1, v1, 1, 1, 1, 1);
   }
 
+  /* ---- pixel-sprites (PORTRAIT / GUNPICKUP): queue a live art-resolution
+     render into a NEAREST tile, draw it as an upscaled quad ---- */
+  function fxSlotTake(kind, a, b) {
+    setTexture(fxTex);
+    if (fxUsed >= fxSlots || vCount + 6 > MAX_VERTS) flush();
+    const slot = fxUsed++;
+    const q = slot * 3;
+    fxQueue[q] = kind;
+    fxQueue[q + 1] = a;
+    fxQueue[q + 2] = b;
+    return slot;
+  }
+
+  // Dialogue portrait: the live 3D robot from a 3/4 orbit camera, gently
+  // swaying, rendered at FX_TILE texels and NEAREST-upscaled to sizePx.
+  // mode 0 = bust (slightly-elevated full-body camera), mode 1 = headshot
+  // (pushed in / raised to head height: the face fills the tile). Screen
+  // space (through the transform stack, like everything).
+  function drawPortrait(colorIdx, x, y, sizePx, time, mode) {
+    const slot = fxSlotTake(mode > 0.5 ? 2 : 0, colorIdx, time);
+    const tx = (slot % fxCols) * FX_TILE;
+    const ty = Math.floor(slot / fxCols) * FX_TILE;
+    // v flipped: pass 2 renders bottom-up (see drawRobot)
+    const u0 = tx / FX_ATLAS_SIZE;
+    const v0 = (ty + FX_TILE) / FX_ATLAS_SIZE;
+    const u1 = (tx + FX_TILE) / FX_ATLAS_SIZE;
+    const v1 = ty / FX_ATLAS_SIZE;
+    const h = sizePx / 2;
+    quad(x - h, y - h, sizePx, sizePx, u0, v0, u1, v1, 1, 1, 1, 1);
+  }
+
+  // Weapon lying on the ground: its 3D model, top-down, spun to `angle`
+  // (radians, screen convention), rendered at GUN_ART texels and
+  // NEAREST-upscaled to sizePx. World space (through the transform stack).
+  function drawGunPickup(weaponIdx, x, y, angle, sizePx) {
+    const slot = fxSlotTake(1, weaponIdx, angle);
+    const tx = (slot % fxCols) * FX_TILE;
+    const ty = Math.floor(slot / fxCols) * FX_TILE;
+    const u0 = tx / FX_ATLAS_SIZE;
+    const v0 = (ty + GUN_ART) / FX_ATLAS_SIZE;
+    const u1 = (tx + GUN_ART) / FX_ATLAS_SIZE;
+    const v1 = ty / FX_ATLAS_SIZE;
+    const h = sizePx / 2;
+    quad(x - h, y - h, sizePx, sizePx, u0, v0, u1, v1, 1, 1, 1, 1);
+  }
+
   /* ---- frame execution ---- */
   function frameRender(cmds, textArena) {
     const w = canvas.width, h = canvas.height;
@@ -1194,6 +1578,7 @@ export function initRenderer(canvas) {
     vCount = 0;
     robotUsed = 0;
     shogUsed = 0;
+    fxUsed = 0;
 
     let i = 0;
     const n = cmds.length;
@@ -1286,6 +1671,14 @@ export function initRenderer(canvas) {
           pixEnd(cmds[i], cmds[i + 1]);
           i += 2;
           break;
+        case 17: // PORTRAIT
+          drawPortrait(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4], cmds[i + 5]);
+          i += 6;
+          break;
+        case 18: // GUNPICKUP
+          drawGunPickup(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4]);
+          i += 5;
+          break;
         default:
           // Unknown opcode: the stream is corrupt; stop rather than
           // misinterpret the remaining floats.
@@ -1296,7 +1689,10 @@ export function initRenderer(canvas) {
     }
     while (pixStack.length) pixEnd(0, 0); // unterminated groups: close them where they are
     flush();
-    if (postfxActive) runPostPass(w, h);
+    const warpFrame = postfxActive && (postfx.kind | 0) === 10;
+    if (warpFrame) runWarpPass(w, h);
+    else if (postfxActive) runPostPass(w, h);
+    if (!warpFrame) warpLive = false; // next warp frame starts from a clean accumulator
   }
 
   return frameRender;

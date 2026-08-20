@@ -6,8 +6,11 @@
 //!   2. the [`Outro`] takes over: the card fades, the floor's `extracted`
 //!      scenario step talks (13½: the UPLINK epilogue) until the comms feed
 //!      goes idle, then a BLUR-OUT (POSTFX kind 0) dissolves the frame
-//!   3. `GameScreen::Ending`: the [`CREDITS`] roll over a synthwave backdrop
-//!      ([`draw_credits`]), Enter / Esc back to the level select.
+//!   3. `GameScreen::Ending`: the [`CREDITS`] roll over the ELEVATOR RIDE
+//!      home ([`render_ride`]: the car interior top-down, CL4-UD3 idling at
+//!      the centre, shaft lights rushing past — smeared into radial light
+//!      trails by POSTFX kind 10, strength [`Ending::warp_t`]), Enter / Esc
+//!      back to the level select.
 //!
 //! The credits text is the plain [`CREDITS`] list below — edit freely.
 //! Everything that needs the canvas is behind `cfg(target_arch = "wasm32")`;
@@ -161,6 +164,24 @@ pub const BLUR_COLOR: Color = Color::new(0.05, 0.02, 0.10, 1.0);
 pub const CREDITS_PX_PER_SEC: f32 = 36.0;
 /// The credits fade in from [`BLUR_COLOR`] over this long.
 pub const CREDITS_FADE_IN_SECS: f32 = 0.8;
+/// The warp-trail post pass (POSTFX kind 10) ramps in over this long — the
+/// ride home accelerating...
+pub const WARP_RAMP_SECS: f32 = 6.0;
+/// ...holds at full strength, and eases down over the last seconds of scroll
+/// before the roll settles on the closing quote...
+pub const WARP_EASE_SECS: f32 = 6.0;
+/// ...down to this idle strength (the car keeps gliding, gently).
+pub const WARP_IDLE_T: f32 = 0.30;
+/// The trail tint: a cold shaft-light cyan (POSTFX 10's colour params).
+pub const WARP_TINT: Color = Color::new(0.55, 0.80, 1.0, 1.0);
+
+/// Distance travelled up the shaft, in light-cycle units: the ride starts at
+/// 35% speed and accelerates linearly to full over [`WARP_RAMP_SECS`], so the
+/// passing lights speed up together with the trails. Monotonic in `time`.
+pub fn ride_phase(time: f32) -> f32 {
+    let a = time.clamp(0.0, WARP_RAMP_SECS);
+    0.35 * a + 0.65 * a * a / (2.0 * WARP_RAMP_SECS) + (time.max(0.0) - a)
+}
 
 /// The post-card part of the ending, on the last floor: the uplink epilogue
 /// (comms), then the blur-out.
@@ -261,6 +282,21 @@ impl Ending {
     pub fn settled(&self, h: f32) -> bool {
         self.time * CREDITS_PX_PER_SEC >= Self::max_scroll(h)
     }
+
+    /// POSTFX kind 10 strength for a screen `h` px tall: smooth ramp 0 -> 1
+    /// over the first [`WARP_RAMP_SECS`] (the ride accelerating), hold, then
+    /// an ease down to [`WARP_IDLE_T`] over the last [`WARP_EASE_SECS`] of
+    /// scroll before the roll settles on the quote.
+    pub fn warp_t(&self, h: f32) -> f32 {
+        fn smooth(x: f32) -> f32 {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        }
+        let ramp = smooth(self.time / WARP_RAMP_SECS);
+        let left_secs = (Self::max_scroll(h) / CREDITS_PX_PER_SEC - self.time).max(0.0);
+        let settle = smooth(left_secs / WARP_EASE_SECS);
+        ramp * (WARP_IDLE_T + (1.0 - WARP_IDLE_T) * settle)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,29 +311,6 @@ mod draw {
     /// Approximate VT323 advance as a fraction of the font size (the renderer
     /// measures the real glyphs; this is only for centring).
     const CHAR_W: f32 = 0.42;
-    /// The synthwave horizon, as a fraction of the screen height.
-    const HORIZON_FRAC: f32 = 0.62;
-
-    fn hash01(a: u32, b: u32) -> f32 {
-        let mut x = a
-            .wrapping_mul(374_761_393)
-            .wrapping_add(b.wrapping_mul(668_265_263));
-        x = (x ^ (x >> 13)).wrapping_mul(1_274_126_177);
-        ((x ^ (x >> 16)) & 0xff_ffff) as f32 / 0xff_ffff as f32
-    }
-
-    fn lerp(a: f32, b: f32, t: f32) -> f32 {
-        a + (b - a) * t
-    }
-
-    fn mix(a: Color, b: Color, t: f32) -> Color {
-        Color::new(
-            lerp(a.r, b.r, t),
-            lerp(a.g, b.g, t),
-            lerp(a.b, b.b, t),
-            lerp(a.a, b.a, t),
-        )
-    }
 
     /// Draw `text` centred on `cx` at baseline `y`.
     fn text_centered(g: &Graphics, text: &str, cx: f32, y: f32, size: f32, color: Color) {
@@ -350,134 +363,181 @@ mod draw {
         }
     }
 
-    /// The synthwave backdrop: gradient sky, twinkling stars, a striped sun
-    /// on the horizon, and a perspective grid rolling toward the viewer.
-    /// `now` = seconds (drives the grid + twinkle).
-    pub fn draw_synthwave_bg(g: &Graphics, now: f32) {
-        let (w, h) = (g.width(), g.height());
-        let horizon = h * HORIZON_FRAC;
-        let sky_top = BLUR_COLOR;
-        let sky_mid = Color::new(0.24, 0.04, 0.30, 1.0);
-        let sky_low = Color::new(0.55, 0.10, 0.36, 1.0);
-        // Sky: banded gradient.
-        let bands = 28;
-        for i in 0..bands {
-            let f0 = i as f32 / bands as f32;
-            let f1 = (i + 1) as f32 / bands as f32;
-            let c = if f0 < 0.6 {
-                mix(sky_top, sky_mid, f0 / 0.6)
-            } else {
-                mix(sky_mid, sky_low, (f0 - 0.6) / 0.4)
-            };
-            g.draw_rectangle(
-                Vec2::new(0.0, f0 * horizon),
-                w,
-                (f1 - f0) * horizon + 1.0,
-                c,
-            );
-        }
-        // Stars.
-        for i in 0..90u32 {
-            let sx = hash01(i, 1) * w;
-            let sy = hash01(i, 2) * horizon * 0.85;
-            let tw =
-                0.35 + 0.65 * (0.5 + 0.5 * (now * (1.0 + hash01(i, 3) * 2.0) + i as f32).sin());
-            let r = 0.8 + hash01(i, 4) * 1.2;
-            g.draw_circle(
-                Vec2::new(sx, sy),
-                r,
-                Color::new(1.0, 0.95, 1.0, 0.75 * tw * (1.0 - sy / horizon)),
-            );
-        }
-        // Sun: warm disc with horizontal cuts, sitting on the horizon.
-        let sr = h * 0.17;
-        let sc = Vec2::new(w / 2.0, horizon - sr * 0.55);
-        let sun_top = Color::new(1.0, 0.92, 0.38, 1.0);
-        let sun_bot = Color::new(1.0, 0.30, 0.62, 1.0);
-        let slices = 24;
-        for i in 0..slices {
-            let f0 = i as f32 / slices as f32;
-            let f1 = (i + 1) as f32 / slices as f32;
-            let y0 = sc.y - sr + f0 * 2.0 * sr;
-            let y1 = sc.y - sr + f1 * 2.0 * sr;
-            if y0 >= horizon {
-                break;
-            }
-            let ym = (y0 + y1) / 2.0;
-            let dy = (ym - sc.y).abs();
-            if dy >= sr {
-                continue;
-            }
-            let half = (sr * sr - dy * dy).sqrt();
-            let c = mix(sun_top, sun_bot, f0);
-            // Lower half: growing dark cuts between the slices.
-            let cut = if f0 > 0.5 {
-                (f0 - 0.5) * 2.0 * 0.5
-            } else {
-                0.0
-            };
-            let hh = (y1.min(horizon) - y0) * (1.0 - cut);
-            g.draw_rectangle(Vec2::new(sc.x - half, y0), half * 2.0, hh.max(1.0), c);
-        }
-        // Horizon glow.
-        g.draw_rectangle(
-            Vec2::new(0.0, horizon - 2.0),
-            w,
-            3.0,
-            Color::new(1.0, 0.35, 0.75, 0.9),
-        );
-        // Ground.
-        g.draw_rectangle(
-            Vec2::new(0.0, horizon),
-            w,
-            h - horizon,
-            Color::new(0.04, 0.01, 0.08, 1.0),
-        );
-        let grid = Color::new(1.0, 0.25, 0.75, 0.55);
-        let grid_dim = Color::new(0.35, 0.85, 1.0, 0.25);
-        // Horizontal lines: perspective spacing, rolling toward the viewer.
-        let rows = 14;
-        for i in 0..rows {
-            let f = ((i as f32 + (now * 0.6).fract() * 1.0) / rows as f32).min(1.0);
-            let y = horizon + (h - horizon) * f * f;
-            let a = 0.15 + 0.85 * f;
-            g.draw_line(
-                Vec2::new(0.0, y),
-                Vec2::new(w, y),
-                1.0 + f,
-                Color::new(grid.r, grid.g, grid.b, grid.a * a),
-            );
-        }
-        // Vertical lines converging on the vanishing point.
-        let cols = 18;
-        for i in 0..=cols {
-            let f = i as f32 / cols as f32 - 0.5;
-            let x_bottom = w / 2.0 + f * w * 2.4;
-            g.draw_line(
-                Vec2::new(w / 2.0, horizon),
-                Vec2::new(x_bottom, h),
-                1.0,
-                if i % 3 == 0 { grid } else { grid_dim },
-            );
-        }
+    /// Cheap deterministic 0..1 hash (per-light parameters).
+    fn fr(seed: f32) -> f32 {
+        let v = (seed * 12.9898).sin() * 43758.547;
+        v - v.floor()
     }
 
-    /// The credits screen: backdrop + the scrolling roll + the hint. Meant to
-    /// be followed by `postfx(1, ..)` for the CRT look. `now` = seconds.
-    pub fn draw_credits(g: &Graphics, ending: &Ending, now: f32) {
+    /// The RIDE HOME backdrop under the credits: a dark shaft rushing by,
+    /// the elevator car interior seen top-down at dead centre with CL4-UD3
+    /// idling in it, and sparse bright shaft lights streaking outward on
+    /// fixed bearings — the raw material POSTFX kind 10 (WARP TRAILS)
+    /// smears into radial long-exposure light trails. The caller draws
+    /// [`draw_credits`] over this and closes the frame with
+    /// `postfx(10, ending.warp_t(h), WARP_TINT)`.
+    pub fn render_ride(g: &Graphics, ending: &Ending) {
         let (w, h) = (g.width(), g.height());
-        draw_synthwave_bg(g, now);
-
-        // A soft dark column over the ground so the text reads over the grid
-        // (the sky is dark enough on its own, and the sun stays vivid).
-        let col_w = (w * 0.66).min(760.0);
-        let horizon = h * HORIZON_FRAC;
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        let t = ending.time;
+        // The shaft: near-black violet with a faint glow well at the centre
+        // (the vanishing point the trails stream away from).
         g.draw_rectangle(
-            Vec2::new(w / 2.0 - col_w / 2.0, horizon),
-            col_w,
-            h - horizon,
-            Color::new(0.03, 0.01, 0.06, 0.45),
+            Vec2::new(0.0, 0.0),
+            w,
+            h,
+            Color::new(0.015, 0.008, 0.040, 1.0),
         );
+        for (r, a) in [(300.0, 0.05), (180.0, 0.06), (90.0, 0.08)] {
+            g.draw_circle(Vec2::new(cx, cy), r, Color::new(0.10, 0.12, 0.30, a));
+        }
+        // Passing shaft lights: each lives on a fixed bearing (golden-angle
+        // spread) and rushes outward exponentially, drawn as a short radial
+        // streak that grows brighter and longer as it closes on the border.
+        let phase = ride_phase(t);
+        let rmax = (cx * cx + cy * cy).sqrt() * 1.05;
+        let r0 = 120.0;
+        for i in 0..56u32 {
+            let fi = i as f32;
+            let ang = fi * 2.399_963; // golden angle
+            let rate = 0.24 + 0.50 * fr(fi + 0.17);
+            let k = (phase * rate + fr(fi + 3.7)).fract();
+            let curve = ((2.4 * k).exp_m1()) / 2.4f32.exp_m1();
+            let r = r0 + curve * (rmax - r0);
+            let len = 8.0 + 90.0 * k * k;
+            let (dx, dy) = (ang.cos(), ang.sin());
+            let tip = Vec2::new(cx + dx * r, cy + dy * r);
+            let tail = Vec2::new(cx + dx * (r - len), cy + dy * (r - len));
+            let a = (k / 0.12).min(1.0); // fade in at spawn, no pop
+            let c = match i % 4 {
+                0 => Color::new(0.10, 0.90, 1.00, a),
+                1 => Color::new(1.00, 0.15, 0.85, a),
+                2 => Color::new(0.25, 0.55, 1.00, a),
+                _ => Color::new(1.00, 0.70, 0.05, a * 0.9),
+            };
+            g.draw_line(tail, tip, 2.0 + 3.0 * k, c);
+        }
+        draw_car(g, cx, cy, t);
+    }
+
+    /// The car interior, top-down, centred: floor plate, frame, corner
+    /// posts, the door seam, a call panel with a blinking ride light — and
+    /// the live coral robot idling in the middle of it.
+    fn draw_car(g: &Graphics, cx: f32, cy: f32, t: f32) {
+        let (cw, ch) = (176.0, 196.0);
+        let (x0, y0) = (cx - cw / 2.0, cy - ch / 2.0);
+        // The shaft void hugging the car (a soft drop shadow ring).
+        g.draw_rectangle(
+            Vec2::new(x0 - 14.0, y0 - 14.0),
+            cw + 28.0,
+            ch + 28.0,
+            Color::new(0.0, 0.0, 0.0, 0.55),
+        );
+        // Floor plate + brushed tread lines.
+        g.draw_rectangle(Vec2::new(x0, y0), cw, ch, Color::new(0.13, 0.14, 0.19, 1.0));
+        for i in 1..7 {
+            let y = y0 + ch * i as f32 / 7.0;
+            g.draw_line(
+                Vec2::new(x0 + 10.0, y),
+                Vec2::new(x0 + cw - 10.0, y),
+                1.0,
+                Color::new(1.0, 1.0, 1.0, 0.04),
+            );
+        }
+        // Inner inset, outer frame, corner posts.
+        g.draw_rectangle_lines(
+            Vec2::new(x0 + 12.0, y0 + 12.0),
+            cw - 24.0,
+            ch - 24.0,
+            2.0,
+            Color::new(0.22, 0.24, 0.31, 1.0),
+        );
+        g.draw_rectangle_lines(
+            Vec2::new(x0, y0),
+            cw,
+            ch,
+            6.0,
+            Color::new(0.30, 0.33, 0.42, 1.0),
+        );
+        for (px, py) in [
+            (x0, y0),
+            (x0 + cw - 14.0, y0),
+            (x0, y0 + ch - 14.0),
+            (x0 + cw - 14.0, y0 + ch - 14.0),
+        ] {
+            g.draw_rectangle(
+                Vec2::new(px, py),
+                14.0,
+                14.0,
+                Color::new(0.40, 0.44, 0.55, 1.0),
+            );
+        }
+        // The doors (top edge), shut for the ride, with their centre seam.
+        g.draw_rectangle(
+            Vec2::new(x0 + 20.0, y0 - 4.0),
+            cw - 40.0,
+            10.0,
+            Color::new(0.34, 0.37, 0.47, 1.0),
+        );
+        g.draw_line(
+            Vec2::new(cx, y0 - 4.0),
+            Vec2::new(cx, y0 + 6.0),
+            2.0,
+            Color::new(0.08, 0.08, 0.11, 1.0),
+        );
+        // Call panel + the ride light breathing green (and a dim hold light).
+        g.draw_rectangle(
+            Vec2::new(x0 + cw - 10.0, cy - 16.0),
+            8.0,
+            32.0,
+            Color::new(0.16, 0.17, 0.22, 1.0),
+        );
+        let blink = 0.5 + 0.5 * (t * 2.2).sin();
+        g.draw_circle(
+            Vec2::new(x0 + cw - 6.0, cy - 6.0),
+            2.5,
+            Color::new(0.2 + 0.6 * blink, 1.0, 0.4, 1.0),
+        );
+        g.draw_circle(
+            Vec2::new(x0 + cw - 6.0, cy + 6.0),
+            2.5,
+            Color::new(0.9, 0.35, 0.25, 0.5),
+        );
+        // CL4-UD3, unarmed, idling — going home.
+        g.draw_robot(
+            0, // coral
+            0, // idle
+            0, // fist
+            Vec2::new(cx, cy + 6.0),
+            -std::f32::consts::FRAC_PI_2,
+            200.0,
+            t,
+        );
+    }
+
+    /// The credits roll + the hint, drawn OVER the elevator-ride scene
+    /// ([`render_ride`], the caller draws it first): a soft full-screen dim
+    /// plus a darker column behind the text keep the roll readable while the
+    /// car and the streaking shaft lights stay visible at the edges.
+    pub fn draw_credits(g: &Graphics, ending: &Ending) {
+        let (w, h) = (g.width(), g.height());
+        g.draw_rectangle(
+            Vec2::new(0.0, 0.0),
+            w,
+            h,
+            Color::new(0.02, 0.01, 0.05, 0.28),
+        );
+        // Feathered edges: three nested washes instead of one hard seam.
+        let col_w = (w * 0.66).min(760.0);
+        for (grow, a) in [(160.0, 0.10), (80.0, 0.12), (0.0, 0.25)] {
+            let cw = col_w + grow;
+            g.draw_rectangle(
+                Vec2::new(w / 2.0 - cw / 2.0, 0.0),
+                cw,
+                h,
+                Color::new(0.02, 0.01, 0.05, a),
+            );
+        }
 
         let scroll = ending.scroll(h);
         let mut y = h + 40.0 - scroll;
@@ -533,7 +593,7 @@ mod draw {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use draw::{draw_credits, draw_extract_card, draw_synthwave_bg};
+pub use draw::{draw_credits, draw_extract_card, render_ride};
 
 #[cfg(test)]
 mod tests {
@@ -622,6 +682,58 @@ mod tests {
             o.tick(0.05, false); // 65 s
         }
         assert!(matches!(o, Outro::Blur { .. }));
+    }
+
+    #[test]
+    fn warp_ramps_in_holds_and_eases_down_to_idle() {
+        let h = 720.0;
+        // Ramp: 0 at the cut, full after WARP_RAMP_SECS, monotonic.
+        let mut e = Ending::new();
+        assert_eq!(e.warp_t(h), 0.0);
+        let mut last = 0.0;
+        for _ in 0..40 {
+            e.tick(WARP_RAMP_SECS / 20.0);
+            let t = e.warp_t(h);
+            assert!(t >= last - 1e-6);
+            last = t;
+        }
+        assert!((e.warp_t(h) - 1.0).abs() < 1e-6, "holds at full strength");
+        // Ease-down: at the settle point the ride idles at WARP_IDLE_T.
+        let settle_secs = Ending::max_scroll(h) / CREDITS_PX_PER_SEC;
+        let e = Ending { time: settle_secs };
+        assert!((e.warp_t(h) - WARP_IDLE_T).abs() < 1e-6);
+        // ...and it stays there.
+        let e = Ending {
+            time: settle_secs + 100.0,
+        };
+        assert!((e.warp_t(h) - WARP_IDLE_T).abs() < 1e-6);
+        // Halfway through the ease window: between idle and full.
+        let e = Ending {
+            time: settle_secs - WARP_EASE_SECS / 2.0,
+        };
+        let t = e.warp_t(h);
+        assert!(t > WARP_IDLE_T && t < 1.0);
+    }
+
+    #[test]
+    fn ride_phase_accelerates_then_runs_at_unit_speed() {
+        assert_eq!(ride_phase(0.0), 0.0);
+        // Strictly increasing.
+        let mut last = 0.0;
+        for i in 1..100 {
+            let p = ride_phase(i as f32 * 0.2);
+            assert!(p > last);
+            last = p;
+        }
+        // Early speed ~0.35, late speed ~1.0 per second.
+        let early = ride_phase(0.5) - ride_phase(0.0);
+        assert!((early - 0.5 * 0.37) < 0.05);
+        let late = ride_phase(21.0) - ride_phase(20.0);
+        assert!((late - 1.0).abs() < 1e-4);
+        // Continuous across the ramp end.
+        let a = ride_phase(WARP_RAMP_SECS - 1e-3);
+        let b = ride_phase(WARP_RAMP_SECS + 1e-3);
+        assert!(b - a < 0.01);
     }
 
     #[test]

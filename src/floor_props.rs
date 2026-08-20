@@ -32,9 +32,21 @@ pub fn draw_placed_prop(g: &Graphics, p: &PropPlacement, time: f32) {
 }
 
 /// Draw every placed prop of a floor (call between the walls and the actors,
-/// with the camera transform applied).
-pub fn render_floor_props(g: &Graphics, props: &[PropPlacement], time: f32) {
+/// with the camera transform applied). Props fully outside `cull` (the
+/// camera's inflated view rect) skip their commands; a prop's layers may
+/// swing / spin past its nominal box, so the half-extent is `size * 0.8`
+/// (a conservative 1.6x-size footprint). The native level editor draws its
+/// map through `draw_placed_prop` directly and stays unculled.
+pub fn render_floor_props(
+    g: &Graphics,
+    props: &[PropPlacement],
+    time: f32,
+    cull: &crate::camera::ViewCull,
+) {
     for p in props {
+        if !cull.visible(p.x, p.y, p.size * 0.8) {
+            continue;
+        }
         draw_placed_prop(g, p, time);
     }
 }

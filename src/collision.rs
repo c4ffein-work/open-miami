@@ -6,6 +6,32 @@ pub fn circle_circle_collision(pos1: Vec2, radius1: f32, pos2: Vec2, radius2: f3
     distance < radius1 + radius2
 }
 
+/// Swept circle-vs-circle: does a circle of `radius` moving from `from` to
+/// `to` touch the circle at `center` at any point along the way? The segment
+/// `from -> to` against the target inflated by `radius` — an endpoint-only
+/// check can tunnel straight through a target when the closing speed exceeds
+/// the combined radii per frame (a bullet meeting a rushing bot head-on).
+pub fn swept_circle_circle_collision(
+    from: Vec2,
+    to: Vec2,
+    radius: f32,
+    center: Vec2,
+    target_radius: f32,
+) -> bool {
+    let r = radius + target_radius;
+    let d = Vec2::new(to.x - from.x, to.y - from.y);
+    let f = Vec2::new(from.x - center.x, from.y - center.y);
+    let len2 = d.x * d.x + d.y * d.y;
+    if len2 <= f32::EPSILON {
+        return circle_circle_collision(from, radius, center, target_radius);
+    }
+    // Closest point of the segment to the centre, clamped to [0, 1].
+    let t = (-(f.x * d.x + f.y * d.y) / len2).clamp(0.0, 1.0);
+    let cx = from.x + d.x * t - center.x;
+    let cy = from.y + d.y * t - center.y;
+    cx * cx + cy * cy < r * r
+}
+
 pub fn circle_rect_collision(
     circle_pos: Vec2,
     radius: f32,
@@ -20,6 +46,30 @@ pub fn circle_rect_collision(
 
     let distance = ((circle_pos.x - closest_x).powi(2) + (circle_pos.y - closest_y).powi(2)).sqrt();
     distance < radius
+}
+
+/// Swept circle-vs-rect: does a circle of `radius` moving from `from` to `to`
+/// touch the rectangle at any point along the way? Implemented as the segment
+/// `from -> to` against the rectangle inflated by `radius` (slightly generous
+/// at the corners, which is fine for small, fast projectiles). Unlike an
+/// endpoint-only check this cannot tunnel through a wall thinner than one
+/// frame's travel.
+pub fn swept_circle_rect_collision(
+    from: Vec2,
+    to: Vec2,
+    radius: f32,
+    rect_x: f32,
+    rect_y: f32,
+    rect_w: f32,
+    rect_h: f32,
+) -> bool {
+    let ix = rect_x - radius;
+    let iy = rect_y - radius;
+    let iw = rect_w + radius * 2.0;
+    let ih = rect_h + radius * 2.0;
+    point_in_rect(from, ix, iy, iw, ih)
+        || point_in_rect(to, ix, iy, iw, ih)
+        || line_rect_intersection(from, to, ix, iy, iw, ih)
 }
 
 pub fn point_in_rect(point: Vec2, rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32) -> bool {

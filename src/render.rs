@@ -8,13 +8,17 @@ use crate::math::{Color, Vec2};
 /// `draw_bots` selects whether the player/rogue sprites are drawn here; the
 /// game passes false and draws them as live 3D robots instead (the boss is
 /// always drawn here, live too). `now` is the continuous animation clock in
-/// seconds (drives the boss's writhing).
+/// seconds (drives the boss's writhing). `cull` = the camera's inflated view
+/// rect: the expensive live sprites (ground guns, the boss) fully outside it
+/// skip their commands — bullets / trails / debug overlays keep their own
+/// cheap paths untouched.
 pub fn render_entities(
     world: &World,
     graphics: &Graphics,
     show_infos: bool,
     draw_bots: bool,
     now: f32,
+    cull: &crate::camera::ViewCull,
 ) {
     // Render debug pathfinding info first (behind everything)
     if show_infos {
@@ -27,7 +31,7 @@ pub fn render_entities(
     }
 
     // Render dropped weapon pickups (beneath actors)
-    render_pickups(world, graphics);
+    render_pickups(world, graphics, cull);
 
     // Render projectile trails
     render_projectile_trails(world, graphics);
@@ -36,7 +40,7 @@ pub fn render_entities(
     render_bullets(world, graphics);
 
     // Render weapons in flight
-    render_thrown_weapons(world, graphics);
+    render_thrown_weapons(world, graphics, cull);
 
     // Render enemies
     if draw_bots {
@@ -44,7 +48,7 @@ pub fn render_entities(
     }
 
     // Render the boss (big; under the player)
-    render_bosses(world, graphics, now);
+    render_bosses(world, graphics, now, cull);
 
     // Render player (on top)
     if draw_bots {
@@ -61,7 +65,7 @@ const BOSS_TILE_PER_RADIUS: f32 = 4.6;
 /// Render the shoggoth boss: a LIVE 3D render through shoggoth-core (see
 /// `Graphics::draw_shoggoth_live`) — mask on while `Boss::reveal` is 0, the
 /// consume-inward mask-off as it runs to 1, the raw tentacled form after.
-fn render_bosses(world: &World, graphics: &Graphics, now: f32) {
+fn render_bosses(world: &World, graphics: &Graphics, now: f32, cull: &crate::camera::ViewCull) {
     for entity in world.query::<Boss>() {
         let (pos, boss, health) = match (
             world.get_component::<Position>(entity),
@@ -78,19 +82,20 @@ fn render_bosses(world: &World, graphics: &Graphics, now: f32) {
             .get_component::<Radius>(entity)
             .map(|r| r.value)
             .unwrap_or(42.0);
+        let tile = radius * BOSS_TILE_PER_RADIUS;
+        // ~250k verts per frame when drawn: skip it while it is fully
+        // off-screen (its tentacles reach past the tile, hence 0.75 * tile
+        // as the half-extent = a 1.5x-tile footprint).
+        if !cull.visible(pos.x, pos.y, tile * 0.75) {
+            continue;
+        }
         // The mask leans toward where it is heading (the boss always turns to
         // face its prey, so its rotation is its movement direction).
         let heading = world
             .get_component::<Rotation>(entity)
             .map(|r| r.angle)
             .unwrap_or(0.0);
-        graphics.draw_shoggoth_live(
-            Vec2::new(pos.x, pos.y),
-            radius * BOSS_TILE_PER_RADIUS,
-            heading,
-            boss.reveal,
-            now,
-        );
+        graphics.draw_shoggoth_live(Vec2::new(pos.x, pos.y), tile, heading, boss.reveal, now);
     }
 }
 
@@ -269,8 +274,34 @@ fn weapon_color(weapon_type: WeaponType) -> Color {
     }
 }
 
-/// Render dropped weapon pickups as small floor markers.
-fn render_pickups(world: &World, graphics: &Graphics) {
+/// GUNPICKUP weapon-model index for a weapon type (robot-core.js
+/// `GROUND_WEAPON_MODELS`: 0 bar, 1 pistol, 2 machinegun, 3 shotgun).
+fn ground_weapon_idx(weapon_type: WeaponType) -> u32 {
+    match weapon_type {
+        WeaponType::Melee => 0,
+        WeaponType::Pistol => 1,
+        WeaponType::MachineGun => 2,
+        WeaponType::Shotgun => 3,
+    }
+}
+
+/// On-screen size (px) of a ground weapon's sprite quad. The 3D render frames
+/// 1.44 model units across the quad, so the bar (~1.15 units) comes out
+/// ~37 px long and a pistol ~18 px — real relative scales.
+const GROUND_GUN_PX: f32 = 50.0;
+
+/// A stable "dropped there" resting angle derived from the pickup's position
+/// (a hash, not a random: the same spot always yields the same angle, so a
+/// lying weapon never flickers between frames).
+fn resting_angle(x: f32, y: f32) -> f32 {
+    let h = (x * 12.9898 + y * 78.233).sin() * 43758.547;
+    (h - h.floor()) * std::f32::consts::TAU
+}
+
+/// Render dropped weapon pickups: the actual 3D gun model lying flat on the
+/// ground at a stable scattered angle (pixel-art render, opcode GUNPICKUP)
+/// over a subtle glow marker so it still reads as pickup-able.
+fn render_pickups(world: &World, graphics: &Graphics, cull: &crate::camera::ViewCull) {
     let pickups: Vec<Entity> = world.query::<WeaponPickup>();
 
     for entity in pickups {
@@ -282,21 +313,30 @@ fn render_pickups(world: &World, graphics: &Graphics) {
             _ => continue,
         };
 
+        // Each GUNPICKUP is a live 3D render: skip it fully off-screen
+        // (conservative half-extent = the whole quad).
+        if !cull.visible(pos.x, pos.y, GROUND_GUN_PX) {
+            continue;
+        }
+
         let color = weapon_color(pickup.weapon_type);
 
-        // A little "on the floor" plate so the weapon marker reads as pickup-able
-        graphics.draw_rectangle(
-            Vec2::new(pos.x - 11.0, pos.y - 7.0),
-            22.0,
-            14.0,
+        // Subtle ground marker: a faint weapon-coloured halo over a dark plate.
+        let halo = Color::new(color.r, color.g, color.b, 0.16);
+        graphics.draw_circle(Vec2::new(pos.x, pos.y), 17.0, halo);
+        graphics.draw_circle(
+            Vec2::new(pos.x, pos.y),
+            13.0,
             Color::new(0.0, 0.0, 0.0, 0.35),
         );
-        // Gun-ish bar
-        graphics.draw_rectangle(Vec2::new(pos.x - 8.0, pos.y - 2.0), 16.0, 4.0, color);
-        // Grip
-        graphics.draw_rectangle(Vec2::new(pos.x - 6.0, pos.y + 2.0), 4.0, 4.0, color);
-        // Outline for visibility on dark floor
-        graphics.draw_rectangle_lines(Vec2::new(pos.x - 11.0, pos.y - 7.0), 22.0, 14.0, 1.0, color);
+
+        // The weapon itself, lying where it fell.
+        graphics.draw_gun_pickup(
+            ground_weapon_idx(pickup.weapon_type),
+            Vec2::new(pos.x, pos.y),
+            resting_angle(pos.x, pos.y),
+            GROUND_GUN_PX,
+        );
     }
 }
 
@@ -345,7 +385,7 @@ fn render_bullets(world: &World, graphics: &Graphics) {
 }
 
 /// Render weapons currently flying through the air after being thrown.
-fn render_thrown_weapons(world: &World, graphics: &Graphics) {
+fn render_thrown_weapons(world: &World, graphics: &Graphics, cull: &crate::camera::ViewCull) {
     let thrown: Vec<Entity> = world.query::<ThrownWeapon>();
 
     for entity in thrown {
@@ -357,14 +397,19 @@ fn render_thrown_weapons(world: &World, graphics: &Graphics) {
             _ => continue,
         };
 
-        let color = weapon_color(tw.weapon_type);
+        // Same live GUNPICKUP render as a resting pickup: cull off-screen.
+        if !cull.visible(pos.x, pos.y, GROUND_GUN_PX) {
+            continue;
+        }
 
-        // Spinning bar to sell the "tumbling weapon" look.
-        graphics.save();
-        graphics.translate(pos.x, pos.y);
-        graphics.rotate(tw.spin);
-        graphics.draw_rectangle(Vec2::new(-10.0, -2.0), 20.0, 4.0, color);
-        graphics.restore();
+        // The actual 3D weapon model tumbling flat across the floor: the same
+        // GUNPICKUP render as a resting pickup, spun by the throw.
+        graphics.draw_gun_pickup(
+            ground_weapon_idx(tw.weapon_type),
+            Vec2::new(pos.x, pos.y),
+            tw.spin,
+            GROUND_GUN_PX,
+        );
     }
 }
 

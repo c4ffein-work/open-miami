@@ -34,7 +34,7 @@ SPEAKERS = {"CL4-UD3", "HUNTER", "SENTINEL", "DRIFTER", "SWARM", "CORRUPTOR", "U
 TRIGGERS = {"start", "enter_zone", "kills", "all_dead", "timer", "exit_open", "step_done",
             "boss_dead", "extracted"}
 ACTIONS = {"say", "talk", "spawn", "open_exit", "close_exit", "objective", "sfx", "alert", "hold",
-           "look_at", "gate", "checkpoint", "disarm"}
+           "look_at", "gate", "checkpoint", "disarm", "combat"}
 # Tutorial `gate` inputs (mirrors scenario.rs `GateInput::parse`).
 GATE_INPUTS = {"punch": "Punch", "finish": "Finish", "pickup": "Pickup", "strike": "Strike",
                "fire": "Fire", "throw": "Throw"}
@@ -262,6 +262,9 @@ def validate(floors):
                 elif name in ("checkpoint", "disarm"):
                     if payload is not True:
                         raise Invalid(f"{tag}/{sid}: {name} must be true")
+                elif name == "combat":
+                    if not isinstance(payload, bool):
+                        raise Invalid(f"{tag}/{sid}: combat must be a boolean")
 
 
 def validate_spawn(s, zone_ids, what):
@@ -278,12 +281,16 @@ def validate_spawn(s, zone_ids, what):
             raise Invalid(f"{what}: face must be a number (degrees)")
         if "group" in s and (not isinstance(s["group"], str) or not s["group"]):
             raise Invalid(f"{what}: group must be a non-empty string")
+        if "unarmed" in s:
+            raise Invalid(f"{what}: 'unarmed' is only valid on a hostile spawn")
     elif t not in ENEMY_TYPES:
         raise Invalid(f"{what}: bad spawn type {t!r}")
     else:
         for k in ("walk_to", "face", "look", "group"):
             if k in s and k != "group":
                 raise Invalid(f"{what}: {k!r} is only valid on a passive spawn")
+        if "unarmed" in s and not isinstance(s["unarmed"], bool):
+            raise Invalid(f"{what}: unarmed must be a boolean")
 
 
 def validate_alert(payload, zone_ids, what):
@@ -358,10 +365,16 @@ def spawn(s):
         look = ENEMY_TYPES[s.get("look", "wandering")]
         face = f"Some({f32(s['face'])})" if "face" in s else "None"
         return (f"SpawnDef {{ x: {f32(s['x'])}, y: {f32(s['y'])}, kind: EnemyType::{look}, passive: true, "
-                f"walk_to: {opt_str(s.get('walk_to'))}, face: {face}, group: {opt_str(s.get('group'))} }}")
+                f"walk_to: {opt_str(s.get('walk_to'))}, face: {face}, group: {opt_str(s.get('group'))}, "
+                f"unarmed: false }}")
     base = f"SpawnDef::hostile({f32(s['x'])}, {f32(s['y'])}, EnemyType::{ENEMY_TYPES[t]})"
+    overrides = []
     if s.get("group") is not None:
-        return f"SpawnDef {{ group: {opt_str(s['group'])}, ..{base} }}"
+        overrides.append(f"group: {opt_str(s['group'])}")
+    if s.get("unarmed") is True:
+        overrides.append("unarmed: true")
+    if overrides:
+        return f"SpawnDef {{ {', '.join(overrides)}, ..{base} }}"
     return base
 
 
@@ -439,6 +452,8 @@ def gen_floor(f, out):
                 out.append("    Action::Checkpoint,")
             elif kind == "disarm":
                 out.append("    Action::Disarm,")
+            elif kind == "combat":
+                out.append(f"    Action::Combat({'true' if payload else 'false'}),")
         out.append("];")
         out.append("")
     # Steps.

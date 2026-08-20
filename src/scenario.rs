@@ -137,6 +137,11 @@ pub struct SpawnDef {
     pub face: Option<f32>,
     /// Scenario `alert { "group": id }` group.
     pub group: Option<&'static str>,
+    /// Hostile only: spawn with no weapon (bare fists) — it fights hand to
+    /// hand and, crucially, its corpse DROPS NOTHING. Tutorial victims use
+    /// this so a stray E next to the body can never grab a gun that then
+    /// dead-ends a `strike` gate.
+    pub unarmed: bool,
 }
 
 impl SpawnDef {
@@ -150,6 +155,7 @@ impl SpawnDef {
             walk_to: None,
             face: None,
             group: None,
+            unarmed: false,
         }
     }
 }
@@ -389,6 +395,11 @@ pub enum Action {
     /// Take the player's held weapon away (the checkpoint desk keeps it).
     /// `{ "disarm": true }` in the JSON.
     Disarm,
+    /// Enable / disable the player's fighting capabilities (fire, throw,
+    /// punch, finisher). Off = a walking-only beat (the parking lot); gates
+    /// bypass it (a gate explicitly demands its one action). Default on;
+    /// resets on every floor. `{ "combat": false }` in the JSON.
+    Combat(bool),
 }
 
 /// A scenario step: a trigger plus the actions it runs, once.
@@ -657,6 +668,8 @@ pub struct ScenarioState {
     /// A `checkpoint` action ran since the last
     /// [`ScenarioState::take_checkpoint_request`].
     checkpoint_requested: bool,
+    /// Whether the player may fight (see [`Action::Combat`]). Default true.
+    combat_enabled: bool,
 }
 
 /// Live state of a tutorial `gate`: what it waits for, which step owns it,
@@ -668,6 +681,10 @@ struct GateState {
     /// The owning step's actions AFTER the gate (run on release; may install
     /// the step's next gate, chaining within one step).
     rest: &'static [Action],
+    /// Where the gated action happens (the step's spawned target / the
+    /// pickup / the downed victim): the player is tethered near it by
+    /// invisible walls ([`GATE_TETHER_RADIUS`]) while the gate holds.
+    anchor: Option<Vec2>,
 }
 
 /// Live state of a `talk` conversation: the line on screen, the lines still
@@ -745,6 +762,7 @@ impl ScenarioState {
             gate: None,
             gate_done_at: vec![None; floor.scenario.len()],
             checkpoint_requested: false,
+            combat_enabled: true,
         }
     }
 
@@ -843,6 +861,18 @@ impl ScenarioState {
     /// the gated one — see `sim::gate_frozen_step`).
     pub fn gate_view(&self) -> Option<GateDef> {
         self.gate.map(|g| g.def)
+    }
+
+    /// Where the active gate's action happens, if the gate could tell: the
+    /// tether centre for [`tether_player`].
+    pub fn gate_anchor(&self) -> Option<Vec2> {
+        self.gate.and_then(|g| g.anchor)
+    }
+
+    /// Whether the player may fight (fire / throw / punch / finisher). Gates
+    /// bypass this: their one action stays allowed.
+    pub fn combat_enabled(&self) -> bool {
+        self.combat_enabled
     }
 
     /// Feed the frame's drained [`GameEvent`]s to the active gate: when one
@@ -1109,6 +1139,9 @@ impl ScenarioState {
     }
 
     fn run_actions(&mut self, world: &mut World, actions: &'static [Action], step_idx: usize) {
+        // The last position this step spawned at: the default gate anchor
+        // (tutorial steps spawn their victim just before their gate).
+        let mut last_spawn: Option<Vec2> = None;
         for (i, action) in actions.iter().enumerate() {
             match *action {
                 Action::Gate(def) => {
@@ -1117,14 +1150,23 @@ impl ScenarioState {
                     // within one step. One gate at a time by construction —
                     // the scenario clock halts while one is active, so no
                     // other step can fire under it.
+                    // No anchor for `pickup` gates: fetching IS a walk (and
+                    // corpses drop weapons, so "nearest pickup" often points
+                    // at the wrong thing).
+                    let anchor = last_spawn.or_else(|| match def.input {
+                        GateInput::Finish => nearest_stunned_to_player(world),
+                        _ => None,
+                    });
                     self.gate = Some(GateState {
                         def,
                         step_idx,
                         rest: &actions[i + 1..],
+                        anchor,
                     });
                     return;
                 }
                 Action::Checkpoint => self.checkpoint_requested = true,
+                Action::Combat(on) => self.combat_enabled = on,
                 Action::Disarm => {
                     if let Some(&p) = world.query::<Player>().first() {
                         world.remove_component::<crate::components::Weapon>(p);
@@ -1138,6 +1180,7 @@ impl ScenarioState {
                     for s in spawns {
                         spawn_from_def(world, s);
                     }
+                    last_spawn = spawns.last().map(|s| Vec2::new(s.x, s.y));
                 }
                 Action::OpenExit(id) => self.set_exit_open(world, id, true),
                 Action::CloseExit(id) => self.set_exit_open(world, id, false),
@@ -1205,13 +1248,60 @@ pub fn look_at_weight(elapsed: f32, total: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// How far from the gate's anchor the player may wander while a tutorial
+/// gate holds ([`tether_player`]'s invisible walls).
+pub const GATE_TETHER_RADIUS: f32 = 180.0;
+
+/// Invisible walls while a gate holds: clamp the player inside the circle
+/// (`anchor`, `radius`). Call after movement resolved (browser loop and the
+/// headless sim share it).
+pub fn tether_player(world: &mut World, anchor: Vec2, radius: f32) {
+    let player = match world.query::<crate::components::Player>().first() {
+        Some(&p) => p,
+        None => return,
+    };
+    if let Some(pos) = world.get_component_mut::<crate::components::Position>(player) {
+        let dx = pos.x - anchor.x;
+        let dy = pos.y - anchor.y;
+        let d = (dx * dx + dy * dy).sqrt();
+        if d > radius {
+            pos.x = anchor.x + dx / d * radius;
+            pos.y = anchor.y + dy / d * radius;
+        }
+    }
+}
+
+/// The position of the stunned (downed) enemy nearest to the player (a
+/// `finish` gate's anchor — its victim went down in an earlier step).
+fn nearest_stunned_to_player(world: &World) -> Option<Vec2> {
+    let player = *world.query::<crate::components::Player>().first()?;
+    let p = *world.get_component::<crate::components::Position>(player)?;
+    world
+        .query::<crate::components::Stunned>()
+        .into_iter()
+        .filter(|&e| world.has_component::<crate::components::Enemy>(e))
+        .filter_map(|e| world.get_component::<crate::components::Position>(e))
+        .map(|q| {
+            (
+                Vec2::new(q.x, q.y),
+                (q.x - p.x).powi(2) + (q.y - p.y).powi(2),
+            )
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(v, _)| v)
+}
+
 /// Spawn one placement: a hostile rogue of `kind`, or a passive bot when
 /// `def.passive` (see `systems::passive`).
 pub fn spawn_from_def(world: &mut World, def: &SpawnDef) -> crate::ecs::Entity {
     if def.passive {
         crate::systems::passive::spawn_passive(world, def)
     } else {
-        spawn_enemy_with_type(world, Vec2::new(def.x, def.y), def.kind)
+        let e = spawn_enemy_with_type(world, Vec2::new(def.x, def.y), def.kind);
+        if def.unarmed {
+            world.remove_component::<crate::components::Weapon>(e);
+        }
+        e
     }
 }
 
@@ -1511,6 +1601,80 @@ mod tests {
         assert_eq!(sc.opened_exits(), &["a", "b"]);
     }
 
+    const COMBAT_FLOOR: FloorDef = FloorDef {
+        scenario: &[
+            StepDef {
+                id: "walk_in",
+                trigger: Trigger::Start,
+                actions: &[Action::Combat(false)],
+            },
+            StepDef {
+                id: "fight",
+                trigger: Trigger::Timer {
+                    seconds: 5.0,
+                    after: None,
+                },
+                actions: &[Action::Combat(true)],
+            },
+        ],
+        ..T_FLOOR
+    };
+
+    #[test]
+    fn combat_action_toggles_fighting() {
+        let mut world = world_for(&COMBAT_FLOOR);
+        let mut sc = ScenarioState::new(&COMBAT_FLOOR);
+        assert!(sc.combat_enabled(), "fighting is on by default");
+        sc.tick(&mut world, 0.016);
+        assert!(!sc.combat_enabled(), "the walk-in beat turned it off");
+        for _ in 0..400 {
+            sc.tick(&mut world, 0.016);
+        }
+        assert!(sc.combat_enabled(), "the 5s timer step turned it back on");
+    }
+
+    const ANCHOR_FLOOR: FloorDef = FloorDef {
+        scenario: &[StepDef {
+            id: "tut",
+            trigger: Trigger::Start,
+            actions: &[
+                Action::Spawn(&[SpawnDef::hostile(333.0, 222.0, EnemyType::Idle)]),
+                Action::Gate(GateDef {
+                    input: GateInput::Punch,
+                    text: "LEFT CLICK — PUNCH",
+                }),
+            ],
+        }],
+        ..T_FLOOR
+    };
+
+    #[test]
+    fn gate_anchors_on_its_spawn_and_tethers_the_player() {
+        let mut world = world_for(&ANCHOR_FLOOR);
+        let mut sc = ScenarioState::new(&ANCHOR_FLOOR);
+        sc.tick(&mut world, 0.016);
+        let anchor = sc.gate_anchor().expect("the gate anchored on its spawn");
+        assert_eq!((anchor.x, anchor.y), (333.0, 222.0));
+        // Drag the player far away: the tether's invisible walls clamp them
+        // back onto the circle.
+        let player = *world.query::<Player>().first().unwrap();
+        if let Some(p) = world.get_component_mut::<Position>(player) {
+            p.x = anchor.x + 500.0;
+            p.y = anchor.y;
+        }
+        tether_player(&mut world, anchor, GATE_TETHER_RADIUS);
+        let p = world.get_component::<Position>(player).unwrap();
+        assert!((p.x - (anchor.x + GATE_TETHER_RADIUS)).abs() < 0.01);
+        assert_eq!(p.y, anchor.y);
+        // Inside the circle nothing moves.
+        if let Some(p) = world.get_component_mut::<Position>(player) {
+            p.x = anchor.x + 50.0;
+        }
+        tether_player(&mut world, anchor, GATE_TETHER_RADIUS);
+        let p = world.get_component::<Position>(player).unwrap();
+        assert_eq!(p.x, anchor.x + 50.0);
+    }
+
     const LEGACY_FLOOR: FloorDef = FloorDef {
         scenario: &[StepDef {
             id: "intro",
@@ -1713,6 +1877,7 @@ mod tests {
             walk_to: Some("forecourt"),
             face: Some(-90.0),
             group: Some("crowd"),
+            unarmed: false,
         },
         SpawnDef {
             x: 700.0,
@@ -1722,6 +1887,7 @@ mod tests {
             walk_to: Some("forecourt"),
             face: None,
             group: Some("crowd"),
+            unarmed: false,
         },
         SpawnDef {
             x: 500.0,
@@ -1731,6 +1897,7 @@ mod tests {
             walk_to: None,
             face: None,
             group: Some("valet"),
+            unarmed: false,
         },
     ];
     const C_EXITS: [ElevatorDef; 1] = [ElevatorDef {
@@ -2633,6 +2800,18 @@ mod tests {
         assert!(sc.step_fired("tut_bar"));
         assert_eq!(sc.gate_view().unwrap().input, GateInput::Pickup);
 
+        // THE TRAP THAT SOFT-LOCKED REAL PLAYERS: pressing E right where
+        // the finisher victim died must grab NOTHING — tutorial victims
+        // spawn `unarmed`, so no corpse pistol can release the pickup gate
+        // and then dead-end the strike gate (a strike gate masks gun clicks).
+        assert_eq!(sim.player_pickup(), None, "the corpse dropped nothing");
+        run(&mut sim, &mut sc, 2);
+        assert_eq!(
+            sc.gate_view().unwrap().input,
+            GateInput::Pickup,
+            "the pickup gate is still waiting for the bar"
+        );
+
         // TAKE THE BAR (the melee pickup by the desk).
         teleport(&mut sim, Vec2::new(420.0, 370.0));
         assert_eq!(sim.player_pickup(), Some(WeaponType::Melee));
@@ -2722,6 +2901,266 @@ mod tests {
         run(&mut sim, &mut sc, 2);
         assert!(sc.step_fired("clear"));
         assert!(exit_open(&sim.world, "lift"));
+    }
+
+    /// Regression for the floor-1 "LEFT CLICK — SWING THE BAR" soft-lock:
+    /// replays the WHOLE tutorial through the browser's own gate input
+    /// dispatch ([`crate::game::gated_player_input`] — the exact function
+    /// `lib.rs` forwards `input::` state to), with realistic play: the player
+    /// WALKS (velocity + the movement system, frame by frame, under the
+    /// freeze) instead of being teleported onto each target, and both melee
+    /// gates are first attempted from ~90 px — the distance at which two
+    /// 60 px robot sprites LOOK adjacent on screen, where the pre-fix 50 px
+    /// reach whiffed with no feedback and the gate never released.
+    #[test]
+    fn floor_1_tutorial_plays_through_the_browser_gate_dispatch() {
+        use crate::components::Position;
+        use crate::game::{gated_player_input, get_player_weapon, PlayerIntents};
+
+        /// One browser frame: the gate dispatch (if a gate is up), then the
+        /// engine tick + scenario tick + gate notify — the `lib.rs` order.
+        fn frame(sim: &mut Simulation, sc: &mut ScenarioState, intents: &PlayerIntents) {
+            if let Some(g) = sc.gate_view() {
+                gated_player_input(&mut sim.world, g, intents);
+            }
+            sim.scenario_step(sc, DT);
+        }
+
+        fn idle() -> PlayerIntents {
+            PlayerIntents {
+                left_pressed: false,
+                left_down: false,
+                right_pressed: false,
+                e_pressed: false,
+                mouse_world: Vec2::zero(),
+            }
+        }
+        fn swing_at(mouse: Vec2) -> PlayerIntents {
+            PlayerIntents {
+                left_pressed: true,
+                left_down: true,
+                mouse_world: mouse,
+                ..idle()
+            }
+        }
+        fn press_e() -> PlayerIntents {
+            PlayerIntents {
+                e_pressed: true,
+                ..idle()
+            }
+        }
+        fn throw_at(mouse: Vec2) -> PlayerIntents {
+            PlayerIntents {
+                right_pressed: true,
+                mouse_world: mouse,
+                ..idle()
+            }
+        }
+
+        /// Walk the player to `to` at full speed, one frame at a time (the
+        /// movement system does the moving — under a gate freeze too, like
+        /// the browser). Holds / conversations lock movement, as `lib.rs`
+        /// does.
+        fn walk_to(sim: &mut Simulation, sc: &mut ScenarioState, to: Vec2) {
+            for _ in 0..1500 {
+                if sc.hold_active() || sc.dialogue_active() {
+                    sim.set_player_velocity(Vec2::zero());
+                    sim.scenario_step(sc, DT);
+                    continue;
+                }
+                let pos = sim.player_position().unwrap();
+                if (to - pos).length() <= 4.0 {
+                    break;
+                }
+                sim.set_player_velocity((to - pos).normalize() * 200.0);
+                sim.scenario_step(sc, DT);
+            }
+            sim.set_player_velocity(Vec2::zero());
+            let pos = sim.player_position().unwrap();
+            assert!(
+                (to - pos).length() <= 4.0,
+                "walked to ({}, {}) but stopped at ({}, {})",
+                to.x,
+                to.y,
+                pos.x,
+                pos.y
+            );
+        }
+
+        let floor = crate::levels::floor_def(1);
+        let mut sim = Simulation::new(1);
+        let mut sc = ScenarioState::new(floor);
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("intro"));
+
+        // WALK from the main doors straight up to just short of the desk
+        // (the old scanner-arch "SIGNATURE CHECK" hold was cut — walking in
+        // stays uninterrupted until the desk scene).
+        walk_to(&mut sim, &mut sc, Vec2::new(500.0, 455.0));
+        // Step onto the desk: the takeover conversation opens.
+        for _ in 0..60 {
+            if sc.dialogue_active() {
+                break;
+            }
+            sim.set_player_velocity(Vec2::new(0.0, -200.0));
+            sim.scenario_step(&mut sc, DT);
+        }
+        sim.set_player_velocity(Vec2::zero());
+        assert!(sc.step_fired("desk"));
+        assert!(sc.dialogue_active());
+        for _ in 0..30 {
+            if !sc.dialogue_active() {
+                break;
+            }
+            sc.dialogue_advance();
+            run(&mut sim, &mut sc, 5);
+        }
+        assert!(!sc.dialogue_active());
+
+        // 0.4 s later: disarm + checkpoint + the PUNCH gate on the SENTINEL
+        // spawned at (580, 380).
+        run(&mut sim, &mut sc, 40);
+        assert!(sc.step_fired("tut_punch"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Punch);
+        assert!(get_player_weapon(&sim.world).is_none(), "disarmed");
+
+        // A jab from ~90 px — sprites LOOK adjacent — whiffs: no release.
+        // (Approach from the north: the cone stays clear of the passive
+        // civilians milling around the desk.)
+        walk_to(&mut sim, &mut sc, Vec2::new(580.0, 290.0));
+        frame(&mut sim, &mut sc, &swing_at(Vec2::new(580.0, 380.0)));
+        assert_eq!(
+            sc.gate_view().unwrap().input,
+            GateInput::Punch,
+            "a 90 px jab still misses"
+        );
+        // Fist cooldown, step up to 50 px, jab again: down it goes.
+        run(&mut sim, &mut sc, 30);
+        walk_to(&mut sim, &mut sc, Vec2::new(580.0, 330.0));
+        frame(&mut sim, &mut sc, &swing_at(Vec2::new(580.0, 380.0)));
+        run(&mut sim, &mut sc, 2); // the released gate's follow-up step fires
+        assert!(sc.step_fired("tut_finish"), "the jab connected");
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Finish);
+
+        // FINISH: walk over the shoved body and click.
+        let downed1 = sim
+            .world
+            .query::<Enemy>()
+            .into_iter()
+            .find(|&e| sim.world.has_component::<crate::components::Stunned>(e))
+            .expect("the punched SENTINEL is down");
+        let d1 = *sim.world.get_component::<Position>(downed1).unwrap();
+        walk_to(&mut sim, &mut sc, Vec2::new(d1.x - 40.0, d1.y));
+        frame(&mut sim, &mut sc, &swing_at(Vec2::new(d1.x, d1.y)));
+        for _ in 0..70 {
+            frame(&mut sim, &mut sc, &idle());
+        }
+        assert!(sc.step_fired("tut_bar"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Pickup);
+
+        // TAKE THE BAR: walk to the pickup by the desk and press E.
+        walk_to(&mut sim, &mut sc, Vec2::new(420.0, 370.0));
+        frame(&mut sim, &mut sc, &press_e());
+        assert_eq!(get_player_weapon(&sim.world), Some(WeaponType::Melee));
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("tut_strike"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Strike);
+        let strike_bot = sim
+            .world
+            .query::<Enemy>()
+            .into_iter()
+            .find(|&e| {
+                sim.world
+                    .get_component::<Position>(e)
+                    .is_some_and(|p| (p.x - 600.0).abs() < 1.0 && (p.y - 320.0).abs() < 1.0)
+            })
+            .expect("the strike target spawned at (600, 320)");
+
+        // THE BUG: swing the bar from ~90 px — where the two sprites already
+        // look adjacent on screen. It whiffs (only the whoosh, no impact, no
+        // feedback), exactly what soft-locked browser players when the reach
+        // was 50 px and nothing hinted they had to step INSIDE the target.
+        walk_to(&mut sim, &mut sc, Vec2::new(510.0, 320.0));
+        frame(&mut sim, &mut sc, &swing_at(Vec2::new(600.0, 320.0)));
+        assert_eq!(
+            sc.gate_view().unwrap().input,
+            GateInput::Strike,
+            "a 90 px swing still whiffs"
+        );
+        // Weapon cooldown, then close to arm's length (~65 px, sprites
+        // touching): the 70 px reach lands the swing WITHOUT demanding that
+        // the player physically overlap the frozen target.
+        run(&mut sim, &mut sc, 32);
+        walk_to(&mut sim, &mut sc, Vec2::new(535.0, 320.0));
+        frame(&mut sim, &mut sc, &swing_at(Vec2::new(600.0, 320.0)));
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("tut_throw"), "the strike released the gate");
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Throw);
+        // The 100-damage swing killed the bot: its corpse fell along the
+        // blow (attacker west of it -> fall east), head away from the player.
+        assert!(sim
+            .world
+            .get_component::<Health>(strike_bot)
+            .unwrap()
+            .is_dead());
+        let fall = sim
+            .world
+            .get_component::<crate::components::Stunned>(strike_bot)
+            .expect("the killing swing recorded the corpse's fall")
+            .fall_angle;
+        assert!(fall.abs() < 0.01, "fell due east, got {fall}");
+
+        // THROW THE BAR at the third bot (400, 300).
+        walk_to(&mut sim, &mut sc, Vec2::new(340.0, 300.0));
+        frame(&mut sim, &mut sc, &throw_at(Vec2::new(400.0, 300.0)));
+        run(&mut sim, &mut sc, 30);
+        assert!(sc.step_fired("tut_retrieve"), "the throw connected");
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Pickup);
+
+        // GET IT BACK: walk to where the bar landed and press E.
+        let bar = sim
+            .world
+            .query::<crate::components::WeaponPickup>()
+            .into_iter()
+            .find(|&e| {
+                sim.world
+                    .get_component::<crate::components::WeaponPickup>(e)
+                    .is_some_and(|p| p.weapon_type == WeaponType::Melee)
+            })
+            .expect("the thrown bar is on the floor");
+        let bar_pos = *sim.world.get_component::<Position>(bar).unwrap();
+        walk_to(&mut sim, &mut sc, Vec2::new(bar_pos.x, bar_pos.y));
+        frame(&mut sim, &mut sc, &press_e());
+        run(&mut sim, &mut sc, 2);
+        assert!(sc.step_fired("tut_overhead"));
+        assert_eq!(sc.gate_view().unwrap().input, GateInput::Finish);
+
+        // PUT IT DOWN: overhead finisher on the thrown-down bot.
+        let downed = sim
+            .world
+            .query::<Enemy>()
+            .into_iter()
+            .find(|&e| {
+                sim.world.has_component::<crate::components::Stunned>(e)
+                    && sim
+                        .world
+                        .get_component::<Health>(e)
+                        .is_some_and(|h| h.is_alive())
+            })
+            .expect("the thrown-down bot");
+        let dp = *sim.world.get_component::<Position>(downed).unwrap();
+        walk_to(&mut sim, &mut sc, Vec2::new(dp.x - 40.0, dp.y));
+        frame(&mut sim, &mut sc, &swing_at(Vec2::new(dp.x, dp.y)));
+        for _ in 0..90 {
+            frame(&mut sim, &mut sc, &idle());
+        }
+        assert!(sc.gate_view().is_none(), "tutorial complete");
+        assert!(sc.step_fired("wake"));
+        assert_eq!(
+            sim.enemies_alive(),
+            7,
+            "4 alerted lobby bots + the free wave of 3"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod input;
 // Library module for game logic (enables testing)
 pub mod collision;
 pub mod components;
+pub mod drive;
 pub mod ecs;
 pub mod editor;
 pub mod ending;
@@ -71,7 +72,7 @@ mod wasm_entry {
     };
     use crate::render::*;
     use crate::render_comms::{
-        render_comms, render_elevators, render_gate_prompt, render_hold_caption, render_objective,
+        render_elevators, render_gate_prompt, render_hold_caption, render_objective,
         render_zones_debug,
     };
     use crate::render_dialogue::render_dialogue;
@@ -92,6 +93,8 @@ mod wasm_entry {
 
     /// Longest simulation step a single frame may take (seconds).
     const MAX_FRAME_DT: f32 = 0.1;
+    /// Hold R this long (seconds) while alive to restart the floor.
+    const RESTART_HOLD_SECS: f32 = 1.0;
 
     #[wasm_bindgen]
     extern "C" {
@@ -105,6 +108,14 @@ mod wasm_entry {
         // serve.py's editor API (token flow + result toast in index.html).
         #[wasm_bindgen(js_namespace = window, js_name = vizSaveProps)]
         fn viz_save_props(json: &str);
+        // Open an external link in a new tab (defined in index.html).
+        #[wasm_bindgen(js_namespace = window, js_name = openExternal)]
+        fn open_external(url: &str);
+        // Hide / restore the OS cursor over the canvas (defined in
+        // index.html); hidden during gameplay, where the engine draws its
+        // own pixel crosshair instead.
+        #[wasm_bindgen(js_namespace = window, js_name = setCursorHidden)]
+        fn set_cursor_hidden(hidden: bool);
     }
 
     /// The `?viz` PROPS page's editable state of one prop: its art-pixel
@@ -166,6 +177,347 @@ mod wasm_entry {
     /// that world coordinates land on screen (camera zoom is 1.0). Returns once
     /// the atlas is ready; until then `draw_baked` no-ops and the primitives
     /// (already drawn by `render_entities`) remain visible.
+    /// One 12x16 pixel bitmap per title glyph ('#' = filled). The neon look
+    /// comes from drawing only the BOUNDARY cells of these fat letterforms:
+    /// that yields the outer contour and, where a glyph has a counter (O, P,
+    /// A), the inner contour — two neon lines with an empty letter between.
+    fn title_glyph(ch: char) -> [&'static str; 16] {
+        match ch {
+            'O' => [
+                ".##########.",
+                "############",
+                "############",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "############",
+                "############",
+                ".##########.",
+            ],
+            'P' => [
+                "###########.",
+                "############",
+                "############",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "############",
+                "############",
+                "###########.",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+            ],
+            'E' => [
+                "###########.",
+                "############",
+                "############",
+                "###.........",
+                "###.........",
+                "###.........",
+                "##########..",
+                "##########..",
+                "##########..",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "############",
+                "############",
+                "###########.",
+            ],
+            'N' => [
+                "#####....###",
+                "#####....###",
+                "#####....###",
+                "###.##...###",
+                "###.##...###",
+                "###..##..###",
+                "###..##..###",
+                "###..##..###",
+                "###...##.###",
+                "###...##.###",
+                "###....#####",
+                "###....#####",
+                "###....#####",
+                "###.....####",
+                "###.....####",
+                "###.....####",
+            ],
+            'M' => [
+                "#####..#####",
+                "#####..#####",
+                "###.####.###",
+                "###.####.###",
+                "###..##..###",
+                "###..##..###",
+                "###..##..###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+            ],
+            'I' => [
+                ".##########.",
+                ".##########.",
+                ".##########.",
+                "....####....",
+                "....####....",
+                "....####....",
+                "....####....",
+                "....####....",
+                "....####....",
+                "....####....",
+                "....####....",
+                "....####....",
+                "....####....",
+                ".##########.",
+                ".##########.",
+                ".##########.",
+            ],
+            'A' => [
+                ".##########.",
+                "############",
+                "############",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "############",
+                "############",
+                "############",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+            ],
+            // The loading screen's extra glyphs (tools/gen_title.py renders
+            // "LOADING..." out of this same table).
+            'L' => [
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "############",
+                "############",
+                "###########.",
+            ],
+            'D' => [
+                "##########..",
+                "###########.",
+                "############",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "############",
+                "###########.",
+                "##########..",
+            ],
+            'G' => [
+                ".##########.",
+                "############",
+                "############",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###.........",
+                "###....#####",
+                "###....#####",
+                "###......###",
+                "###......###",
+                "###......###",
+                "###......###",
+                "############",
+                "############",
+                ".##########.",
+            ],
+            '.' => [
+                "............",
+                "............",
+                "............",
+                "............",
+                "............",
+                "............",
+                "............",
+                "............",
+                "............",
+                "............",
+                "............",
+                "..####......",
+                "..####......",
+                "..####......",
+                "..####......",
+                "............",
+            ],
+            _ => ["............"; 16],
+        }
+    }
+
+    /// The title: "OPEN" / "MIAMI" as huge hollow neon-pink pixel letters
+    /// (outer + inner contours of the fat glyphs, with a two-ring pixel glow
+    /// around them), rasterized in one pixel-art group opened UNDER a slow
+    /// rotation — the whole sign sways between -20 and -3 degrees.
+    fn draw_neon_title(graphics: &Graphics, cx: f32, cy: f32, t: f32) {
+        const UNIT: f32 = 8.0; // one art pixel = 8 screen px
+        const GW: usize = 72;
+        const GH: usize = 36;
+        let mut filled = [[false; GW]; GH];
+        let stamp = |word: &str, x0: usize, y0: usize, filled: &mut [[bool; GW]; GH]| {
+            for (i, ch) in word.chars().enumerate() {
+                let glyph = title_glyph(ch);
+                let gx = x0 + i * 14; // 12 wide + 2 gap
+                for (r, row) in glyph.iter().enumerate() {
+                    for (c, cell) in row.bytes().enumerate() {
+                        if cell == b'#' {
+                            filled[y0 + r][gx + c] = true;
+                        }
+                    }
+                }
+            }
+        };
+        stamp("OPEN", 8, 1, &mut filled);
+        stamp("MIAMI", 1, 19, &mut filled);
+
+        let at = |r: isize, c: isize| -> bool {
+            r >= 0
+                && c >= 0
+                && (r as usize) < GH
+                && (c as usize) < GW
+                && filled[r as usize][c as usize]
+        };
+        // Boundary = a filled cell with an empty 4-neighbour; the glow rings
+        // are the empty cells within 1 / 2 (8-neighbourhood) of a boundary.
+        let mut layer = [[0u8; GW]; GH]; // 3 = core, 2 = glow, 1 = faint glow
+        for r in 0..GH as isize {
+            for c in 0..GW as isize {
+                if at(r, c) && !(at(r - 1, c) && at(r + 1, c) && at(r, c - 1) && at(r, c + 1)) {
+                    layer[r as usize][c as usize] = 3;
+                }
+            }
+        }
+        for pass in [2u8, 1u8] {
+            let want = pass + 1;
+            for r in 0..GH as isize {
+                for c in 0..GW as isize {
+                    if at(r, c) || layer[r as usize][c as usize] != 0 {
+                        continue;
+                    }
+                    'scan: for dr in -1..=1 {
+                        for dc in -1..=1 {
+                            let (nr, nc) = (r + dr, c + dc);
+                            if nr >= 0
+                                && nc >= 0
+                                && (nr as usize) < GH
+                                && (nc as usize) < GW
+                                && layer[nr as usize][nc as usize] == want
+                            {
+                                layer[r as usize][c as usize] = pass;
+                                break 'scan;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Slow sway between -12 and -3 degrees (period ~20 s).
+        let ang = (-7.5 + 4.5 * (t * 0.31).sin()).to_radians();
+        let (w, h) = (GW as f32 * UNIT, GH as f32 * UNIT);
+        graphics.save();
+        graphics.translate(cx, cy);
+        graphics.rotate(ang);
+        graphics.pixel_begin(UNIT, w, h);
+        for (r, row) in layer.iter().enumerate() {
+            for (c, &l) in row.iter().enumerate() {
+                if l == 0 {
+                    continue;
+                }
+                let color = match l {
+                    3 => Color::new(1.0, 0.20, 0.60, 1.0),
+                    2 => Color::new(1.0, 0.20, 0.60, 0.30),
+                    _ => Color::new(1.0, 0.20, 0.60, 0.12),
+                };
+                graphics.draw_rectangle(
+                    Vec2::new(c as f32 * UNIT, r as f32 * UNIT),
+                    UNIT,
+                    UNIT,
+                    color,
+                );
+            }
+        }
+        graphics.pixel_end(-w / 2.0, -h / 2.0);
+        graphics.restore();
+    }
+
+    /// A small pixel-art arrow pointing DOWN at `(x, y)` (its tip), built
+    /// from 3-px cells: a 2-cell shaft over a 6/4/2-cell head, with a dark
+    /// backing shadow so it reads on any floor.
+    fn draw_pixel_arrow(graphics: &Graphics, x: f32, y: f32, accent: (u8, u8, u8)) {
+        const C: f32 = 3.0;
+        let col = Color::new(
+            accent.0 as f32 / 255.0,
+            accent.1 as f32 / 255.0,
+            accent.2 as f32 / 255.0,
+            0.95,
+        );
+        let shadow = Color::new(0.0, 0.0, 0.0, 0.45);
+        // (dx cells, dy cells, w cells) rows, y grows toward the tip.
+        let rows: [(f32, f32, f32); 7] = [
+            (-1.0, -7.0, 2.0),
+            (-1.0, -6.0, 2.0),
+            (-1.0, -5.0, 2.0),
+            (-1.0, -4.0, 2.0),
+            (-3.0, -3.0, 6.0),
+            (-2.0, -2.0, 4.0),
+            (-1.0, -1.0, 2.0),
+        ];
+        for &(dx, dy, w) in &rows {
+            graphics.draw_rectangle(
+                Vec2::new(x + dx * C + 1.0, y + dy * C + 1.0),
+                w * C,
+                C,
+                shadow,
+            );
+        }
+        for &(dx, dy, w) in &rows {
+            graphics.draw_rectangle(Vec2::new(x + dx * C, y + dy * C), w * C, C, col);
+        }
+    }
+
     /// Draw the player and rogue enemies as live-rendered 3D robot sprites on
     /// top of the primitive draw. Must be called while the camera transform is
     /// applied so that world coordinates land on screen (camera zoom is 1.0).
@@ -173,7 +525,22 @@ mod wasm_entry {
     /// entity's clock is offset by its id so the squad doesn't move in
     /// phase-locked unison, and knocked-down bots play the hit flinch synced
     /// to the moment the stun landed.
-    fn draw_robot_entities(world: &World, graphics: &Graphics, now: f32) {
+    ///
+    /// One pass of the robot sprites. `prone_pass` = draw only the downed
+    /// (dead / knocked-down) bodies; `!prone_pass` = only the upright ones.
+    /// Two passes let the ground weapons draw OVER the corpses (easy to spot)
+    /// yet UNDER anyone still standing.
+    ///
+    /// Each ROBOT command costs robot-core an FBO round-trip and ~15-19 draw
+    /// calls, so bots fully outside `cull` are skipped (conservative
+    /// half-extent: a whole tile, downed bodies sprawl past their centre).
+    fn draw_robot_entities(
+        world: &World,
+        graphics: &Graphics,
+        now: f32,
+        prone_pass: bool,
+        cull: &crate::camera::ViewCull,
+    ) {
         use crate::components::{AIState, EnemyType};
         use crate::components::{
             Boss, Enemy, Finisher, FinisherKind, Health, Player, Position, Rotation, Stunned,
@@ -213,6 +580,12 @@ mod wasm_entry {
             let stunned = world.get_component::<Stunned>(entity);
             // Dead OR knocked down: sprawled flat in the DOWNED pose.
             let prone = health.is_dead() || stunned.is_some();
+            if prone != prone_pass {
+                continue;
+            }
+            if !cull.visible(pos.x, pos.y, ROBOT_TILE_PX) {
+                continue;
+            }
             let speed = world
                 .get_component::<Velocity>(entity)
                 .map(|v| (v.x * v.x + v.y * v.y).sqrt())
@@ -229,9 +602,14 @@ mod wasm_entry {
             // different phase derived from its entity id.
             let phase = (entity.0 % 97) as f32 * 0.173;
             // Downed bodies face the blow's origin: the pose's backward topple
-            // then lays them out along `fall_angle` — away from the blow. A
-            // corpse without a live knockdown clock keeps its `Rotation` (the
-            // stun system wrote the matching facing there when the stun ended).
+            // (robot-core's downed plan leans the rig onto its back) then lays
+            // them out along `fall_angle` — head first, away from the blow.
+            // Killing blows record the same convention (`record_corpse_fall`:
+            // bullets, melee swings and thrown weapons all leave a `Stunned`
+            // carrying the shot direction), so corpses sprawl away from the
+            // shooter too. A corpse without a live knockdown clock keeps its
+            // `Rotation` (the stun system wrote the matching facing there when
+            // the stun ended).
             let angle = match stunned {
                 Some(stun) => stun.fall_angle + std::f32::consts::PI,
                 None => rot.angle,
@@ -257,12 +635,18 @@ mod wasm_entry {
             );
         }
 
-        // --- Player (CL4-UD3, coral) ---
+        // --- Player (CL4-UD3, coral; upright pass only — dead players
+        // render their WASTED state elsewhere) ---
+        if prone_pass {
+            return;
+        }
         if let Some(&player) = world.query::<Player>().first() {
             let pos = world.get_component::<Position>(player);
             let health = world.get_component::<Health>(player);
             if let (Some(pos), Some(health)) = (pos, health) {
-                if !health.is_dead() {
+                // Off-screen check matters even for the player: a scenario
+                // `look_at` can carry the camera clean away from them.
+                if !health.is_dead() && cull.visible(pos.x, pos.y, ROBOT_TILE_PX) {
                     let mut angle = world
                         .get_component::<Rotation>(player)
                         .map(|r| r.angle)
@@ -363,7 +747,7 @@ mod wasm_entry {
     /// colour). Mirrors the kind table in renderer.js / `Graphics::postfx`.
     /// Peak `t` stays below 1 where full strength would blank the frame
     /// (BLUR-OUT at t = 1 is a solid colour).
-    const POSTFX_PREVIEWS: [(u32, &str, f32, Color); 10] = [
+    const POSTFX_PREVIEWS: [(u32, &str, f32, Color); 13] = [
         (0, "BLUR-OUT", 0.8, Color::new(0.05, 0.02, 0.10, 1.0)),
         (1, "SYNTHWAVE CRT", 1.0, Color::new(1.0, 0.25, 0.65, 1.0)),
         (2, "VHS TAPE", 1.0, Color::new(0.60, 0.60, 0.90, 1.0)),
@@ -374,6 +758,10 @@ mod wasm_entry {
         (7, "NEON BLOOM", 1.0, Color::new(0.55, 0.10, 0.60, 1.0)),
         (8, "PIXEL MOSAIC", 1.0, Color::new(0.90, 0.80, 0.30, 1.0)),
         (9, "TUNNEL RUSH", 1.0, Color::new(1.0, 0.40, 0.20, 1.0)),
+        (10, "WARP TRAILS", 1.0, ending::WARP_TINT),
+        (11, "UI GREY", 0.8, Color::new(0.80, 0.82, 0.90, 1.0)),
+        // r/g = the demo modal's half extents (fractions of the screen).
+        (12, "MODAL STATIC", 0.9, Color::new(0.25, 0.22, 0.0, 1.0)),
     ];
 
     /// How long an EFFECTS-tab POSTFX preview plays (ramp in, hold, ramp out).
@@ -605,6 +993,15 @@ mod wasm_entry {
         /// (`SURFACE_EXIT` = surface). The completion card plays, then the
         /// floor loads.
         extracting: Option<usize>,
+        /// Seconds R has been held while alive: at [`RESTART_HOLD_SECS`] the
+        /// floor restarts from scratch (a load bar fills at screen centre).
+        restart_hold: f32,
+        /// Whether the OS cursor is currently hidden over the canvas (the
+        /// in-game pixel crosshair replaces it; menus keep the OS cursor).
+        cursor_hidden: bool,
+        /// Whether the music is stopped because a tutorial gate froze the
+        /// world (restarted when the gate releases).
+        music_frozen: bool,
         level: Level,
         camera: Camera,
         last_time: f64,
@@ -688,6 +1085,9 @@ mod wasm_entry {
                 scenario: None,
                 checkpoint: None,
                 extracting: None,
+                restart_hold: 0.0,
+                cursor_hidden: false,
+                music_frozen: false,
                 level: Level::new(),
                 camera: Camera::new(),
                 last_time: 0.0,
@@ -731,7 +1131,11 @@ mod wasm_entry {
             // `?floor=N`: jump straight into that floor (editor "play" button,
             // testing). Audio stays off until the first user gesture.
             if !wants_visualizer() {
-                if let Some(level) = Self::url_start_floor() {
+                if url_flag("ending") {
+                    // `?ending`: jump straight to the credits (dev shortcut,
+                    // same spirit as `?floor=N`; the DRIVE scene lives there).
+                    state.screen = GameScreen::Ending;
+                } else if let Some(level) = Self::url_start_floor() {
                     state.selected_level = level;
                     state.start_game();
                 }
@@ -842,6 +1246,15 @@ mod wasm_entry {
             if !self.audio_unlocked && input::any_pressed() {
                 self.audio.resume();
                 self.audio_unlocked = true;
+            }
+
+            // In-game the OS cursor is hidden and the engine draws its own
+            // pixel crosshair (update_game); every other screen (menus, the
+            // ?viz toolbox, the editor) keeps the native pointer.
+            let want_hidden = self.screen == GameScreen::InGame;
+            if want_hidden != self.cursor_hidden {
+                set_cursor_hidden(want_hidden);
+                self.cursor_hidden = want_hidden;
             }
 
             match self.screen {
@@ -1006,6 +1419,27 @@ mod wasm_entry {
                 self.effect_kind = -1;
                 self.effect_start = self.last_time;
             }
+
+            // DRIVE — the glitchy synthwave ride home that plays under the
+            // credits (src/drive.rs), previewed live at moderate glitch.
+            let (dx0, dy0, dw, dh) = (320.0, y2 + 12.0, 600.0, 300.0);
+            graphics.draw_text(
+                "DRIVE (the ending scene, live, glitch 0.5)",
+                Vec2::new(dx0, y2),
+                16.0,
+                coral,
+            );
+            graphics.draw_rectangle(
+                Vec2::new(dx0, dy0),
+                dw,
+                dh,
+                Color::new(0.02, 0.01, 0.04, 1.0),
+            );
+            graphics.save();
+            graphics.translate(dx0, dy0);
+            crate::drive::render_drive(graphics, dw, dh, (self.last_time / 1000.0) as f32, 0.5);
+            graphics.restore();
+            graphics.draw_rectangle_lines(Vec2::new(dx0, dy0), dw, dh, 2.0, coral);
         }
 
         /// SPRITES tab: two sub-pages — the character gallery (each item opens
@@ -1734,27 +2168,28 @@ mod wasm_entry {
             );
         }
 
-        /// The credits roll (see `ending.rs`): synthwave backdrop, scrolling
-        /// text, CRT post pass. Enter / Esc returns to the level select.
+        /// The credits roll (see `ending.rs`): the elevator RIDE HOME under
+        /// the scrolling text — the car top-down at dead centre, CL4-UD3
+        /// idling in it — smeared into radial light trails by the WARP
+        /// TRAILS feedback pass (POSTFX kind 10; `Ending::warp_t` ramps the
+        /// ride up over the first seconds and eases it down as the roll
+        /// settles). Enter / Esc returns to the level select.
         fn update_ending(&mut self, graphics: &Graphics, dt: f32) {
             self.ending.tick(dt);
             if input::is_key_pressed("Enter") || input::is_key_pressed("Escape") {
                 self.screen = GameScreen::LevelSelect;
                 return;
             }
-            ending::draw_credits(graphics, &self.ending, self.last_time as f32 / 1000.0);
-            graphics.postfx(1, 0.75, Color::new(1.0, 0.25, 0.65, 1.0));
+            ending::render_ride(graphics, &self.ending);
+            ending::draw_credits(graphics, &self.ending);
+            graphics.postfx(10, self.ending.warp_t(graphics.height()), ending::WARP_TINT);
         }
 
         fn update_level_select(&mut self, graphics: &Graphics) {
-            let screen_width = graphics.width();
-            let screen_height = graphics.height();
-
             // Handle input - Left (Arrow, A for QWERTY, Q for AZERTY)
-            if (input::is_key_pressed("ArrowLeft")
+            if input::is_key_pressed("ArrowLeft")
                 || input::is_key_pressed("a")
-                || input::is_key_pressed("q"))
-                && self.selected_menu_option == MenuOption::Play
+                || input::is_key_pressed("q")
             {
                 self.selected_level = if self.selected_level == 0 {
                     LEVEL_COUNT - 1
@@ -1763,9 +2198,7 @@ mod wasm_entry {
                 };
             }
             // Handle input - Right (Arrow, D)
-            if (input::is_key_pressed("ArrowRight") || input::is_key_pressed("d"))
-                && self.selected_menu_option == MenuOption::Play
-            {
+            if input::is_key_pressed("ArrowRight") || input::is_key_pressed("d") {
                 self.selected_level = (self.selected_level + 1) % LEVEL_COUNT;
             }
             // Handle input - Down (Arrow, S)
@@ -1804,23 +2237,45 @@ mod wasm_entry {
                 }
             }
 
-            // Render title
-            graphics.draw_text(
-                "OPEN MIAMI",
-                Vec2::new(screen_width / 2.0 - 150.0, 100.0),
-                60.0,
-                Color::new(1.0, 0.09, 0.26, 1.0), // Pink/red
+            self.draw_level_select(graphics);
+        }
+
+        /// The title screen's drawing (no input): the drive backdrop, neon
+        /// title, floor picker and menu. Also the live backdrop under the
+        /// SETTINGS / ABOUT modals.
+        fn draw_level_select(&mut self, graphics: &Graphics) {
+            let screen_width = graphics.width();
+            let screen_height = graphics.height();
+
+            // The glitchy synthwave DRIVE (drive.rs) runs behind the whole
+            // menu, dimmed so the text stays the star (its VHS POSTFX also
+            // washes the menu — deliberate: the title screen IS the tape).
+            crate::drive::render_drive(
+                graphics,
+                screen_width,
+                screen_height,
+                (self.last_time / 1000.0) as f32,
+                0.35,
             );
-            // Subtitle
-            graphics.draw_text(
-                "// ROGUE PURGE",
-                Vec2::new(screen_width / 2.0 - 90.0, 140.0),
-                26.0,
-                Color::from_rgba(217, 119, 87, 255), // Coral
+            graphics.draw_rectangle(
+                Vec2::new(0.0, 0.0),
+                screen_width,
+                screen_height,
+                Color::new(0.02, 0.01, 0.04, 0.55),
             );
 
-            // Render level selection
-            let level_y = screen_height / 2.0 - 50.0;
+            // The neon pixel title: OPEN / MIAMI, hollow pink letters
+            // swaying slowly. (The ROGUE PURGE subtitle retired.)
+            draw_neon_title(
+                graphics,
+                screen_width / 2.0,
+                176.0,
+                (self.last_time / 1000.0) as f32,
+            );
+
+            // Render level selection (a touch bigger and lower than the
+            // title wants to sit).
+            let level_y = screen_height / 2.0 - 22.0;
 
             // Left arrow
             let arrow_color = if self.selected_menu_option == MenuOption::Play {
@@ -1830,8 +2285,8 @@ mod wasm_entry {
             };
             graphics.draw_text(
                 "<",
-                Vec2::new(screen_width / 2.0 - 150.0, level_y),
-                40.0,
+                Vec2::new(screen_width / 2.0 - 172.0, level_y),
+                48.0,
                 arrow_color,
             );
 
@@ -1839,8 +2294,8 @@ mod wasm_entry {
             let level_text = floor_title(self.selected_level);
             graphics.draw_text(
                 &level_text,
-                Vec2::new(screen_width / 2.0 - 80.0, level_y),
-                40.0,
+                Vec2::new(screen_width / 2.0 - 96.0, level_y),
+                48.0,
                 Color::WHITE,
             );
             let floor = floor_def(self.selected_level);
@@ -1856,8 +2311,8 @@ mod wasm_entry {
             // Right arrow
             graphics.draw_text(
                 ">",
-                Vec2::new(screen_width / 2.0 + 120.0, level_y),
-                40.0,
+                Vec2::new(screen_width / 2.0 + 142.0, level_y),
+                48.0,
                 arrow_color,
             );
 
@@ -1866,7 +2321,7 @@ mod wasm_entry {
             let menu_spacing = 50.0;
 
             let play_color = if self.selected_menu_option == MenuOption::Play {
-                Color::new(1.0, 0.09, 0.26, 1.0)
+                Color::new(1.0, 0.20, 0.60, 1.0) // the neon title's pink
             } else {
                 Color::WHITE
             };
@@ -1878,24 +2333,24 @@ mod wasm_entry {
             );
 
             let settings_color = if self.selected_menu_option == MenuOption::Settings {
-                Color::new(1.0, 0.09, 0.26, 1.0)
+                Color::new(1.0, 0.20, 0.60, 1.0)
             } else {
                 Color::WHITE
             };
             graphics.draw_text(
-                "Settings",
-                Vec2::new(screen_width / 2.0 - 50.0, menu_y + menu_spacing),
+                "SETTINGS",
+                Vec2::new(screen_width / 2.0 - 46.0, menu_y + menu_spacing),
                 24.0,
                 settings_color,
             );
 
             let about_color = if self.selected_menu_option == MenuOption::About {
-                Color::new(1.0, 0.09, 0.26, 1.0)
+                Color::new(1.0, 0.20, 0.60, 1.0)
             } else {
                 Color::WHITE
             };
             graphics.draw_text(
-                "About",
+                "ABOUT",
                 Vec2::new(screen_width / 2.0 - 30.0, menu_y + menu_spacing * 2.0),
                 24.0,
                 about_color,
@@ -1910,89 +2365,106 @@ mod wasm_entry {
             );
         }
 
-        fn update_settings(&mut self, graphics: &Graphics) {
-            let screen_width = graphics.width();
-            let screen_height = graphics.height();
-
-            // Handle input
-            if input::is_key_pressed("Escape") || input::is_key_pressed("Enter") {
-                self.screen = GameScreen::LevelSelect;
-            }
-
-            // Render title
-            graphics.draw_text(
-                "SETTINGS",
-                Vec2::new(screen_width / 2.0 - 120.0, 100.0),
-                60.0,
-                Color::new(1.0, 0.09, 0.26, 1.0),
-            );
-
-            // Render message
-            graphics.draw_text(
-                "No settings currently available",
-                Vec2::new(screen_width / 2.0 - 180.0, screen_height / 2.0),
-                30.0,
+        /// The shared SETTINGS / ABOUT modal chrome over the live title
+        /// screen: a monochrome full-white-on-black panel, then POSTFX 12
+        /// (MODAL STATIC) — the panel keeps the grey/tape wash while
+        /// everything OUTSIDE it is blurred and buried under ~90% hard 6-px
+        /// binary white noise, re-rolled every frame. Returns the panel
+        /// origin for the caller's content.
+        fn draw_menu_modal(&mut self, graphics: &Graphics, title: &str, mw: f32, mh: f32) -> Vec2 {
+            self.draw_level_select(graphics);
+            let (w, h) = (graphics.width(), graphics.height());
+            let (mx, my) = ((w - mw) / 2.0, (h - mh) / 2.0);
+            // Pure, opaque black: the shader passes the inside through
+            // untouched, and the frame (white ring, black ring) is drawn by
+            // the POSTFX itself right at the panel edge.
+            graphics.draw_rectangle(Vec2::new(mx, my), mw, mh, Color::new(0.0, 0.0, 0.0, 1.0));
+            graphics.draw_text(title, Vec2::new(mx + 28.0, my + 40.0), 36.0, Color::WHITE);
+            graphics.draw_rectangle(
+                Vec2::new(mx + 28.0, my + 84.0),
+                mw - 56.0,
+                6.0,
                 Color::WHITE,
             );
-
-            // Back hint
             graphics.draw_text(
-                "Press ESC or Enter to return",
-                Vec2::new(screen_width / 2.0 - 140.0, screen_height - 40.0),
-                16.0,
-                Color::GRAY,
+                "ESC / ENTER — BACK",
+                Vec2::new(mx + mw - 190.0, my + mh - 30.0),
+                15.0,
+                Color::WHITE,
+            );
+            // MODAL STATIC: r/g carry the panel's half extents; the shader
+            // frames the exact edge with a 6-px white then 6-px black ring
+            // before the noise starts.
+            graphics.postfx(12, 0.9, Color::new(mw / 2.0 / w, mh / 2.0 / h, 0.0, 1.0));
+            Vec2::new(mx, my)
+        }
+
+        fn update_settings(&mut self, graphics: &Graphics) {
+            if input::is_key_pressed("Escape") || input::is_key_pressed("Enter") {
+                self.screen = GameScreen::LevelSelect;
+                return;
+            }
+            let p = self.draw_menu_modal(graphics, "SETTINGS", 564.0, 264.0);
+            graphics.draw_text(
+                "NO SETTINGS CURRENTLY AVAILABLE",
+                Vec2::new(p.x + 28.0, p.y + 130.0),
+                22.0,
+                Color::WHITE,
             );
         }
 
         fn update_about(&mut self, graphics: &Graphics) {
-            let screen_width = graphics.width();
-            let screen_height = graphics.height();
-
-            // Handle input
             if input::is_key_pressed("Escape") || input::is_key_pressed("Enter") {
                 self.screen = GameScreen::LevelSelect;
+                return;
             }
-
-            // Render title
+            let p = self.draw_menu_modal(graphics, "ABOUT", 660.0, 498.0);
+            const LINES: [&str; 11] = [
+                "THIS STARTED AS A VIBE CODED EXPERIMENT",
+                "WITH SONNET 4.5 LAST YEAR",
+                "",
+                "I ASKED FABLE FOR AN OPINION ON THE PROJECT",
+                "I GUESS THIS IS OUR PROJECT NOW",
+                "",
+                "OBVIOUSLY THIS IS AN HOMAGE TO HOTLINE MIAMI",
+                "(BUY THIS AND THE SECOND ONE)",
+                "",
+                "YOU CAN CHECK THE SOURCES AT",
+                "HTTPS://GITHUB.COM/C4FFEIN/OPEN-MIAMI",
+            ];
+            const URL_LINE: usize = 10;
+            let mut url_rect = (0.0, 0.0, 0.0, 0.0);
+            for (i, line) in LINES.iter().enumerate() {
+                let pos = Vec2::new(p.x + 28.0, p.y + 112.0 + i as f32 * 26.0);
+                if i == URL_LINE {
+                    // The link: neon pink, underlined, click -> new tab.
+                    let w = line.chars().count() as f32 * 20.0 * 0.44;
+                    graphics.draw_text(line, pos, 20.0, Color::new(1.0, 0.20, 0.60, 1.0));
+                    graphics.draw_rectangle(
+                        Vec2::new(pos.x, pos.y + 24.0),
+                        w,
+                        6.0,
+                        Color::new(1.0, 0.20, 0.60, 0.9),
+                    );
+                    url_rect = (pos.x, pos.y - 2.0, w, 32.0);
+                } else {
+                    graphics.draw_text(line, pos, 20.0, Color::WHITE);
+                }
+            }
+            // Click on the URL opens the repo in a new tab (still within the
+            // click's transient user activation, so popup blockers allow it).
+            if input::is_mouse_button_pressed(input::mouse_buttons::LEFT) {
+                let m = input::mouse_position();
+                let (rx, ry, rw, rh) = url_rect;
+                if m.x >= rx && m.x <= rx + rw && m.y >= ry && m.y <= ry + rh {
+                    open_external("https://github.com/c4ffein/open-miami");
+                }
+            }
             graphics.draw_text(
-                "ABOUT",
-                Vec2::new(screen_width / 2.0 - 80.0, 100.0),
-                60.0,
-                Color::new(1.0, 0.09, 0.26, 1.0),
-            );
-
-            // Render message
-            graphics.draw_text(
-                "You are a friendly Claude bot,",
-                Vec2::new(screen_width / 2.0 - 200.0, screen_height / 2.0 - 60.0),
-                30.0,
+                "LUV - C4FFEIN",
+                Vec2::new(p.x + 660.0 - 170.0, p.y + 112.0 + 11.0 * 26.0 + 6.0),
+                22.0,
                 Color::WHITE,
-            );
-            graphics.draw_text(
-                "sent to purge the rogue AI models",
-                Vec2::new(screen_width / 2.0 - 230.0, screen_height / 2.0 - 20.0),
-                30.0,
-                Color::WHITE,
-            );
-            graphics.draw_text(
-                "haunting the Miami Datacenter.",
-                Vec2::new(screen_width / 2.0 - 210.0, screen_height / 2.0 + 20.0),
-                30.0,
-                Color::WHITE,
-            );
-            graphics.draw_text(
-                "Neon-noir. Vibe coded with Claude.",
-                Vec2::new(screen_width / 2.0 - 230.0, screen_height / 2.0 + 60.0),
-                24.0,
-                Color::GRAY,
-            );
-
-            // Back hint
-            graphics.draw_text(
-                "Press ESC or Enter to return",
-                Vec2::new(screen_width / 2.0 - 140.0, screen_height - 40.0),
-                16.0,
-                Color::GRAY,
             );
         }
 
@@ -2146,6 +2618,19 @@ mod wasm_entry {
             // can close the distance to the frozen target.
             let gate = self.scenario.as_ref().and_then(|sc| sc.gate_view());
 
+            // The world holds its breath under a tutorial gate: the music
+            // stops with it (everyone just stands there — wtf?) and comes
+            // back once the gated action lands.
+            let gate_active = gate.is_some();
+            if gate_active != self.music_frozen {
+                if gate_active {
+                    self.audio.stop_music();
+                } else {
+                    self.audio.start_music();
+                }
+                self.music_frozen = gate_active;
+            }
+
             // Handle input (only if the player is alive and hasn't left in
             // the car yet)
             if player_alive && self.extracting.is_none() && finishing {
@@ -2153,40 +2638,36 @@ mod wasm_entry {
             }
             if player_alive && self.extracting.is_none() && !finishing {
                 if let Some(g) = gate {
-                    InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
+                    // Movement stays live so the player can close the distance
+                    // to the frozen target; everything else goes through the
+                    // shared, host-tested gate dispatch (game.rs).
                     InputSystem::update_player_movement(&mut self.world);
-                    if g.input.allows_finisher()
-                        && input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
-                    {
-                        FinisherSystem::try_start(&mut self.world);
-                    }
-                    if g.input.allows_primary(get_player_weapon(&self.world)) {
-                        InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
-                    }
-                    if g.input.allows_pickup() && input::is_key_pressed("e") {
-                        PickupSystem::swap_for_player(&mut self.world);
-                    }
-                    if g.input.allows_throw()
-                        && input::is_mouse_button_pressed(input::mouse_buttons::RIGHT)
-                    {
-                        if let Some(player_pos) = get_player_position(&self.world) {
-                            let aim = mouse_world_pos - player_pos;
-                            ThrownWeaponSystem::throw_from_player(&mut self.world, aim);
-                        }
-                    }
+                    let intents = PlayerIntents {
+                        left_pressed: input::is_mouse_button_pressed(input::mouse_buttons::LEFT),
+                        left_down: input::is_mouse_button_down(input::mouse_buttons::LEFT),
+                        right_pressed: input::is_mouse_button_pressed(input::mouse_buttons::RIGHT),
+                        e_pressed: input::is_key_pressed("e"),
+                        mouse_world: mouse_world_pos,
+                    };
+                    gated_player_input(&mut self.world, g, &intents);
                 } else if held {
                     InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
                     stop_player(&mut self.world);
                 } else {
                     InputSystem::update_player_rotation(&mut self.world, mouse_world_pos);
                     InputSystem::update_player_movement(&mut self.world);
+                    // Fighting can be scenario-disabled (`combat: false` —
+                    // the parking-lot walk): fire / punch / finisher / throw
+                    // are masked; walking, aiming and E stay live. Gates
+                    // bypass this (their branch above).
+                    let combat_ok = self.scenario.as_ref().is_none_or(|sc| sc.combat_enabled());
                     // A fresh click over a DOWNED enemy in reach executes a
                     // FINISHER instead of a normal attack; otherwise the trigger
                     // behaves exactly as before.
-                    let finisher_started =
-                        input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
-                            && FinisherSystem::try_start(&mut self.world);
-                    if !finisher_started {
+                    let finisher_started = combat_ok
+                        && input::is_mouse_button_pressed(input::mouse_buttons::LEFT)
+                        && FinisherSystem::try_start(&mut self.world);
+                    if combat_ok && !finisher_started {
                         InputSystem::handle_shoot_input(&mut self.world, mouse_world_pos);
                     }
 
@@ -2198,7 +2679,7 @@ mod wasm_entry {
 
                     // Right-click to throw the held weapon toward the cursor (the
                     // Throw event it emits plays the sound below).
-                    if input::is_mouse_button_pressed(input::mouse_buttons::RIGHT) {
+                    if combat_ok && input::is_mouse_button_pressed(input::mouse_buttons::RIGHT) {
                         if let Some(player_pos) = get_player_position(&self.world) {
                             let aim = mouse_world_pos - player_pos;
                             ThrownWeaponSystem::throw_from_player(&mut self.world, aim);
@@ -2211,6 +2692,10 @@ mod wasm_entry {
             if self.debug_enabled && input::is_key_pressed("i") {
                 self.show_infos = !self.show_infos;
             }
+            // Tell the systems whether debug visualization is visible this
+            // frame: DebugPath / DebugTrail are only recorded while it is.
+            self.world
+                .set_debug_viz(self.debug_enabled && self.show_infos);
             // Debug: with the overlays on, K downs every rogue (fast-forwards
             // the all-dead scenario steps / exit doors when testing a floor).
             if self.debug_enabled && self.show_infos && input::is_key_pressed("k") {
@@ -2233,6 +2718,15 @@ mod wasm_entry {
                 // TUTORIAL FREEZE: only the player-driven systems advance
                 // (same list as the headless sim — see sim::gate_frozen_step).
                 crate::sim::gate_frozen_step(&mut self.world, dt);
+                // Invisible walls: the player roams freely but only near the
+                // gate's target (see `scenario::tether_player`).
+                if let Some(anchor) = self.scenario.as_ref().and_then(|sc| sc.gate_anchor()) {
+                    crate::scenario::tether_player(
+                        &mut self.world,
+                        anchor,
+                        crate::scenario::GATE_TETHER_RADIUS,
+                    );
+                }
             } else {
                 // Run game systems (the finisher goes first so it can keep its
                 // victim pinned before the stun tick).
@@ -2302,6 +2796,10 @@ mod wasm_entry {
             let (view_min, view_max) = self
                 .camera
                 .visible_bounds(graphics.width(), graphics.height());
+            // View culling for the expensive sprites (live 3D robots / guns /
+            // the boss) and the placed props: anything whose footprint lies
+            // fully outside these inflated bounds skips its commands.
+            let cull = crate::camera::ViewCull::new(view_min, view_max);
             // Kill flash: the floor strobes red / blue / red / blue for a beat.
             let tint = if self.kill_flash > 0.0 {
                 self.kill_flash = (self.kill_flash - dt).max(0.0);
@@ -2327,6 +2825,7 @@ mod wasm_entry {
                 graphics,
                 floor_def(self.selected_level).props,
                 self.last_time as f32 / 1000.0,
+                &cull,
             );
 
             // Elevators (recessed door frames; exits light up when open) and,
@@ -2341,6 +2840,17 @@ mod wasm_entry {
                 render_zones_debug(&self.world, graphics);
             }
 
+            // Downed / dead bots first: the ground weapons (in
+            // render_entities below) draw OVER the corpses so they stay easy
+            // to spot, while everyone still standing draws over the guns.
+            draw_robot_entities(
+                &self.world,
+                graphics,
+                self.last_time as f32 / 1000.0,
+                true,
+                &cull,
+            );
+
             // Render all entities except the player/rogue bots themselves
             // (bullets, pickups, boss, debug overlays...).
             render_entities(
@@ -2349,12 +2859,28 @@ mod wasm_entry {
                 self.show_infos,
                 false,
                 self.last_time as f32 / 1000.0,
+                &cull,
             );
 
-            // The player and rogues are the live 3D robot sprites, drawn while
-            // the camera transform (incl. zoom) is still applied so world-space
-            // positions and sizes land correctly.
-            draw_robot_entities(&self.world, graphics, self.last_time as f32 / 1000.0);
+            // The upright player and rogues are the live 3D robot sprites,
+            // drawn while the camera transform (incl. zoom) is still applied
+            // so world-space positions and sizes land correctly.
+            draw_robot_entities(
+                &self.world,
+                graphics,
+                self.last_time as f32 / 1000.0,
+                false,
+                &cull,
+            );
+
+            // A pixelated arrow slowly floating over the active tutorial
+            // gate's target, so "swing the bar" always has an obvious victim.
+            if let Some(anchor) = self.scenario.as_ref().and_then(|sc| sc.gate_anchor()) {
+                let t = self.last_time as f32 / 1000.0;
+                // Bob in whole 2-px steps: floaty but still pixel-crisp.
+                let bob = ((t * 2.2).sin() * 3.0).floor() * 2.0;
+                draw_pixel_arrow(graphics, anchor.x, anchor.y - 58.0 + bob, accent);
+            }
 
             // Reset camera for UI rendering
             self.camera.reset(graphics);
@@ -2546,7 +3072,11 @@ mod wasm_entry {
                 if player_alive && !level_complete {
                     render_objective(graphics, sc, accent, 150.0);
                 }
-                render_comms(graphics, sc, accent, graphics.height() - 34.0);
+                // The bottom-left intercepted-comms ticker is retired: the
+                // dialogue panel (`talk`) is the one place conversations
+                // render now. `say` lines still queue/type invisibly so
+                // `hold.until_comms_idle` timing and the epilogue's feed-idle
+                // detection keep working.
                 if let Some(text) = sc.hold_caption() {
                     if player_alive && !level_complete {
                         render_hold_caption(graphics, text, accent, sc.time());
@@ -2565,6 +3095,71 @@ mod wasm_entry {
                     if player_alive && !level_complete {
                         render_dialogue(graphics, &view, accent, self.last_time as f32 / 1000.0);
                     }
+                }
+            }
+
+            // The hold-R restart load bar, centre screen (see the input
+            // handling below): outline + accent fill by progress.
+            if self.restart_hold > 0.05 && player_alive {
+                let (w, h) = (graphics.width(), graphics.height());
+                let (bw, bh) = (220.0, 10.0);
+                let (bx, by) = ((w - bw) / 2.0, (h - bh) / 2.0 - 40.0);
+                graphics.draw_rectangle(
+                    Vec2::new(bx - 2.0, by - 2.0),
+                    bw + 4.0,
+                    bh + 4.0,
+                    Color::new(0.0, 0.0, 0.0, 0.55),
+                );
+                graphics.draw_rectangle_lines(
+                    Vec2::new(bx, by),
+                    bw,
+                    bh,
+                    1.0,
+                    Color::new(0.9, 0.9, 0.9, 0.8),
+                );
+                let t = (self.restart_hold / RESTART_HOLD_SECS).min(1.0);
+                graphics.draw_rectangle(
+                    Vec2::new(bx + 2.0, by + 2.0),
+                    (bw - 4.0) * t,
+                    bh - 4.0,
+                    Color::new(
+                        accent.0 as f32 / 255.0,
+                        accent.1 as f32 / 255.0,
+                        accent.2 as f32 / 255.0,
+                        0.95,
+                    ),
+                );
+                graphics.draw_text(
+                    "RESTARTING",
+                    Vec2::new(bx + bw / 2.0 - 92.0, by - 44.0),
+                    36.0,
+                    Color::new(0.95, 0.95, 0.95, 0.9),
+                );
+            }
+
+            // The pixel crosshair replacing the OS cursor: a 7x7 cross with
+            // an empty centre cell, drawn last so it sits over everything.
+            {
+                let m = input::mouse_position();
+                let cell = 3.0;
+                let origin = Vec2::new((m.x - 3.5 * cell).floor(), (m.y - 3.5 * cell).floor());
+                let c = Color::new(1.0, 1.0, 1.0, 0.92);
+                for i in 0..7 {
+                    if i == 3 {
+                        continue; // empty centre pixel
+                    }
+                    graphics.draw_rectangle(
+                        Vec2::new(origin.x + 3.0 * cell, origin.y + i as f32 * cell),
+                        cell,
+                        cell,
+                        c,
+                    );
+                    graphics.draw_rectangle(
+                        Vec2::new(origin.x + i as f32 * cell, origin.y + 3.0 * cell),
+                        cell,
+                        cell,
+                        c,
+                    );
                 }
             }
 
@@ -2607,6 +3202,21 @@ mod wasm_entry {
                         }
                     }
                 }
+            }
+
+            // Hold R while alive to restart the floor from scratch: a load
+            // bar fills at the centre of the screen (drawn above); releasing
+            // R before it fills cancels. Deliberately a full restart — the
+            // player is asking for a clean slate, not the checkpoint.
+            if player_alive && self.extracting.is_none() && input::is_key_down("r") {
+                self.restart_hold += dt;
+                if self.restart_hold >= RESTART_HOLD_SECS {
+                    self.restart_hold = 0.0;
+                    self.load_floor();
+                    return;
+                }
+            } else {
+                self.restart_hold = 0.0;
             }
 
             // Handle restart: death goes back to the latest `checkpoint`

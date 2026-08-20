@@ -175,11 +175,9 @@ fn test_enemy_attacks_player() {
     let mut combat_system = CombatSystem;
     combat_system.run(&mut world, 0.016);
 
+    // ONE-HIT DEATH: a single connected enemy hit ends the run.
     let health = world.get_component::<Health>(player).unwrap();
-    assert_eq!(
-        health.current,
-        100 - open_miami::systems::combat::ENEMY_ATTACK_DAMAGE
-    );
+    assert!(health.is_dead());
 }
 
 #[test]

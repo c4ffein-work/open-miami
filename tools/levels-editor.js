@@ -539,6 +539,7 @@
       case "gate": return { gate: { input: "punch", text: "LEFT CLICK — PUNCH" } };
       case "checkpoint": return { checkpoint: true };
       case "disarm": return { disarm: true };
+      case "combat": return { combat: false };
     }
     return { objective: "" };
   }
@@ -587,6 +588,13 @@
       row.appendChild(el("span", { style: "font-size:14px" }, "snapshot the run — death restores it"));
     } else if (kind === "disarm") {
       row.appendChild(el("span", { style: "font-size:14px" }, "take the player's held weapon away"));
+    } else if (kind === "combat") {
+      // enable / disable the player's fighting capabilities
+      const sel = el("select");
+      sel.appendChild(opt("off", "fighting OFF", a.combat === false));
+      sel.appendChild(opt("on", "fighting ON", a.combat === true));
+      sel.addEventListener("change", () => mutate((fl) => { fl.scenario[i].actions[j].combat = sel.value === "on"; }));
+      row.appendChild(sel);
     } else if (kind === "open_exit" || kind === "close_exit") {
       const ex = idOptions(el("select"), exitIds, a[kind], false);
       ex.addEventListener("change", () => mutate((fl) => { fl.scenario[i].actions[j][kind] = ex.value; }));
@@ -736,6 +744,7 @@
         else if ("gate" in a) comms.appendChild(el("div", { class: "sys spawn" }, "GATE [" + a.gate.input + "] — " + (a.gate.text || "…")));
         else if ("checkpoint" in a) comms.appendChild(el("div", { class: "sys objv" }, "CHECKPOINT"));
         else if ("disarm" in a) comms.appendChild(el("div", { class: "sys close" }, "DISARM"));
+        else if ("combat" in a) comms.appendChild(el("div", { class: "sys " + (a.combat ? "spawn" : "close") }, a.combat ? "COMBAT ON" : "COMBAT OFF"));
       }
     });
     root.appendChild(comms);

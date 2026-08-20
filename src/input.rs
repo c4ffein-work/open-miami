@@ -14,6 +14,12 @@ thread_local! {
     static MOUSE_POSITION: RefCell<Vec2> = const { RefCell::new(Vec2::zero()) };
     static MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
     static PREVIOUS_MOUSE_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    /// Keys that went DOWN since the last frame was consumed, even if they
+    /// went back up before the frame sampled them — a sub-frame tap (press +
+    /// release between two rAF ticks) must still register as a press.
+    static LATCHED_KEYS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Same latch for mouse buttons.
+    static LATCHED_BUTTONS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
     /// Mouse wheel travel accumulated this frame (browser `deltaY`, +down).
     static WHEEL_DELTA: RefCell<f32> = const { RefCell::new(0.0) };
     /// Printable characters typed this frame, in order, with the browser's
@@ -31,6 +37,8 @@ pub fn end_frame() {
             *previous.borrow_mut() = current.borrow().clone();
         });
     });
+    LATCHED_KEYS.with(|k| k.borrow_mut().clear());
+    LATCHED_BUTTONS.with(|b| b.borrow_mut().clear());
     MOUSE_BUTTONS.with(|current| {
         PREVIOUS_MOUSE_BUTTONS.with(|previous| {
             *previous.borrow_mut() = current.borrow().clone();
@@ -63,6 +71,11 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
             TYPED_TEXT.with(|t| t.borrow_mut().push_str(&raw));
         }
         let key = normalize_key(raw);
+        if !event.repeat() {
+            LATCHED_KEYS.with(|keys| {
+                keys.borrow_mut().insert(key.clone());
+            });
+        }
         PRESSED_KEYS.with(|keys| {
             keys.borrow_mut().insert(key);
         });
@@ -95,6 +108,9 @@ pub fn setup_input_handlers() -> Result<(), JsValue> {
 
     let mousedown_closure = Closure::wrap(Box::new(|event: MouseEvent| {
         let button = event.button() as u16;
+        LATCHED_BUTTONS.with(|buttons| {
+            buttons.borrow_mut().insert(button);
+        });
         MOUSE_BUTTONS.with(|buttons| {
             buttons.borrow_mut().insert(button);
         });
@@ -150,9 +166,15 @@ pub fn is_key_down(key: &str) -> bool {
 
 /// Check if a key was just pressed this frame (not held from previous frame)
 pub fn is_key_pressed(key: &str) -> bool {
-    PRESSED_KEYS.with(|current| {
+    // Edge on the sampled state, OR the latch: a tap whose keyup already
+    // arrived before this frame sampled still counts once.
+    let edge = PRESSED_KEYS.with(|current| {
         PREVIOUS_PRESSED_KEYS
             .with(|previous| current.borrow().contains(key) && !previous.borrow().contains(key))
+    });
+    edge || LATCHED_KEYS.with(|latched| {
+        latched.borrow().contains(key)
+            && PREVIOUS_PRESSED_KEYS.with(|previous| !previous.borrow().contains(key))
     })
 }
 
@@ -184,10 +206,14 @@ pub fn is_mouse_button_down(button: u16) -> bool {
 
 /// Check if a mouse button was just pressed this frame (edge, not held).
 pub fn is_mouse_button_pressed(button: u16) -> bool {
-    MOUSE_BUTTONS.with(|current| {
+    let edge = MOUSE_BUTTONS.with(|current| {
         PREVIOUS_MOUSE_BUTTONS.with(|previous| {
             current.borrow().contains(&button) && !previous.borrow().contains(&button)
         })
+    });
+    edge || LATCHED_BUTTONS.with(|latched| {
+        latched.borrow().contains(&button)
+            && PREVIOUS_MOUSE_BUTTONS.with(|previous| !previous.borrow().contains(&button))
     })
 }
 

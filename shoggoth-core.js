@@ -12,7 +12,11 @@
      PHASES                            - ["masked", "transition", "enraged"]
      MASK_OFF_SECS                     - the mask-off animation length (3.4 s;
                                          mirrors src/systems/boss.rs)
-     createShoggothPipeline(gl, {rt})  - the pipeline on an EXISTING GL context:
+     SPHERE_TESS / DEFAULT_TESS        - sphere tessellation presets
+                                         ("high" 16x20, "low" 8x10; the game
+                                         default is LOW)
+     createShoggothPipeline(gl, {rt, tess}) - the pipeline on an EXISTING GL
+         context:
          .render(opts, target) draws one shoggoth into a caller-provided
          framebuffer rect {fbo,x,y,w,h} (or the whole canvas when omitted),
          transparent background when opts.transparent. This is what the game
@@ -33,6 +37,8 @@
                       behaviour's heading (the inspector's masked idle). The
                       game passes false: position comes from the simulation.
              px:      pixelation block size (post pass), default 5
+             tess:    "low" | "high" — switch the sphere preset live
+                      (rebuilds the shared buffers only when it changes)
              transparent, orbit:{yaw,pitch,halfV}, halfV — as robot-core
            }
      createShoggothRenderer(canvas)    - a CanvasRenderer of the pipeline
@@ -117,6 +123,14 @@ function makeSphere(stacks, slices){
   return {pos:new Float32Array(p), nrm:new Float32Array(n), count:p.length/3};
 }
 
+/* Sphere tessellation presets. The boss is ~130 sphere instances per frame,
+   all inked + pixelated into a small tile, so LOW (8x10) is visually
+   identical to HIGH (the legacy 16x20) at game size for ~1/4 the vertices.
+   The GAME default is LOW; the inspector has a TESS toggle to compare
+   (render opts.tess or createShoggothPipeline's {tess}). */
+export const SPHERE_TESS = { high:[16,20], low:[8,10] };
+export const DEFAULT_TESS = "low";
+
 /* ---------- camera: slightly-tilted top-down (the boss reads best with a hint
    of the mask's face). The half-extent frames the whole raw form: the mass
    (radius ~2.5 with its lobes) plus most of the tentacles' reach, so the
@@ -167,7 +181,7 @@ function stepBeh(b,dt){
    The pipeline
    ========================================================================= */
 class ShoggothPipeline extends SpritePipeline {
-  constructor(gl, rt){
+  constructor(gl, rt, tess){
     super(gl, rt, {edge:0.30});
     this.sceneProg = this._program(sceneVS, sceneFS);
     this.sLoc = {
@@ -180,11 +194,25 @@ class ShoggothPipeline extends SpritePipeline {
       uId: gl.getUniformLocation(this.sceneProg,"uId"),
       uEmis: gl.getUniformLocation(this.sceneProg,"uEmis"),
     };
-    this.sphere = makeSphere(16, 20);
-    this.posBuf = this._staticBuffer(this.sphere.pos);
-    this.nrmBuf = this._staticBuffer(this.sphere.nrm);
+    this.tess = null;
+    this.setTess(tess || DEFAULT_TESS);
     this.simState = null; this.simT = -1;
     this.VP = null;
+  }
+
+  /* switch the sphere tessellation preset ("low" | "high"); rebuilds the
+     shared unit-sphere buffers, no-op when already on that preset. */
+  setTess(name){
+    if(!SPHERE_TESS[name]) name = DEFAULT_TESS;
+    if(name === this.tess) return;
+    const gl=this.gl;
+    if(this.posBuf) gl.deleteBuffer(this.posBuf);
+    if(this.nrmBuf) gl.deleteBuffer(this.nrmBuf);
+    this.tess = name;
+    const [stacks, slices] = SPHERE_TESS[name];
+    this.sphere = makeSphere(stacks, slices);
+    this.posBuf = this._staticBuffer(this.sphere.pos);
+    this.nrmBuf = this._staticBuffer(this.sphere.nrm);
   }
 
   /* wander behaviour state at time t (cached, deterministic) */
@@ -400,6 +428,7 @@ class ShoggothPipeline extends SpritePipeline {
   /* render one shoggoth — opts / target: see the module header. */
   render(opts, target){
     const gl=this.gl;
+    if(opts.tess) this.setTess(opts.tess);
     const time = opts.time || 0;
     const phase = PHASES.includes(opts.phase) ? opts.phase : "masked";
     let reveal;
@@ -434,7 +463,7 @@ class ShoggothPipeline extends SpritePipeline {
    rt: pass-1 scene resolution in px (square); the post pass resamples it into
    whatever target rect render() is given, so rt is the detail budget, not the
    output size. The boss is big: 256 is a good default. */
-export function createShoggothPipeline(gl, {rt=256} = {}){ return new ShoggothPipeline(gl, rt); }
+export function createShoggothPipeline(gl, {rt=256, tess=DEFAULT_TESS} = {}){ return new ShoggothPipeline(gl, rt, tess); }
 
 const makeShoggothPipeline = (gl, rt) => new ShoggothPipeline(gl, rt);
 /* a CanvasRenderer bound to one canvas (owns a context + a pipeline) */

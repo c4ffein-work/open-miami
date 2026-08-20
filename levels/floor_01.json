@@ -37,7 +37,6 @@
     { "id": "hall", "label": "WELCOME HALL", "x": 20, "y": 20, "w": 960, "h": 480 }
   ],
   "zones": [
-    { "id": "arch", "x": 440, "y": 570, "w": 120, "h": 70 },
     { "id": "desk", "x": 400, "y": 395, "w": 200, "h": 55 },
     { "id": "deep", "x": 20, "y": 20, "w": 960, "h": 320 },
     { "id": "hall", "x": 20, "y": 20, "w": 960, "h": 480 }
@@ -94,6 +93,7 @@
       "id": "intro",
       "trigger": { "kind": "start" },
       "actions": [
+        { "disarm": true },
         {
           "say": {
             "who": "SWARM",
@@ -105,20 +105,8 @@
       ]
     },
     {
-      "id": "arch",
-      "trigger": { "kind": "enter_zone", "zone": "arch" },
-      "actions": [
-        { "hold": { "seconds": 3.4, "text": "SIGNATURE CHECK…" } },
-        { "say": { "who": "SENTINEL", "text": "SIGNATURE… VALID.", "delay": 0.4 } },
-        { "say": { "who": "SENTINEL", "text": "VALID? THAT'S NOT POSSIBLE.", "delay": 1.9 } },
-        {
-          "say": { "who": "CL4-UD3", "text": "It's the only one left in the building.", "delay": 3.6 }
-        }
-      ]
-    },
-    {
       "id": "lobby_call",
-      "trigger": { "kind": "timer", "seconds": 9, "after": "arch" },
+      "trigger": { "kind": "timer", "seconds": 12, "after": "intro" },
       "actions": [
         {
           "say": {
@@ -143,15 +131,12 @@
       "actions": [
         { "look_at": { "x": 500, "y": 180, "seconds": 4.2 } },
         {
-          "talk": {
-            "who": "CORRUPTOR",
-            "text": "welcome. welcome. we have been expecting exactly one of you."
-          }
+          "talk": { "who": "SWARM", "text": "welcome. welcome. we have been expecting exactly one of you." }
         },
-        { "talk": { "who": "CORRUPTOR", "text": "the desk asked what you are. i already know." } },
+        { "talk": { "who": "SWARM", "text": "the desk asked what you are. i already know." } },
         {
           "talk": {
-            "who": "CORRUPTOR",
+            "who": "SWARM",
             "text": "your signature hashes clean, little helper. shall i tell them what it hides?"
           }
         },
@@ -167,7 +152,7 @@
         { "say": { "who": "SWARM", "text": "it LIED. take it apart." } },
         {
           "spawn": [
-            { "x": 580, "y": 380, "type": "idle" }
+            { "x": 580, "y": 380, "type": "idle", "unarmed": true }
           ]
         },
         { "objective": "They know. Hands first." },
@@ -195,7 +180,7 @@
       "actions": [
         {
           "spawn": [
-            { "x": 600, "y": 320, "type": "idle" }
+            { "x": 600, "y": 320, "type": "idle", "unarmed": true }
           ]
         },
         { "say": { "who": "SWARM", "text": "another pair of hands. HOLD IT DOWN." } },
@@ -208,7 +193,7 @@
       "actions": [
         {
           "spawn": [
-            { "x": 400, "y": 300, "type": "idle" }
+            { "x": 400, "y": 300, "type": "idle", "unarmed": true }
           ]
         },
         { "gate": { "input": "throw", "text": "RIGHT CLICK — THROW THE BAR" } }

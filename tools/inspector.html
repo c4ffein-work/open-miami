@@ -100,6 +100,10 @@
     <label>Mask-off &mdash; <span class="val" id="revealVal"></span></label>
     <div class="row"><button id="trigger">Become Raw &#9654;</button></div>
   </div>
+  <div class="ctl shoggoth-only">
+    <label>Tessellation &mdash; <span class="val" id="tessVal"></span></label>
+    <div class="row"><button id="tessToggle">TESS: LOW</button></div>
+  </div>
   <!-- shared -->
   <div class="ctl">
     <label>Pixelation &mdash; <span class="val" id="pxVal"></span></label>
@@ -113,7 +117,7 @@
 
 <script type="module">
 import { createRenderer, bakeSprite, PALETTES, POSES, WEAPONS } from "../robot-core.js";
-import { createShoggothRenderer, bakeShoggoth, MASK_OFF_SECS } from "../shoggoth-core.js";
+import { createShoggothRenderer, bakeShoggoth, MASK_OFF_SECS, SPHERE_TESS, DEFAULT_TESS } from "../shoggoth-core.js";
 
 /* ---------- URL params: which character, and its initial setup ---------- */
 const _p = new URLSearchParams(location.search);
@@ -135,6 +139,7 @@ const state = {
   // shoggoth
   phase: "masked",          // "masked" | "enraged" (the transition is the trigger)
   maskOffAt: null,          // seconds (page time) the mask-off was triggered, or null
+  tess: DEFAULT_TESS,       // sphere tessellation preset: "low" (game) | "high"
   // shared
   px: KIND==="shoggoth" ? 4 : 5,   // the game's live pixelation for each kind
   facingDeg: 0,             // robot facing / shoggoth heading (2D view)
@@ -147,6 +152,7 @@ if (_p.get("color") && PALETTES[_p.get("color")]) state.color = _p.get("color");
 if (_p.get("pose") && POSES.includes(_p.get("pose"))) state.pose = _p.get("pose");
 if (_p.get("weapon") && WEAPONS.includes(_p.get("weapon"))) state.weapon = _p.get("weapon");
 if (_p.get("phase") === "enraged") state.phase = "enraged";
+if (_p.get("tess") && SPHERE_TESS[_p.get("tess")]) state.tess = _p.get("tess");
 if (_p.get("px")) state.px = Math.max(1, Math.min(12, parseInt(_p.get("px"),10) || state.px));
 // (embed / kind classes are applied in <head>, before first paint)
 
@@ -212,6 +218,23 @@ triggerBtn.addEventListener("click", ()=>{
   refreshPhase(); refreshTrigger();
 });
 refreshTrigger();
+
+/* sphere tessellation toggle: LOW = the game preset (8x10), HIGH = the legacy
+   16x20 — flips live so the difference can be eyeballed side by side */
+const tessBtn = document.getElementById("tessToggle");
+const tessVal = document.getElementById("tessVal");
+function refreshTess(){
+  const [st, sl] = SPHERE_TESS[state.tess];
+  tessBtn.textContent = "TESS: " + state.tess.toUpperCase();
+  tessBtn.classList.toggle("on", state.tess === "high");
+  tessVal.textContent = `${st}x${sl} spheres` + (state.tess === DEFAULT_TESS ? " (game)" : "");
+}
+tessBtn.addEventListener("click", ()=>{
+  state.tess = state.tess === "low" ? "high" : "low";
+  refreshTess();
+});
+refreshTess();
+
 // current mask-off progress 0..1 (from the phase or the trigger)
 function currentReveal(t){
   if(state.maskOffAt!==null) return Math.min(1, Math.max(0, (t-state.maskOffAt)/MASK_OFF_SECS));
@@ -257,7 +280,7 @@ function frame(){
   if(KIND==="shoggoth"){
     const reveal = currentReveal(t);
     revealVal.textContent = reveal.toFixed(2);
-    const common = { reveal, time:t, px:state.px, wander:true };
+    const common = { reveal, time:t, px:state.px, wander:true, tess:state.tess };
     // LEFT: live 3D orbit view (two-axis rotation of the camera)
     orbit.render({ ...common, orbit:{yaw:state.yaw, pitch:state.pitch} });
     // RIGHT: the in-game top-down frame via bakeShoggoth() (one-axis heading)
@@ -284,7 +307,7 @@ frame();
 
 // expose a couple hooks for the screenshot harness / manual poking
 window.__editor = {
-  set:(patch)=>{ Object.assign(state,patch); refreshPose(); refreshColor(); refreshWeapon(); refreshPhase(); refreshTrigger(); },
+  set:(patch)=>{ Object.assign(state,patch); refreshPose(); refreshColor(); refreshWeapon(); refreshPhase(); refreshTrigger(); refreshTess(); },
   bake:(o)=>bakeSprite(o),
   bakeShoggoth:(o)=>bakeShoggoth(o),
   state,

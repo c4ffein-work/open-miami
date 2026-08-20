@@ -21,6 +21,7 @@ help:
 	@echo "  make gen-levels      - Regenerate src/levels_data.rs from levels/*.json"
 	@echo "  make check-levels    - Validate levels/*.json and check levels_data.rs is up to date"
 	@echo "  make gen-props       - Regenerate src/props_data.rs from props/props.json"
+	@echo "  make gen-title       - Regenerate the loading-screen title SVG in index.html"
 	@echo "  make check-props     - Validate props/props.json and check props_data.rs is up to date"
 
 # Run all verification checks (E2E tests excluded by default due to dependency constraints)
@@ -135,6 +136,13 @@ check-props:
 	@echo "$(YELLOW)Validating props/props.json...$(NC)"
 	python3 tools/gen_props.py --check
 	@echo "$(GREEN)✓ Props valid and up to date$(NC)"
+
+# Loading-screen title - the neon OPEN/MIAMI SVG inlined into index.html,
+# generated from src/lib.rs's title glyphs. Python 3 stdlib only.
+gen-title:
+	@echo "$(YELLOW)Generating the loading-screen title SVG...$(NC)"
+	python3 tools/gen_title.py
+	@echo "$(GREEN)✓ Title SVG generated$(NC)"
 
 # Code Coverage - requires cargo-tarpaulin (optional check)
 check-coverage:

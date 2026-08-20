@@ -271,7 +271,13 @@ pub fn fire_player_weapon(world: &mut World, target_world_pos: Vec2) -> bool {
     let target_pos = Position::from_vec2(target_world_pos);
 
     if weapon_type.is_melee() {
-        CombatSystem::process_melee(world, player_pos, target_pos, damage, 50.0)
+        CombatSystem::process_melee(
+            world,
+            player_pos,
+            target_pos,
+            damage,
+            crate::systems::combat::MELEE_RANGE,
+        )
     } else {
         let dx = target_pos.x - player_pos.x;
         let dy = target_pos.y - player_pos.y;
@@ -302,6 +308,70 @@ pub fn get_player_weapon(world: &World) -> Option<WeaponType> {
         .first()
         .and_then(|&e| world.get_component::<Weapon>(e))
         .map(|w| w.weapon_type)
+}
+
+/// One frame of player input, sampled by the platform layer (the browser's
+/// `input::` state, or a test's script) and handed to the input-independent
+/// dispatch below.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerIntents {
+    /// Left mouse button went down THIS frame (edge).
+    pub left_pressed: bool,
+    /// Left mouse button is currently held.
+    pub left_down: bool,
+    /// Right mouse button went down this frame (edge).
+    pub right_pressed: bool,
+    /// The pick-up key (E) went down this frame (edge).
+    pub e_pressed: bool,
+    /// The mouse cursor in world coordinates.
+    pub mouse_world: Vec2,
+}
+
+/// Player input dispatch while a tutorial `gate` is active: aim stays live
+/// (the player turns to the mouse) and every input except the gated one is
+/// masked — a `finish` gate lets a fresh click start a finisher, `punch` /
+/// `strike` / `fire` gates let the trigger swing exactly the matching weapon
+/// class, `pickup`-permitting gates keep E live (recovery path), and only the
+/// `throw` gate accepts the right-click throw. Movement is NOT handled here:
+/// it stays with the platform layer (the browser reads WASD directly; the
+/// headless sim scripts velocities).
+///
+/// This is the ONE gate input path — the browser loop (`lib.rs`) samples
+/// `input::` into a [`PlayerIntents`] and forwards it here, and the host
+/// tests drive the very same function, so what the tests prove is what the
+/// browser runs.
+pub fn gated_player_input(
+    world: &mut World,
+    gate: crate::scenario::GateDef,
+    intents: &PlayerIntents,
+) {
+    use crate::systems::{FinisherSystem, PickupSystem, ThrownWeaponSystem};
+
+    // Aim: the player keeps turning to the mouse under the freeze.
+    if let Some(&player) = world.query::<Player>().first() {
+        if let Some(pos) = world.get_component::<Position>(player).map(|p| p.to_vec2()) {
+            let d = intents.mouse_world - pos;
+            if let Some(rot) = world.get_component_mut::<Rotation>(player) {
+                rot.angle = d.y.atan2(d.x);
+            }
+        }
+    }
+
+    if gate.input.allows_finisher() && intents.left_pressed {
+        FinisherSystem::try_start(world);
+    }
+    if gate.input.allows_primary(get_player_weapon(world)) && intents.left_down {
+        fire_player_weapon(world, intents.mouse_world);
+    }
+    if gate.input.allows_pickup() && intents.e_pressed {
+        PickupSystem::swap_for_player(world);
+    }
+    if gate.input.allows_throw() && intents.right_pressed {
+        if let Some(player_pos) = get_player_position(world) {
+            let aim = intents.mouse_world - player_pos;
+            ThrownWeaponSystem::throw_from_player(world, aim);
+        }
+    }
 }
 
 /// Human-readable name for a weapon type
@@ -564,6 +634,48 @@ mod tests {
             PUNCH_COOLDOWN + 0.01,
         );
         assert!(fire_player_weapon(&mut world, Vec2::new(100.0, 0.0)));
+    }
+
+    #[test]
+    fn test_melee_swing_connects_at_65px_and_fells_head_first() {
+        // The bar's reach must cover a natural point-blank stance: two 60 px
+        // robot sprites standing adjacent are ~60 px apart at the centres
+        // (regression for the floor-1 `strike` gate soft-lock, where the old
+        // 50 px reach demanded physical overlap).
+        let mut world = World::new();
+        let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+        *world.get_component_mut::<Weapon>(player).unwrap() = Weapon::new(WeaponType::Melee);
+        let enemy = spawn_enemy(&mut world, Vec2::new(65.0, 0.0));
+
+        assert!(
+            fire_player_weapon(&mut world, Vec2::new(65.0, 0.0)),
+            "a swing from 65 px connects"
+        );
+        // The 100-damage swing kills the 50-health bot: the corpse falls
+        // along the blow (attacker -> victim = +x), head away from the player.
+        assert!(world.get_component::<Health>(enemy).unwrap().is_dead());
+        let fall = world.get_component::<Stunned>(enemy).unwrap().fall_angle;
+        assert!(fall.abs() < 0.01, "fell along +x, got {fall}");
+    }
+
+    #[test]
+    fn test_melee_swing_misses_at_120px() {
+        let mut world = World::new();
+        let player = spawn_player(&mut world, Vec2::new(0.0, 0.0));
+        *world.get_component_mut::<Weapon>(player).unwrap() = Weapon::new(WeaponType::Melee);
+        let enemy = spawn_enemy(&mut world, Vec2::new(120.0, 0.0));
+
+        assert!(
+            !fire_player_weapon(&mut world, Vec2::new(120.0, 0.0)),
+            "a swing from 120 px whiffs"
+        );
+        let health = world.get_component::<Health>(enemy).unwrap();
+        assert_eq!(health.current, health.max, "untouched");
+        // Only the swing whoosh, no impact events.
+        assert_eq!(
+            world.drain_events(),
+            vec![GameEvent::PlayerFired(WeaponType::Melee)]
+        );
     }
 
     #[test]

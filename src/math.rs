@@ -113,6 +113,53 @@ pub fn visible_tile_range(
     }
 }
 
+/// Safety margin (world units) added around the camera's visible bounds when
+/// culling sprites: covers the camera sway (drift + roll), pose overhang past
+/// a sprite's nominal footprint, and one frame of camera motion.
+pub const CULL_MARGIN: f32 = 64.0;
+
+/// Whether the world-space rect `(cx, cy) ± (half_w, half_h)` intersects the
+/// view rect `min..max` (pure, host-testable). Touching an edge counts as
+/// visible — only a sprite FULLY outside may skip its draw commands.
+pub fn rect_visible(min: Vec2, max: Vec2, cx: f32, cy: f32, half_w: f32, half_h: f32) -> bool {
+    cx + half_w >= min.x && cx - half_w <= max.x && cy + half_h >= min.y && cy - half_h <= max.y
+}
+
+/// The camera's visible world rect inflated by `CULL_MARGIN`, handed to the
+/// world renderers so live sprites (robots, ground guns, the boss) and placed
+/// props fully outside the view can skip their commands. Culling happens in
+/// WORLD space, so the `?pixel=N` world group changes nothing about it.
+/// Built by `Camera::view_cull` (src/camera.rs).
+#[derive(Debug, Clone, Copy)]
+pub struct ViewCull {
+    min: Vec2,
+    max: Vec2,
+}
+
+impl ViewCull {
+    /// Wrap `Camera::visible_bounds` output, inflating it by `CULL_MARGIN`.
+    pub fn new(min: Vec2, max: Vec2) -> Self {
+        Self {
+            min: Vec2::new(min.x - CULL_MARGIN, min.y - CULL_MARGIN),
+            max: Vec2::new(max.x + CULL_MARGIN, max.y + CULL_MARGIN),
+        }
+    }
+
+    /// A cull that never rejects anything (editor / gallery style callers).
+    pub fn everything() -> Self {
+        Self {
+            min: Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY),
+            max: Vec2::new(f32::INFINITY, f32::INFINITY),
+        }
+    }
+
+    /// Whether a square footprint centred at `(cx, cy)` with half-extent
+    /// `half` overlaps the inflated view (draw it) or not (skip it).
+    pub fn visible(&self, cx: f32, cy: f32, half: f32) -> bool {
+        rect_visible(self.min, self.max, cx, cy, half, half)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
     pub r: f32,
@@ -243,5 +290,61 @@ mod tests {
         let visible = (range.max_x - range.min_x) * (range.max_y - range.min_y);
         assert!(visible < 1600, "expected culling, drew {visible} tiles");
         assert!(visible > 0);
+    }
+
+    // ---- sprite view culling (rect_visible / ViewCull) ----
+
+    const VMIN: Vec2 = Vec2::new(-100.0, -50.0);
+    const VMAX: Vec2 = Vec2::new(100.0, 50.0);
+
+    #[test]
+    fn cull_fully_inside_is_visible() {
+        assert!(rect_visible(VMIN, VMAX, 0.0, 0.0, 10.0, 10.0));
+        assert!(rect_visible(VMIN, VMAX, -80.0, 30.0, 5.0, 5.0));
+    }
+
+    #[test]
+    fn cull_straddling_each_edge_is_visible() {
+        assert!(rect_visible(VMIN, VMAX, -105.0, 0.0, 10.0, 10.0)); // left
+        assert!(rect_visible(VMIN, VMAX, 105.0, 0.0, 10.0, 10.0)); // right
+        assert!(rect_visible(VMIN, VMAX, 0.0, -55.0, 10.0, 10.0)); // top
+        assert!(rect_visible(VMIN, VMAX, 0.0, 55.0, 10.0, 10.0)); // bottom
+                                                                  // A rect bigger than the view (containing it) must draw too.
+        assert!(rect_visible(VMIN, VMAX, 0.0, 0.0, 1000.0, 1000.0));
+    }
+
+    #[test]
+    fn cull_touching_an_edge_is_visible() {
+        assert!(rect_visible(VMIN, VMAX, -110.0, 0.0, 10.0, 10.0)); // right edge on min.x
+        assert!(rect_visible(VMIN, VMAX, 110.0, 0.0, 10.0, 10.0));
+        assert!(rect_visible(VMIN, VMAX, 0.0, 60.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn cull_fully_outside_each_side_is_skipped() {
+        assert!(!rect_visible(VMIN, VMAX, -120.0, 0.0, 10.0, 10.0)); // left of view
+        assert!(!rect_visible(VMIN, VMAX, 120.0, 0.0, 10.0, 10.0)); // right of view
+        assert!(!rect_visible(VMIN, VMAX, 0.0, -70.0, 10.0, 10.0)); // above
+        assert!(!rect_visible(VMIN, VMAX, 0.0, 70.0, 10.0, 10.0)); // below
+        assert!(!rect_visible(VMIN, VMAX, 200.0, 200.0, 10.0, 10.0)); // diagonal
+    }
+
+    #[test]
+    fn cull_view_applies_the_margin() {
+        let cull = ViewCull::new(VMIN, VMAX);
+        // Outside the raw bounds but inside the margin: still drawn.
+        assert!(cull.visible(100.0 + CULL_MARGIN, 0.0, 1.0));
+        assert!(cull.visible(0.0, -50.0 - CULL_MARGIN + 1.0, 0.0));
+        // Past the margin plus the half-extent: culled.
+        assert!(!cull.visible(100.0 + CULL_MARGIN + 10.1, 0.0, 10.0));
+        assert!(!cull.visible(0.0, 50.0 + CULL_MARGIN + 10.1, 10.0));
+        // Straddling the inflated edge: drawn.
+        assert!(cull.visible(100.0 + CULL_MARGIN + 5.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn cull_everything_never_skips() {
+        let cull = ViewCull::everything();
+        assert!(cull.visible(1e9, -1e9, 0.0));
     }
 }

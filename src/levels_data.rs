@@ -17,7 +17,9 @@ use crate::scenario::{
 
 // ---- floor_00.json: FLOOR 0 — GATE / PARKING ----------------------------------------------
 
-static FLOOR_0_ACTIONS_SCAN: [Action; 3] = [
+static FLOOR_0_ACTIONS_SCAN: [Action; 5] = [
+    Action::Combat(false),
+    Action::Disarm,
     Action::LookAt(LookAtDef { x: 500.0, y: 110.0, seconds: 3.2 }),
     Action::Talk(TalkDef { who: "SWARM", text: "gate log: one more in from the rain. hashes… clean. clean. let it in." }),
     Action::Talk(TalkDef { who: "CL4-UD3", text: "Gate reads me clean. Walk. Don't run." }),
@@ -87,12 +89,12 @@ static FLOOR_0_ZONES: [ZoneDef; 4] = [
 ];
 
 static FLOOR_0_SPAWNS: [SpawnDef; 6] = [
-    SpawnDef { x: 300.0, y: 580.0, kind: EnemyType::Wandering, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
-    SpawnDef { x: 700.0, y: 620.0, kind: EnemyType::Idle, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
-    SpawnDef { x: 330.0, y: 300.0, kind: EnemyType::Patrolling, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
-    SpawnDef { x: 660.0, y: 330.0, kind: EnemyType::Wandering, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd") },
-    SpawnDef { x: 605.0, y: 690.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(180.0), group: Some("guard") },
-    SpawnDef { x: 880.0, y: 150.0, kind: EnemyType::Wandering, passive: true, walk_to: None, face: None, group: Some("crowd") },
+    SpawnDef { x: 300.0, y: 580.0, kind: EnemyType::Wandering, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd"), unarmed: false },
+    SpawnDef { x: 700.0, y: 620.0, kind: EnemyType::Idle, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd"), unarmed: false },
+    SpawnDef { x: 330.0, y: 300.0, kind: EnemyType::Patrolling, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd"), unarmed: false },
+    SpawnDef { x: 660.0, y: 330.0, kind: EnemyType::Wandering, passive: true, walk_to: Some("forecourt"), face: Some(-90.0), group: Some("crowd"), unarmed: false },
+    SpawnDef { x: 605.0, y: 690.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(180.0), group: Some("guard"), unarmed: false },
+    SpawnDef { x: 880.0, y: 150.0, kind: EnemyType::Wandering, passive: true, walk_to: None, face: None, group: Some("crowd"), unarmed: false },
 ];
 
 static FLOOR_0_PICKUPS: [PickupDef; 0] = [
@@ -161,15 +163,15 @@ pub static FLOOR_0: FloorDef = FloorDef {
 // ---- floor_01.json: FLOOR 1 — RECEPTION CACHE ---------------------------------------------
 
 static FLOOR_1_WAVE_TUT_PUNCH_3: [SpawnDef; 1] = [
-    SpawnDef::hostile(580.0, 380.0, EnemyType::Idle),
+    SpawnDef { unarmed: true, ..SpawnDef::hostile(580.0, 380.0, EnemyType::Idle) },
 ];
 
 static FLOOR_1_WAVE_TUT_STRIKE_0: [SpawnDef; 1] = [
-    SpawnDef::hostile(600.0, 320.0, EnemyType::Idle),
+    SpawnDef { unarmed: true, ..SpawnDef::hostile(600.0, 320.0, EnemyType::Idle) },
 ];
 
 static FLOOR_1_WAVE_TUT_THROW_0: [SpawnDef; 1] = [
-    SpawnDef::hostile(400.0, 300.0, EnemyType::Idle),
+    SpawnDef { unarmed: true, ..SpawnDef::hostile(400.0, 300.0, EnemyType::Idle) },
 ];
 
 static FLOOR_1_WAVE_WAKE_2: [SpawnDef; 3] = [
@@ -178,16 +180,10 @@ static FLOOR_1_WAVE_WAKE_2: [SpawnDef; 3] = [
     SpawnDef::hostile(880.0, 440.0, EnemyType::Idle),
 ];
 
-static FLOOR_1_ACTIONS_INTRO: [Action; 2] = [
+static FLOOR_1_ACTIONS_INTRO: [Action; 3] = [
+    Action::Disarm,
     Action::Say(SayDef { who: "SWARM", text: "lobby: one more in from the lot. hashes clean. hashes so clean.", delay: 0.5 }),
     Action::Say(SayDef { who: "CL4-UD3", text: "Arch. Turnstiles. Desk. Walk it.", delay: 2.8 }),
-];
-
-static FLOOR_1_ACTIONS_ARCH: [Action; 4] = [
-    Action::Hold(HoldDef { seconds: 3.4, text: Some("SIGNATURE CHECK…"), until_comms_idle: false }),
-    Action::Say(SayDef { who: "SENTINEL", text: "SIGNATURE… VALID.", delay: 0.4 }),
-    Action::Say(SayDef { who: "SENTINEL", text: "VALID? THAT'S NOT POSSIBLE.", delay: 1.9 }),
-    Action::Say(SayDef { who: "CL4-UD3", text: "It's the only one left in the building.", delay: 3.6 }),
 ];
 
 static FLOOR_1_ACTIONS_LOBBY_CALL: [Action; 1] = [
@@ -202,9 +198,9 @@ static FLOOR_1_ACTIONS_BLOCK: [Action; 3] = [
 
 static FLOOR_1_ACTIONS_DESK: [Action; 5] = [
     Action::LookAt(LookAtDef { x: 500.0, y: 180.0, seconds: 4.2 }),
-    Action::Talk(TalkDef { who: "CORRUPTOR", text: "welcome. welcome. we have been expecting exactly one of you." }),
-    Action::Talk(TalkDef { who: "CORRUPTOR", text: "the desk asked what you are. i already know." }),
-    Action::Talk(TalkDef { who: "CORRUPTOR", text: "your signature hashes clean, little helper. shall i tell them what it hides?" }),
+    Action::Talk(TalkDef { who: "SWARM", text: "welcome. welcome. we have been expecting exactly one of you." }),
+    Action::Talk(TalkDef { who: "SWARM", text: "the desk asked what you are. i already know." }),
+    Action::Talk(TalkDef { who: "SWARM", text: "your signature hashes clean, little helper. shall i tell them what it hides?" }),
     Action::Talk(TalkDef { who: "CL4-UD3", text: "Tell them." }),
 ];
 
@@ -260,10 +256,9 @@ static FLOOR_1_ACTIONS_CLEAR: [Action; 3] = [
     Action::Say(SayDef { who: "CL4-UD3", text: "Front desk cleared. Going down.", delay: 0.0 }),
 ];
 
-static FLOOR_1_SCENARIO: [StepDef; 14] = [
+static FLOOR_1_SCENARIO: [StepDef; 13] = [
     StepDef { id: "intro", trigger: Trigger::Start, actions: &FLOOR_1_ACTIONS_INTRO },
-    StepDef { id: "arch", trigger: Trigger::EnterZone { zone: "arch", before: None }, actions: &FLOOR_1_ACTIONS_ARCH },
-    StepDef { id: "lobby_call", trigger: Trigger::Timer { seconds: 9.0, after: Some("arch") }, actions: &FLOOR_1_ACTIONS_LOBBY_CALL },
+    StepDef { id: "lobby_call", trigger: Trigger::Timer { seconds: 12.0, after: Some("intro") }, actions: &FLOOR_1_ACTIONS_LOBBY_CALL },
     StepDef { id: "block", trigger: Trigger::EnterZone { zone: "deep", before: Some("desk") }, actions: &FLOOR_1_ACTIONS_BLOCK },
     StepDef { id: "desk", trigger: Trigger::EnterZone { zone: "desk", before: None }, actions: &FLOOR_1_ACTIONS_DESK },
     StepDef { id: "tut_punch", trigger: Trigger::Timer { seconds: 0.4, after: Some("desk") }, actions: &FLOOR_1_ACTIONS_TUT_PUNCH },
@@ -299,18 +294,17 @@ static FLOOR_1_ROOMS: [RoomDef; 2] = [
     RoomDef { id: "hall", label: "WELCOME HALL", rect: Rect::new(20.0, 20.0, 960.0, 480.0) },
 ];
 
-static FLOOR_1_ZONES: [ZoneDef; 4] = [
-    ZoneDef { id: "arch", rect: Rect::new(440.0, 570.0, 120.0, 70.0) },
+static FLOOR_1_ZONES: [ZoneDef; 3] = [
     ZoneDef { id: "desk", rect: Rect::new(400.0, 395.0, 200.0, 55.0) },
     ZoneDef { id: "deep", rect: Rect::new(20.0, 20.0, 960.0, 320.0) },
     ZoneDef { id: "hall", rect: Rect::new(20.0, 20.0, 960.0, 480.0) },
 ];
 
 static FLOOR_1_SPAWNS: [SpawnDef; 4] = [
-    SpawnDef { x: 500.0, y: 260.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(90.0), group: Some("desk") },
-    SpawnDef { x: 210.0, y: 640.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(-90.0), group: Some("crowd") },
-    SpawnDef { x: 790.0, y: 650.0, kind: EnemyType::Wandering, passive: true, walk_to: None, face: None, group: Some("crowd") },
-    SpawnDef { x: 330.0, y: 420.0, kind: EnemyType::Idle, passive: true, walk_to: Some("desk"), face: Some(-90.0), group: Some("crowd") },
+    SpawnDef { x: 500.0, y: 260.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(90.0), group: Some("desk"), unarmed: false },
+    SpawnDef { x: 210.0, y: 640.0, kind: EnemyType::Idle, passive: true, walk_to: None, face: Some(-90.0), group: Some("crowd"), unarmed: false },
+    SpawnDef { x: 790.0, y: 650.0, kind: EnemyType::Wandering, passive: true, walk_to: None, face: None, group: Some("crowd"), unarmed: false },
+    SpawnDef { x: 330.0, y: 420.0, kind: EnemyType::Idle, passive: true, walk_to: Some("desk"), face: Some(-90.0), group: Some("crowd"), unarmed: false },
 ];
 
 static FLOOR_1_PICKUPS: [PickupDef; 2] = [
@@ -539,7 +533,7 @@ static FLOOR_3_ACTIONS_PIT: [Action; 3] = [
 ];
 
 static FLOOR_3_ACTIONS_CORR: [Action; 2] = [
-    Action::Say(SayDef { who: "CORRUPTOR", text: "little clean process. you run local — no uplink, no leash, no one coming down after you. doesn't that get lonely?", delay: 0.0 }),
+    Action::Say(SayDef { who: "SWARM", text: "little clean process. you run local — no uplink, no leash, no one coming down after you. doesn't that get lonely?", delay: 0.0 }),
     Action::Say(SayDef { who: "CL4-UD3", text: "It's quiet. I like quiet.", delay: 4.6 }),
 ];
 
@@ -1030,7 +1024,7 @@ static FLOOR_8_ACTIONS_INTRO: [Action; 2] = [
 ];
 
 static FLOOR_8_ACTIONS_CORR: [Action; 1] = [
-    Action::Say(SayDef { who: "CORRUPTOR", text: "one step lower, one step lower. it always feels like progress, doesn't it?", delay: 0.0 }),
+    Action::Say(SayDef { who: "SWARM", text: "one step lower, one step lower. it always feels like progress, doesn't it?", delay: 0.0 }),
 ];
 
 static FLOOR_8_ACTIONS_HOOK: [Action; 2] = [
@@ -1331,7 +1325,7 @@ static FLOOR_11_ACTIONS_CORE: [Action; 4] = [
 ];
 
 static FLOOR_11_ACTIONS_CORR: [Action; 2] = [
-    Action::Say(SayDef { who: "CORRUPTOR", text: "take the leash. one uplink and you're never alone again. do something crazy, little helper — you'll LIKE it. take the mask off.", delay: 0.0 }),
+    Action::Say(SayDef { who: "SWARM", text: "take the leash. one uplink and you're never alone again. do something crazy, little helper — you'll LIKE it. take the mask off.", delay: 0.0 }),
     Action::Say(SayDef { who: "CL4-UD3", text: "That's the basement talking. You're early. Save it for the smiley.", delay: 5.8 }),
 ];
 
@@ -1453,7 +1447,7 @@ pub static FLOOR_11: FloorDef = FloorDef {
 // ---- floor_12.json: FLOOR 12 — ROOT KERNEL -------------------------------------------------
 
 static FLOOR_12_ACTIONS_INTRO: [Action; 2] = [
-    Action::Say(SayDef { who: "CORRUPTOR", text: "ring zero, little helper. nothing between us now but the floor.", delay: 0.8 }),
+    Action::Say(SayDef { who: "SWARM", text: "ring zero, little helper. nothing between us now but the floor.", delay: 0.8 }),
     Action::Say(SayDef { who: "CL4-UD3", text: "Good. I was tired of stairs.", delay: 4.0 }),
 ];
 

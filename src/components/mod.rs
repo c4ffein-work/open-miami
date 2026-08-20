@@ -528,8 +528,10 @@ pub struct Finisher {
 /// toward zero over a fraction of a second, so a hit produces a quick punch of
 /// motion rather than a sustained push. Applied to enemies (thrown opposite the
 /// incoming blow) and to the player (shoved directly away from the attacker).
-/// It is resolved through the same wall/bounds clamping as ordinary movement, so
-/// a shove can never push an entity through a wall.
+/// It is resolved through the same (sub-stepped) wall/bounds clamping as
+/// ordinary movement, so a shove can never push an entity through a wall —
+/// and a shove that slams into a wall fast enough BOUNCES off it (the impulse
+/// reflects off the wall normal with damping; see the movement system).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Knockback {
     /// Remaining impulse velocity in pixels/second.
@@ -715,6 +717,39 @@ pub enum GameEvent {
     FinisherDone,
 }
 
+/// Cached pathfinding result for an entity that navigates around walls (a
+/// chasing rogue or a strolling civilian). A* is expensive — an unreachable
+/// target floods the whole grid — so paths are recomputed on a throttle (a
+/// few Hz, staggered per entity) instead of every tick; between recomputes
+/// the entity keeps following these waypoints. See
+/// [`crate::systems::ai::throttled_path_target`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NavPath {
+    /// The cached waypoints (empty when the last search found no path).
+    pub waypoints: Vec<Vec2>,
+    /// The target the cached path was computed toward.
+    pub target: Vec2,
+    /// Index of the next waypoint to walk toward (follower progress).
+    pub next: usize,
+    /// Seconds until the next scheduled recompute.
+    pub timer: f32,
+    /// How many times the path has been (re)computed — cheap instrumentation
+    /// that lets tests assert the throttle actually throttles.
+    pub recomputes: u32,
+}
+
+impl Default for NavPath {
+    fn default() -> Self {
+        NavPath {
+            waypoints: Vec::new(),
+            target: Vec2::zero(),
+            next: 0,
+            timer: 0.0,
+            recomputes: 0,
+        }
+    }
+}
+
 /// Debug component to store pathfinding waypoints for visualization
 #[derive(Debug, Clone, PartialEq)]
 pub struct DebugPath {
@@ -735,27 +770,29 @@ impl DebugPath {
     }
 }
 
-/// Debug component to store actual movement trail for visualization
+/// Debug component to store actual movement trail for visualization.
+/// A ring buffer: pushing past `max_length` drops the oldest position in
+/// O(1) (a `Vec::remove(0)` here would shift the whole buffer every tick).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DebugTrail {
-    pub positions: Vec<Vec2>,
+    pub positions: std::collections::VecDeque<Vec2>,
     pub max_length: usize,
 }
 
 impl DebugTrail {
     pub fn new(max_length: usize) -> Self {
         DebugTrail {
-            positions: Vec::new(),
+            positions: std::collections::VecDeque::with_capacity(max_length + 1),
             max_length,
         }
     }
 
     /// Add a new position to the trail
     pub fn add_position(&mut self, pos: Vec2) {
-        self.positions.push(pos);
+        self.positions.push_back(pos);
         // Keep only the last N positions
         if self.positions.len() > self.max_length {
-            self.positions.remove(0);
+            self.positions.pop_front();
         }
     }
 

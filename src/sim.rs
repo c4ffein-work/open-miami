@@ -320,6 +320,15 @@ impl Simulation {
     pub fn scenario_step(&mut self, sc: &mut ScenarioState, dt: f32) -> bool {
         if sc.gate_view().is_some() {
             gate_frozen_step(&mut self.world, dt);
+            // Invisible walls: keep the player near the gate's target (the
+            // browser loop does the same).
+            if let Some(anchor) = sc.gate_anchor() {
+                crate::scenario::tether_player(
+                    &mut self.world,
+                    anchor,
+                    crate::scenario::GATE_TETHER_RADIUS,
+                );
+            }
         } else {
             self.step(dt);
         }
@@ -719,12 +728,15 @@ mod tests {
 
     #[test]
     fn test_sim_scripted_player_clears_a_small_room() {
-        // Build a tiny arena: player plus three enemies in a line, no walls.
+        // Build a tiny arena: player plus three enemies in a line, no
+        // walls. Positive, in-world coordinates (movement clamps positions
+        // to [0, WORLD_SIZE] — negative spawns snap onto the axis) and, with
+        // ONE-HIT DEATH, far enough away that bullets land before contact.
         let mut world = World::new();
-        spawn_player(&mut world, Vec2::new(0.0, 0.0));
-        let e1 = spawn_enemy(&mut world, Vec2::new(0.0, -60.0));
-        let e2 = spawn_enemy(&mut world, Vec2::new(0.0, -120.0));
-        let e3 = spawn_enemy(&mut world, Vec2::new(0.0, -180.0));
+        spawn_player(&mut world, Vec2::new(1000.0, 1000.0));
+        let e1 = spawn_enemy(&mut world, Vec2::new(1000.0, 600.0));
+        let e2 = spawn_enemy(&mut world, Vec2::new(1000.0, 520.0));
+        let e3 = spawn_enemy(&mut world, Vec2::new(1000.0, 440.0));
         let mut sim = Simulation::from_world(world);
 
         assert_eq!(sim.enemies_alive(), 3);

@@ -59,13 +59,17 @@ impl System for BulletSystem {
             let new_x = bullet_pos.x + bullet_vel.x * dt;
             let new_y = bullet_pos.y + bullet_vel.y * dt;
 
-            // Check wall collision (bullets are small, use 2.0 radius)
+            // Check wall collision (bullets are small, use 2.0 radius).
+            // Swept old->new segment check: a bullet covers ~13 px per 60 Hz
+            // frame, so an endpoint-only test would tunnel straight through
+            // walls thinner than that.
             let bullet_radius = 2.0;
             let walls = world.walls();
             let mut hit_wall = false;
 
             for wall in walls {
-                if collision::circle_rect_collision(
+                if collision::swept_circle_rect_collision(
+                    crate::math::Vec2::new(bullet_pos.x, bullet_pos.y),
                     crate::math::Vec2::new(new_x, new_y),
                     bullet_radius,
                     wall.x,
@@ -102,16 +106,21 @@ impl System for BulletSystem {
                     continue;
                 }
 
-                // Check circle-circle collision
-                if collision::circle_circle_collision(
+                // Swept old->new check: at closing speeds above the
+                // combined radii per frame (a bullet meeting a rushing bot
+                // head-on) an endpoint-only test tunnels straight through.
+                if collision::swept_circle_circle_collision(
+                    crate::math::Vec2::new(bullet_pos.x, bullet_pos.y),
                     crate::math::Vec2::new(new_x, new_y),
                     bullet_radius,
                     crate::math::Vec2::new(enemy_pos.x, enemy_pos.y),
                     enemy_radius.value,
                 ) {
                     // Deal damage
+                    let mut killed = false;
                     if let Some(health) = world.get_component_mut::<Health>(enemy_entity) {
                         health.take_damage(bullet.damage);
+                        killed = health.is_dead();
                     }
                     world.push_event(GameEvent::EnemyHit {
                         by: bullet.weapon_type,
@@ -126,6 +135,16 @@ impl System for BulletSystem {
                         bullet_vel.y,
                         crate::systems::combat::BULLET_KNOCKBACK,
                     );
+                    // A killing round lays the corpse out along its flight:
+                    // sprawled away from the shooter, head first.
+                    if killed {
+                        crate::systems::combat::CombatSystem::record_corpse_fall(
+                            world,
+                            enemy_entity,
+                            bullet_vel.x,
+                            bullet_vel.y,
+                        );
+                    }
                     hit_enemy = true;
                     break;
                 }
@@ -242,6 +261,116 @@ mod tests {
         }
         assert!(world.query::<Bullet>().is_empty());
         assert!(world.drain_events().is_empty());
+    }
+
+    /// TASK-3 compass rig: a shooter placed at `offset` from the victim
+    /// fires a pistol round straight AT the victim (one hit kills). Asserts
+    /// the knockback impulse points attacker -> victim (per-axis signs and a
+    /// positive dot with the shot) and the recorded corpse fall angle equals
+    /// `atan2(dy, dx)` of attacker -> victim within 0.01 rad.
+    fn corpse_falls_away_from(offset: crate::math::Vec2) {
+        use crate::components::{Knockback, Stunned};
+        use crate::game::{fire_player_weapon, spawn_player};
+        use crate::math::Vec2;
+
+        let victim_pos = Vec2::new(400.0, 400.0);
+        let shooter_pos = victim_pos + offset;
+
+        let mut world = World::new();
+        let victim = world.spawn();
+        world.add_component(victim, Enemy);
+        world.add_component(victim, Position::new(victim_pos.x, victim_pos.y));
+        world.add_component(victim, Radius::new(12.0));
+        world.add_component(victim, Health::new(10)); // one pistol round kills
+
+        spawn_player(&mut world, shooter_pos); // holds a pistol
+        assert!(!fire_player_weapon(&mut world, victim_pos)); // round spawned
+        assert_eq!(world.query::<Bullet>().len(), 1);
+
+        // Fly the round home (no movement system runs, so the knockback
+        // impulse is still untouched when we inspect it).
+        let mut system = BulletSystem;
+        for _ in 0..60 {
+            system.run(&mut world, 0.016);
+            if world.query::<Bullet>().is_empty() {
+                break;
+            }
+        }
+        assert!(world.query::<Bullet>().is_empty(), "bullet resolved");
+        assert!(
+            world.get_component::<Health>(victim).unwrap().is_dead(),
+            "one round kills"
+        );
+
+        // (a) The shove points attacker -> victim.
+        let shot = victim_pos - shooter_pos; // == -offset
+        let kb = *world
+            .get_component::<Knockback>(victim)
+            .expect("the killing round shoves the victim");
+        for (kb_axis, shot_axis) in [(kb.x, shot.x), (kb.y, shot.y)] {
+            if shot_axis == 0.0 {
+                assert!(kb_axis.abs() < 1e-3, "no sideways shove: {kb_axis}");
+            } else {
+                assert!(
+                    kb_axis * shot_axis > 0.0,
+                    "shove sign follows the shot: kb {kb_axis} vs shot {shot_axis}"
+                );
+            }
+        }
+        assert!(
+            kb.x * shot.x + kb.y * shot.y > 0.0,
+            "shove has positive dot with the shot direction"
+        );
+
+        // (b) The corpse's recorded fall angle is attacker -> victim.
+        let fall = world
+            .get_component::<Stunned>(victim)
+            .expect("the kill recorded a corpse fall")
+            .fall_angle;
+        let expected = shot.y.atan2(shot.x);
+        let diff = (fall - expected).rem_euclid(std::f32::consts::TAU);
+        let wrapped = diff.min(std::f32::consts::TAU - diff);
+        assert!(wrapped < 0.01, "fall {fall} != expected {expected}");
+    }
+
+    #[test]
+    fn corpse_falls_away_nw() {
+        corpse_falls_away_from(crate::math::Vec2::new(-100.0, -100.0));
+    }
+
+    #[test]
+    fn corpse_falls_away_nn() {
+        corpse_falls_away_from(crate::math::Vec2::new(0.0, -100.0));
+    }
+
+    #[test]
+    fn corpse_falls_away_ne() {
+        corpse_falls_away_from(crate::math::Vec2::new(100.0, -100.0));
+    }
+
+    #[test]
+    fn corpse_falls_away_ww() {
+        corpse_falls_away_from(crate::math::Vec2::new(-100.0, 0.0));
+    }
+
+    #[test]
+    fn corpse_falls_away_ee() {
+        corpse_falls_away_from(crate::math::Vec2::new(100.0, 0.0));
+    }
+
+    #[test]
+    fn corpse_falls_away_sw() {
+        corpse_falls_away_from(crate::math::Vec2::new(-100.0, 100.0));
+    }
+
+    #[test]
+    fn corpse_falls_away_ss() {
+        corpse_falls_away_from(crate::math::Vec2::new(0.0, 100.0));
+    }
+
+    #[test]
+    fn corpse_falls_away_se() {
+        corpse_falls_away_from(crate::math::Vec2::new(100.0, 100.0));
     }
 
     #[test]
