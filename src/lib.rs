@@ -1005,6 +1005,9 @@ mod wasm_entry {
         level: Level,
         camera: Camera,
         last_time: f64,
+        /// Last time (ms) the canvas backing size was checked against the
+        /// window (see `Graphics::sync_size`); polled about once a second.
+        last_size_check: f64,
         death_time: f32,
         level_complete_time: f32,
         /// Debug tooling (I overlays, K purge, B crack): only with `?debug`.
@@ -1091,6 +1094,7 @@ mod wasm_entry {
                 level: Level::new(),
                 camera: Camera::new(),
                 last_time: 0.0,
+                last_size_check: 0.0,
                 death_time: 0.0,
                 level_complete_time: 0.0,
                 debug_enabled: url_flag("debug"),
@@ -1236,6 +1240,13 @@ mod wasm_entry {
                 (((current_time - self.last_time) / 1000.0) as f32).min(MAX_FRAME_DT)
             };
             self.last_time = current_time;
+
+            // Follow window resizes, browser zoom and DPR changes (reading
+            // layout sizes can force style work, so poll ~1/s, not per frame).
+            if current_time - self.last_size_check >= 1000.0 {
+                self.last_size_check = current_time;
+                graphics.sync_size();
+            }
 
             // Clear background
             graphics.clear(Color::new(20.0 / 255.0, 12.0 / 255.0, 28.0 / 255.0, 1.0));

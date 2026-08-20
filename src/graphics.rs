@@ -52,6 +52,12 @@ const TEXT_SEP: char = '\u{1f}';
 #[cfg(target_arch = "wasm32")]
 pub struct Graphics {
     canvas: HtmlCanvasElement,
+    // devicePixelRatio the backing buffer was last sized with. The game keeps
+    // recording in CSS-pixel coordinates (width()/height() divide by this);
+    // renderer.js reads the same value back from the canvas's `data-dpr`
+    // attribute and scales at the viewport, so one canvas pixel is one
+    // physical screen pixel — no browser rescale, no blur on HiDPI.
+    dpr: RefCell<f64>,
     // Interior mutability keeps the draw API `&self`, matching the previous
     // canvas-context backend so no call site changes.
     cmds: RefCell<Vec<f32>>,
@@ -74,36 +80,70 @@ impl Graphics {
             .dyn_into::<HtmlCanvasElement>()
             .map_err(|_| "Element with id 'glcanvas' is not a canvas")?;
 
-        // Set canvas size to window size
-        let width = window
-            .inner_width()
-            .map_err(|_| "Failed to get window width")?
-            .as_f64()
-            .unwrap_or(960.0) as u32;
-        let height = window
-            .inner_height()
-            .map_err(|_| "Failed to get window height")?
-            .as_f64()
-            .unwrap_or(720.0) as u32;
-        canvas.set_width(width);
-        canvas.set_height(height);
-
         // The WebGL context is created and owned by renderer.js; Rust never
         // touches the canvas beyond sizing it.
-        Ok(Graphics {
+        let graphics = Graphics {
             canvas,
+            dpr: RefCell::new(1.0),
             cmds: RefCell::new(Vec::with_capacity(4096)),
             texts: RefCell::new(String::new()),
             text_count: RefCell::new(0),
-        })
+        };
+        graphics.sync_size();
+        Ok(graphics)
     }
 
+    /// Match the backing buffer to the canvas's CSS size x devicePixelRatio,
+    /// so the frame is rendered at real screen pixels whatever the display
+    /// scaling. Publishes the ratio as `data-dpr` on the canvas for
+    /// renderer.js (buffer size and attribute always change together, so the
+    /// renderer's CSS-pixel space always matches what the game recorded).
+    /// Cheap when nothing changed; the game loop polls it about once a second
+    /// to follow window resizes, browser zoom and monitor moves.
+    pub fn sync_size(&self) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let dpr = window.device_pixel_ratio().max(0.1);
+        // CSS size of the canvas (it is styled 100% x 100% of the viewport);
+        // fall back to the window's inner size if layout hasn't run yet.
+        let (css_w, css_h) = match (self.canvas.client_width(), self.canvas.client_height()) {
+            (w, h) if w > 0 && h > 0 => (w as f64, h as f64),
+            _ => (
+                window
+                    .inner_width()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(960.0),
+                window
+                    .inner_height()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(720.0),
+            ),
+        };
+        let width = (css_w * dpr).round().max(1.0) as u32;
+        let height = (css_h * dpr).round().max(1.0) as u32;
+        if width == self.canvas.width()
+            && height == self.canvas.height()
+            && (dpr - *self.dpr.borrow()).abs() < 1e-6
+        {
+            return;
+        }
+        self.canvas.set_width(width);
+        self.canvas.set_height(height);
+        let _ = self.canvas.set_attribute("data-dpr", &format!("{dpr}"));
+        *self.dpr.borrow_mut() = dpr;
+    }
+
+    // Logical (CSS-pixel) size — the coordinate space every draw call, HUD
+    // layout and mouse event lives in, independent of the display scaling.
     pub fn width(&self) -> f32 {
-        self.canvas.width() as f32
+        (self.canvas.width() as f64 / *self.dpr.borrow()) as f32
     }
 
     pub fn height(&self) -> f32 {
-        self.canvas.height() as f32
+        (self.canvas.height() as f64 / *self.dpr.borrow()) as f32
     }
 
     /// Hand the accumulated frame to the JS renderer and reset for the next

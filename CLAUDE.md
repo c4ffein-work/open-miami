@@ -17,6 +17,15 @@
 - shoggoth-core.js extends robot-core's exported `SpritePipeline` (shared
   pass-1 target + inked post pass + `M4`); the 2D-primitive
   `Graphics::draw_shoggoth` is only the `?viz` gallery / level-map thumbnail
+- SIZING: the canvas backing buffer is CSS size x devicePixelRatio
+  (`Graphics::sync_size`, polled ~1/s by the game loop — window resizes,
+  browser zoom and monitor-DPR changes are picked up live); the wasm records
+  every frame in CSS-pixel coordinates and publishes the ratio as `data-dpr`
+  on the canvas, renderer.js keeps `uRes` in CSS px while the viewport is the
+  physical buffer, so primitives rasterize at real screen pixels (no browser
+  rescale/blur on HiDPI). The camera derives its zoom from the viewport
+  (`REF_VIEW_W/H`, `ZOOM_SCALE_MIN/MAX` in src/camera.rs: ~constant visible
+  area whatever the window size/aspect, clamped for legibility)
 - Opcode 14 = `POSTFX kind t r g b`: when present anywhere in a frame,
   renderer.js renders the whole frame into an offscreen scene FBO and draws it
   through a full-screen post shader. Kinds 0-9 (table mirrored in renderer.js

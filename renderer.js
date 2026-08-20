@@ -742,10 +742,21 @@ export function initRenderer(canvas) {
   }
   // The framebuffer the batch draws into: null (the canvas) normally, the
   // scene FBO on frames that end in a post pass, the pixel-group scratch
-  // target inside a PIX_BEGIN/PIX_END group — plus the target's size (the
-  // viewport and the vertex shader's uRes).
+  // target inside a PIX_BEGIN/PIX_END group — plus the target's size:
+  // batchW/H is the coordinate space (the vertex shader's uRes), batchVW/VH
+  // the pixel size of the target (the viewport). They differ only on the
+  // canvas / scene targets, where the wasm records in CSS pixels but the
+  // backing buffer is sized to physical device pixels (CSS x data-dpr, see
+  // Graphics::sync_size) — the viewport mapping does the upscale, so every
+  // primitive lands on real screen pixels with no browser rescale. Group
+  // scratch targets are 1:1 (texels).
   let batchFbo = null;
   let batchW = 1, batchH = 1;
+  let batchVW = 1, batchVH = 1;
+  // This frame's canvas sizes: logical (CSS px — what the command stream is
+  // recorded in) and physical (the backing buffer).
+  let frameW = 1, frameH = 1;
+  let framePW = 1, framePH = 1;
   // The POSTFX request of the current frame (kind, t, r, g, b) or null.
   const postfx = { kind: 0, t: 0, r: 0, g: 0, b: 0 };
   let postfxActive = false;
@@ -798,8 +809,10 @@ export function initRenderer(canvas) {
     gl.bindTexture(gl.TEXTURE_2D, null);
     if (postLoc.aPos !== loc.aPos) gl.disableVertexAttribArray(postLoc.aPos);
     batchFbo = null;
-    batchW = w;
-    batchH = h;
+    batchW = frameW;
+    batchH = frameH;
+    batchVW = framePW;
+    batchVH = framePH;
     bindBatchState();
     gl.uniform1i(loc.uTex, 0);
   }
@@ -902,8 +915,10 @@ export function initRenderer(canvas) {
     warpRead = write;
     warpLive = true;
     batchFbo = null;
-    batchW = w;
-    batchH = h;
+    batchW = frameW;
+    batchH = frameH;
+    batchVW = framePW;
+    batchVH = framePH;
     bindBatchState();
     gl.uniform1i(loc.uTex, 0);
   }
@@ -967,6 +982,7 @@ export function initRenderer(canvas) {
       px, w, h, tw, th, tex: tgt.tex, fbo: tgt.fbo,
       outer: pix, outerM: m, outerStack: stack.length,
       outerFbo: batchFbo, outerW: batchW, outerH: batchH,
+      outerVW: batchVW, outerVH: batchVH,
     };
     pixStack.push(g);
     pix = g;
@@ -975,6 +991,8 @@ export function initRenderer(canvas) {
     batchFbo = g.fbo;
     batchW = tw;
     batchH = th;
+    batchVW = tw;
+    batchVH = th;
     bindBatchState();
     // Clear just the region this group uses (scissored; clears ignore the viewport).
     gl.enable(gl.SCISSOR_TEST);
@@ -994,15 +1012,18 @@ export function initRenderer(canvas) {
     batchFbo = g.outerFbo;
     batchW = g.outerW;
     batchH = g.outerH;
+    batchVW = g.outerVW;
+    batchVH = g.outerVH;
     bindBatchState();
     // The group texels are premultiplied (drawn with straight-alpha colour
     // over transparent black, coverage accumulated), so composite them with
     // (ONE, 1-a) — into the canvas or into an outer group's texels alike.
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     setTexture(g.tex);
-    // Snap the on-screen origin to whole pixels of the CURRENT target (device
-    // pixels, or the outer group's texels) so the art pixels do not shimmer
-    // as the object drifts by fractions of a pixel.
+    // Snap the on-screen origin to whole pixels of the CURRENT target's
+    // coordinate space (CSS pixels on the canvas/scene, the outer group's
+    // texels inside a group) so the art pixels do not shimmer as the object
+    // drifts by fractions of a pixel.
     const sx = m[0] * x + m[2] * y + m[4];
     const sy = m[1] * x + m[3] * y + m[5];
     const dx = Math.round(sx) - sx, dy = Math.round(sy) - sy;
@@ -1035,7 +1056,7 @@ export function initRenderer(canvas) {
   // runs after them (and it is cheap enough to be defensive about it).
   function bindBatchState() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, batchFbo);
-    gl.viewport(0, 0, batchW, batchH);
+    gl.viewport(0, 0, batchVW, batchVH);
     gl.useProgram(prog);
     gl.uniform2f(loc.uRes, batchW, batchH);
     gl.disable(gl.DEPTH_TEST);
@@ -1556,14 +1577,24 @@ export function initRenderer(canvas) {
 
   /* ---- frame execution ---- */
   function frameRender(cmds, textArena) {
-    const w = canvas.width, h = canvas.height;
+    // Backing buffer = CSS size x devicePixelRatio (Graphics::sync_size, which
+    // publishes the ratio as data-dpr); the stream's coordinates are CSS px.
+    const pw = canvas.width, ph = canvas.height;
+    const dpr = parseFloat(canvas.dataset.dpr) || 1;
+    const w = pw / dpr, h = ph / dpr;
+    frameW = w;
+    frameH = h;
+    framePW = pw;
+    framePH = ph;
     // A POSTFX anywhere in the frame routes the whole frame through the
     // offscreen scene target (decided up front, before the first draw).
     postfxActive = scanPostfx(cmds);
-    if (postfxActive) ensureSceneTarget(w, h);
+    if (postfxActive) ensureSceneTarget(pw, ph);
     batchFbo = postfxActive ? sceneFbo : null;
     batchW = w;
     batchH = h;
+    batchVW = pw;
+    batchVH = ph;
     // A group left open by a truncated stream must not leak into this frame.
     pix = null;
     pixDepth = 0;
@@ -1689,9 +1720,10 @@ export function initRenderer(canvas) {
     }
     while (pixStack.length) pixEnd(0, 0); // unterminated groups: close them where they are
     flush();
+    // The post passes work on the final pixels: physical resolution.
     const warpFrame = postfxActive && (postfx.kind | 0) === 10;
-    if (warpFrame) runWarpPass(w, h);
-    else if (postfxActive) runPostPass(w, h);
+    if (warpFrame) runWarpPass(pw, ph);
+    else if (postfxActive) runPostPass(pw, ph);
     if (!warpFrame) warpLive = false; // next warp frame starts from a clean accumulator
   }
 
