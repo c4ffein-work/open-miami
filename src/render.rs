@@ -313,8 +313,8 @@ fn render_pickups(world: &World, graphics: &Graphics, cull: &crate::camera::View
             _ => continue,
         };
 
-        // Each GUNPICKUP is a live 3D render: skip it fully off-screen
-        // (conservative half-extent = the whole quad).
+        // Skip pickups fully off-screen (conservative half-extent = the
+        // whole quad).
         if !cull.visible(pos.x, pos.y, GROUND_GUN_PX) {
             continue;
         }
@@ -397,7 +397,7 @@ fn render_thrown_weapons(world: &World, graphics: &Graphics, cull: &crate::camer
             _ => continue,
         };
 
-        // Same live GUNPICKUP render as a resting pickup: cull off-screen.
+        // Same GUNPICKUP sprite as a resting pickup: cull off-screen.
         if !cull.visible(pos.x, pos.y, GROUND_GUN_PX) {
             continue;
         }

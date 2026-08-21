@@ -42,9 +42,6 @@ impl System for MovementSystem {
         // Query all entities with both Position and Velocity
         let entities: Vec<_> = world.query_with::<Position, Velocity>();
 
-        // Get walls once before processing entities (to avoid borrow checker issues)
-        let walls: Vec<_> = world.walls().to_vec();
-
         for entity in entities {
             // Get velocity, any knockback impulse, and radius (immutable
             // borrows), copy the values.
@@ -81,12 +78,17 @@ impl System for MovementSystem {
             };
             let sub_dt = dt / steps as f32;
 
+            // Borrow the walls in place for the sub-step loop (no per-tick
+            // clone): the loop only touches locals, and the shared borrow
+            // ends before the component writes below.
+            let walls = world.walls();
+
             for _ in 0..steps {
                 final_x += (vel.x + kb_x) * sub_dt;
                 final_y += (vel.y + kb_y) * sub_dt;
 
                 // Check each wall and resolve collisions
-                for wall in &walls {
+                for wall in walls {
                     // Check if the new position would collide
                     if circle_rect_collision(
                         Vec2::new(final_x, final_y),

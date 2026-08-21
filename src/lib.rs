@@ -111,6 +111,11 @@ mod wasm_entry {
         // Open an external link in a new tab (defined in index.html).
         #[wasm_bindgen(js_namespace = window, js_name = openExternal)]
         fn open_external(url: &str);
+        // Persistent settings (localStorage; defined in index.html).
+        #[wasm_bindgen(js_namespace = window, js_name = getSetting)]
+        fn get_setting(name: &str) -> Option<String>;
+        #[wasm_bindgen(js_namespace = window, js_name = setSetting)]
+        fn set_setting(name: &str, value: &str);
         // Hide / restore the OS cursor over the canvas (defined in
         // index.html); hidden during gameplay, where the engine draws its
         // own pixel crosshair instead.
@@ -963,6 +968,7 @@ mod wasm_entry {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PauseOption {
         Continue,
+        Settings,
         Stop,
     }
 
@@ -1002,9 +1008,28 @@ mod wasm_entry {
         /// Whether the music is stopped because a tutorial gate froze the
         /// world (restarted when the gate releases).
         music_frozen: bool,
+        /// The pause menu's stacked SETTINGS modal is open (Esc pops one
+        /// layer: settings -> pause -> game).
+        pause_in_settings: bool,
+        /// FPS counter (`?debug` only): frames counted since `fps_window`
+        /// started, the window's start time (ms), and the last readout.
+        fps_frames: u32,
+        fps_window: f64,
+        fps_value: f32,
+        /// The SETTINGS frame-rate cap (30 / 60 / 120; 0 = uncapped).
+        /// rAF can never EXCEED the display refresh — the cap only skips
+        /// frames when the display is faster than the cap.
+        fps_cap: u32,
+        /// When the last non-skipped frame ran (ms), for the cap.
+        last_frame_ms: f64,
+        /// Which SETTINGS row is highlighted (0 = SOUND, 1 = FPS CAP).
+        settings_row: usize,
         level: Level,
         camera: Camera,
         last_time: f64,
+        /// Last time (ms) the canvas backing size was checked against the
+        /// window (see `Graphics::sync_size`); polled about once a second.
+        last_size_check: f64,
         death_time: f32,
         level_complete_time: f32,
         /// Debug tooling (I overlays, K purge, B crack): only with `?debug`.
@@ -1088,14 +1113,31 @@ mod wasm_entry {
                 restart_hold: 0.0,
                 cursor_hidden: false,
                 music_frozen: false,
+                pause_in_settings: false,
+                fps_frames: 0,
+                fps_window: 0.0,
+                fps_value: 0.0,
+                fps_cap: get_setting("fps_cap")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(120),
+                last_frame_ms: 0.0,
+                settings_row: 0,
                 level: Level::new(),
                 camera: Camera::new(),
                 last_time: 0.0,
+                last_size_check: 0.0,
                 death_time: 0.0,
                 level_complete_time: 0.0,
                 debug_enabled: url_flag("debug"),
                 show_infos: false,
-                audio: AudioEngine::new(),
+                audio: {
+                    let audio = AudioEngine::new();
+                    // The SETTINGS sound toggle persists in localStorage.
+                    if get_setting("sound").as_deref() == Some("off") {
+                        audio.set_enabled(false);
+                    }
+                    audio
+                },
                 audio_unlocked: false,
                 outro: None,
                 ending: Ending::new(),
@@ -1237,6 +1279,13 @@ mod wasm_entry {
             };
             self.last_time = current_time;
 
+            // Follow window resizes, browser zoom and DPR changes (reading
+            // layout sizes can force style work, so poll ~1/s, not per frame).
+            if current_time - self.last_size_check >= 1000.0 {
+                self.last_size_check = current_time;
+                graphics.sync_size();
+            }
+
             // Clear background
             graphics.clear(Color::new(20.0 / 255.0, 12.0 / 255.0, 28.0 / 255.0, 1.0));
 
@@ -1281,6 +1330,27 @@ mod wasm_entry {
                 }
                 GameScreen::Ending => {
                     self.update_ending(graphics, dt);
+                }
+            }
+
+            // FPS counter (`?debug` only): real rAF frames over a rolling
+            // half-second window, drawn on every screen, top-right.
+            if self.debug_enabled {
+                self.fps_frames += 1;
+                let elapsed = current_time - self.fps_window;
+                if elapsed >= 500.0 {
+                    self.fps_value = self.fps_frames as f32 * 1000.0 / elapsed as f32;
+                    self.fps_frames = 0;
+                    self.fps_window = current_time;
+                }
+                if self.fps_value > 0.0 {
+                    let text = format!("{:.0} FPS", self.fps_value);
+                    graphics.draw_text(
+                        &text,
+                        Vec2::new(graphics.width() - 90.0, graphics.height() - 28.0),
+                        18.0,
+                        Color::new(0.3, 1.0, 0.5, 0.9),
+                    );
                 }
             }
 
@@ -2373,6 +2443,22 @@ mod wasm_entry {
         /// origin for the caller's content.
         fn draw_menu_modal(&mut self, graphics: &Graphics, title: &str, mw: f32, mh: f32) -> Vec2 {
             self.draw_level_select(graphics);
+            self.draw_modal_chrome(graphics, title, mw, mh, "ESC / ENTER — BACK")
+        }
+
+        /// Just the modal panel + POSTFX 12, over whatever is already drawn
+        /// (the pause menu draws it over the void; stacked modals each emit
+        /// their POSTFX and only the LAST one applies, so the topmost panel
+        /// wins and everything under it — including a deeper panel — melts
+        /// into the static).
+        fn draw_modal_chrome(
+            &mut self,
+            graphics: &Graphics,
+            title: &str,
+            mw: f32,
+            mh: f32,
+            hint: &str,
+        ) -> Vec2 {
             let (w, h) = (graphics.width(), graphics.height());
             let (mx, my) = ((w - mw) / 2.0, (h - mh) / 2.0);
             // Pure, opaque black: the shader passes the inside through
@@ -2387,8 +2473,11 @@ mod wasm_entry {
                 Color::WHITE,
             );
             graphics.draw_text(
-                "ESC / ENTER — BACK",
-                Vec2::new(mx + mw - 190.0, my + mh - 30.0),
+                hint,
+                Vec2::new(
+                    mx + mw - 28.0 - hint.chars().count() as f32 * 8.0,
+                    my + mh - 30.0,
+                ),
                 15.0,
                 Color::WHITE,
             );
@@ -2399,18 +2488,97 @@ mod wasm_entry {
             Vec2::new(mx, my)
         }
 
+        /// The SETTINGS modal body — two rows (SOUND, FPS CAP), Up/Down to
+        /// highlight, Enter/Space or a click on a row to act. Shared by the
+        /// main menu and the pause menu's stacked settings.
+        fn settings_modal_body(&mut self, graphics: &Graphics, p: Vec2, mw: f32) {
+            const ROW_H: f32 = 46.0;
+            let rows_y = p.y + 118.0;
+            if input::is_key_pressed("ArrowDown")
+                || input::is_key_pressed("s")
+                || input::is_key_pressed("ArrowUp")
+                || input::is_key_pressed("w")
+                || input::is_key_pressed("z")
+            {
+                self.settings_row = 1 - self.settings_row;
+            }
+            let mut act: Option<usize> = None;
+            if input::is_key_pressed("Enter") || input::is_key_pressed(" ") {
+                act = Some(self.settings_row);
+            } else if input::is_mouse_button_pressed(input::mouse_buttons::LEFT) {
+                let m = input::mouse_position();
+                if m.x >= p.x && m.x <= p.x + mw {
+                    for i in 0..2usize {
+                        let ry = rows_y + i as f32 * ROW_H;
+                        if m.y >= ry - 8.0 && m.y <= ry + 32.0 {
+                            self.settings_row = i;
+                            act = Some(i);
+                        }
+                    }
+                }
+            }
+            match act {
+                Some(0) => {
+                    let now = !self.audio.is_enabled();
+                    self.audio.set_enabled(now);
+                    set_setting("sound", if now { "on" } else { "off" });
+                }
+                Some(1) => {
+                    // 30 -> 60 -> 120 -> UNCAPPED -> 30 ...
+                    self.fps_cap = match self.fps_cap {
+                        30 => 60,
+                        60 => 120,
+                        120 => 0,
+                        _ => 30,
+                    };
+                    set_setting("fps_cap", &self.fps_cap.to_string());
+                }
+                _ => {}
+            }
+
+            let sound_label = if self.audio.is_enabled() {
+                "[X]"
+            } else {
+                "[ ]"
+            };
+            let cap_label = if self.fps_cap == 0 {
+                "UNCAPPED".to_string()
+            } else {
+                format!("{}", self.fps_cap)
+            };
+            let rows: [(&str, String); 2] =
+                [("SOUND", sound_label.to_string()), ("FPS CAP", cap_label)];
+            for (i, (name, value)) in rows.iter().enumerate() {
+                let ry = rows_y + i as f32 * ROW_H;
+                let color = if self.settings_row == i {
+                    Color::new(1.0, 0.20, 0.60, 1.0)
+                } else {
+                    Color::WHITE
+                };
+                graphics.draw_text(name, Vec2::new(p.x + 28.0, ry), 24.0, color);
+                graphics.draw_text(
+                    value,
+                    Vec2::new(p.x + mw - 28.0 - value.chars().count() as f32 * 11.0, ry),
+                    24.0,
+                    color,
+                );
+            }
+            graphics.draw_text(
+                "ENTER / SPACE / CLICK — CHANGE",
+                Vec2::new(p.x + 28.0, rows_y + 2.0 * ROW_H + 10.0),
+                15.0,
+                Color::new(1.0, 1.0, 1.0, 0.6),
+            );
+        }
+
         fn update_settings(&mut self, graphics: &Graphics) {
-            if input::is_key_pressed("Escape") || input::is_key_pressed("Enter") {
+            if input::is_key_pressed("Escape") {
                 self.screen = GameScreen::LevelSelect;
                 return;
             }
-            let p = self.draw_menu_modal(graphics, "SETTINGS", 564.0, 264.0);
-            graphics.draw_text(
-                "NO SETTINGS CURRENTLY AVAILABLE",
-                Vec2::new(p.x + 28.0, p.y + 130.0),
-                22.0,
-                Color::WHITE,
-            );
+            self.draw_level_select(graphics);
+            let p = self.draw_modal_chrome(graphics, "SETTINGS", 564.0, 312.0, "ESC — BACK");
+            self.settings_modal_body(graphics, p, 564.0);
         }
 
         fn update_about(&mut self, graphics: &Graphics) {
@@ -2469,33 +2637,51 @@ mod wasm_entry {
         }
 
         fn update_paused(&mut self, graphics: &Graphics) {
-            let screen_width = graphics.width();
-            let screen_height = graphics.height();
+            // The stacked SETTINGS modal over the pause modal: Esc pops one
+            // layer at a time (settings -> pause -> game). Both panels draw;
+            // only the topmost POSTFX applies, so the pause panel behind
+            // melts into the static.
+            if self.pause_in_settings {
+                if input::is_key_pressed("Escape") {
+                    self.pause_in_settings = false;
+                    return;
+                }
+                let pp = self.draw_modal_chrome(graphics, "PAUSED", 420.0, 340.0, "");
+                self.draw_pause_rows(graphics, pp, false);
+                let p = self.draw_modal_chrome(graphics, "SETTINGS", 564.0, 312.0, "ESC — BACK");
+                self.settings_modal_body(graphics, p, 564.0);
+                return;
+            }
 
-            // Handle input - ESC to resume
             if input::is_key_pressed("Escape") {
                 self.screen = GameScreen::InGame;
                 return;
             }
-
-            // Handle arrow keys and WASD/ZQSD
-            if input::is_key_pressed("ArrowDown")
-                || input::is_key_pressed("ArrowUp")
-                || input::is_key_pressed("w")
-                || input::is_key_pressed("z")
-                || input::is_key_pressed("s")
-            {
+            if input::is_key_pressed("ArrowDown") || input::is_key_pressed("s") {
                 self.selected_pause_option = match self.selected_pause_option {
-                    PauseOption::Continue => PauseOption::Stop,
+                    PauseOption::Continue => PauseOption::Settings,
+                    PauseOption::Settings => PauseOption::Stop,
                     PauseOption::Stop => PauseOption::Continue,
                 };
             }
-
-            // Handle Enter
+            if input::is_key_pressed("ArrowUp")
+                || input::is_key_pressed("w")
+                || input::is_key_pressed("z")
+            {
+                self.selected_pause_option = match self.selected_pause_option {
+                    PauseOption::Continue => PauseOption::Stop,
+                    PauseOption::Settings => PauseOption::Continue,
+                    PauseOption::Stop => PauseOption::Settings,
+                };
+            }
             if input::is_key_pressed("Enter") {
                 match self.selected_pause_option {
                     PauseOption::Continue => {
                         self.screen = GameScreen::InGame;
+                        return;
+                    }
+                    PauseOption::Settings => {
+                        self.pause_in_settings = true;
                         return;
                     }
                     PauseOption::Stop => {
@@ -2505,57 +2691,34 @@ mod wasm_entry {
                 }
             }
 
-            // Render semi-transparent overlay
-            graphics.draw_rectangle(
-                Vec2::new(0.0, 0.0),
-                screen_width,
-                screen_height,
-                Color::new(0.0, 0.0, 0.0, 0.7),
-            );
+            let p = self.draw_modal_chrome(graphics, "PAUSED", 420.0, 340.0, "ESC — CONTINUE");
+            self.draw_pause_rows(graphics, p, true);
+        }
 
-            // Render title
-            graphics.draw_text(
-                "PAUSED",
-                Vec2::new(screen_width / 2.0 - 100.0, 100.0),
-                60.0,
-                Color::new(1.0, 0.09, 0.26, 1.0),
-            );
-
-            // Render menu options
-            let menu_y = screen_height / 2.0;
-            let menu_spacing = 60.0;
-
-            let continue_color = if self.selected_pause_option == PauseOption::Continue {
-                Color::new(1.0, 0.09, 0.26, 1.0)
-            } else {
-                Color::WHITE
-            };
-            graphics.draw_text(
-                "Keep going.",
-                Vec2::new(screen_width / 2.0 - 80.0, menu_y),
-                30.0,
-                continue_color,
-            );
-
-            let stop_color = if self.selected_pause_option == PauseOption::Stop {
-                Color::new(1.0, 0.09, 0.26, 1.0)
-            } else {
-                Color::WHITE
-            };
-            graphics.draw_text(
-                "STOP!",
-                Vec2::new(screen_width / 2.0 - 40.0, menu_y + menu_spacing),
-                30.0,
-                stop_color,
-            );
-
-            // Controls hint
-            graphics.draw_text(
-                "WASD/ZQSD/Arrows to navigate | Enter to select | ESC to resume",
-                Vec2::new(screen_width / 2.0 - 320.0, screen_height - 40.0),
-                16.0,
-                Color::GRAY,
-            );
+        /// The pause modal's three rows. `active` = the pause layer has
+        /// focus (rows dim to grey while the stacked SETTINGS modal is up).
+        fn draw_pause_rows(&self, graphics: &Graphics, p: Vec2, active: bool) {
+            const ROWS: [(PauseOption, &str); 3] = [
+                (PauseOption::Continue, "CONTINUE"),
+                (PauseOption::Settings, "SETTINGS"),
+                (PauseOption::Stop, "QUIT TO MENU"),
+            ];
+            for (i, (opt, label)) in ROWS.iter().enumerate() {
+                let selected = active && self.selected_pause_option == *opt;
+                let color = if selected {
+                    Color::new(1.0, 0.20, 0.60, 1.0)
+                } else if active {
+                    Color::WHITE
+                } else {
+                    Color::new(0.6, 0.6, 0.6, 1.0)
+                };
+                graphics.draw_text(
+                    label,
+                    Vec2::new(p.x + 28.0, p.y + 116.0 + i as f32 * 52.0),
+                    26.0,
+                    color,
+                );
+            }
         }
 
         fn update_game(&mut self, graphics: &Graphics, dt: f32) {
@@ -3259,7 +3422,20 @@ mod wasm_entry {
 
         *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
             let current_time = performance.now();
-            game_state.borrow_mut().update(&graphics, current_time);
+            // FPS CAP: skip the whole frame (no sim, no draw — dt simply
+            // accumulates into the next rendered frame) when the display
+            // outruns the configured cap. The 0.9 factor keeps a cap equal
+            // to the refresh rate from beat-skipping.
+            let run = {
+                let state = game_state.borrow();
+                state.fps_cap == 0
+                    || current_time - state.last_frame_ms >= 1000.0 / state.fps_cap as f64 * 0.9
+            };
+            if run {
+                let mut state = game_state.borrow_mut();
+                state.last_frame_ms = current_time;
+                state.update(&graphics, current_time);
+            }
 
             // Schedule next frame
             request_animation_frame(f.borrow().as_ref().unwrap());

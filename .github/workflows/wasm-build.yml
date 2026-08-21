@@ -118,6 +118,11 @@ jobs:
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
+        with:
+          # Auto-enable Pages (source: GitHub Actions) on repos where it was
+          # never switched on — this step otherwise 404s ("Get Pages site
+          # failed") and the deploy never runs.
+          enablement: true
 
       - name: Upload artifact to Pages
         uses: actions/upload-pages-artifact@v3

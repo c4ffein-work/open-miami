@@ -25,11 +25,14 @@
     14 POSTFX     kind t r g b                        (full-screen post pass)
     15 PIX_BEGIN  px w h                              (open a pixel-art group)
     16 PIX_END    x y                                 (close it, draw at x y)
-    17 PORTRAIT   colorIdx x y sizePx time mode       (dialogue portrait: slow-orbit
-                                                      3D robot, pixel-art; mode
-                                                      0 = bust, 1 = headshot)
-    18 GUNPICKUP  weaponIdx x y angle sizePx          (weapon lying on the floor
-                                                      as its 3D model, pixel-art)
+    17 PORTRAIT   colorIdx x y sizePx time mode       (dialogue portrait: baked-once
+                                                      pixel-art face, rocked in 2D
+                                                      by `time`; mode 0 = bust,
+                                                      1 = headshot)
+    18 GUNPICKUP  weaponIdx x y angle sizePx          (weapon lying on the floor:
+                                                      baked-once pixel-art sprite
+                                                      of its 3D model, quad spun
+                                                      in 2D by `angle`)
 
    Everything is drawn as vertex-colored, textured triangles in one
    interleaved dynamic buffer (a 1x1 white texture stands in for solid
@@ -129,25 +132,31 @@ const SHOG_TILE = 384; // the boss is large (and drawn ~1:1 at the camera zoom)
 const SHOG_PX = 4; // shoggoth-core pixelation block size at this tile size
 const SHOG_ATLAS_SIZE = 768; // 2x2 = 4 bosses per batch (one is the norm)
 
-/* ---- pixel-sprite scratch tiles (PORTRAIT + GUNPICKUP) ----
-   Unlike the robot atlas (rendered ~1:1 and LINEAR-sampled), this atlas is
-   NEAREST-filtered and its tiles are rendered AT THE ART RESOLUTION, then
-   upscaled by the quad that samples them — true pixel art, never smoothed.
-   One 64px tile per sprite; a portrait uses the whole tile (64-texel art),
-   a ground gun only a GUN_ART-texel corner of it. */
+/* ---- pixel-sprite tiles (PORTRAIT + GUNPICKUP) ----
+   Unlike the robot atlas (rendered ~1:1 and LINEAR-sampled), these tiles are
+   NEAREST-filtered and rendered AT THE ART RESOLUTION, then upscaled by the
+   quad that samples them — true pixel art, never smoothed. One 64px tile per
+   sprite; a ground gun uses a GUN_ART-texel corner of its tile. */
 const FX_TILE = 64; // tile side = the portrait's art resolution (texels)
 const GUN_ART = 24; // ground-gun art resolution (texels) within a tile
-const FX_ATLAS_SIZE = 512; // 8x8 = 64 pixel-sprites per batch
-// The bust rotates as a gentle sway around a 3/4 base yaw (rather than a
-// full spin) so the lit face never turns away from the viewer.
+/* ---- pixel-sprite cache (PORTRAIT + GUNPICKUP) ----
+   Classic Hotline-Miami-style portraits: each (colorIdx, mode) face is
+   rendered through the 3D pipeline exactly once — FIXED camera at the base
+   yaw, frozen pose — into a persistent NEAREST atlas, then drawn every frame
+   as that baked image on a quad that gently ROCKS in 2D around its centre
+   (the finished pixel art tilts as a rigid sprite, chunky pixels and all).
+   GROUND GUNS share the atlas: each weaponIdx is rendered once at angle 0
+   (the true top-down camera makes spinning the flat model and rotating its
+   baked sprite equivalent) and the quad is spun in 2D by the opcode angle. */
+const PORTRAIT_ATLAS_SIZE = 512; // 8x8 64px tiles; 8 portraits + 4 guns used
+const PORTRAIT_BAKE_TIME = 0.35; // frozen clock for the bake: a neutral idle frame
+const PORTRAIT_ROCK_AMP = 5 * (Math.PI / 180); // rocking amplitude (~5 deg)
+const PORTRAIT_ROCK_W = 1.5; // rocking angular speed (rad/s of `time`)
 const PORTRAIT_YAW = 0.6; // 3/4 base yaw (rad)
-const PORTRAIT_SWAY = 0.44; // sway amplitude (rad, ~25 deg)
-const PORTRAIT_SWAY_W = 0.15 * Math.PI * 2; // sway angular speed (rad/s of `time`)
 const PORTRAIT_PITCH = 0.55; // slightly-elevated 3/4 camera (bust, mode 0)
 // HEADSHOT (mode 1): the camera pushed in and raised to head height so the
-// face fills most of the tile — near-eye-level, same gentle yaw sway.
+// face fills most of the tile — near-eye-level.
 const HEADSHOT_YAW = 0.22; // near-frontal base yaw: the visor stays toward the viewer
-const HEADSHOT_SWAY = 0.24; // gentler sway (~14 deg): the face never turns away
 const HEADSHOT_PITCH = 0.12; // eye level, barely above: the face, not the head's top
 const HEADSHOT_HALFV = 0.52; // ortho half-extent: head + a hint of shoulders
 const HEADSHOT_CENTER = [0, 1.86, 0]; // orbit focus at head height (head y=1.95)
@@ -540,6 +549,9 @@ export function initRenderer(canvas) {
     antialias: true,
     premultipliedAlpha: true,
     preserveDrawingBuffer: false,
+    // Dual-GPU laptops: without this Chrome may hand WebGL the INTEGRATED
+    // GPU and the game crawls at 30 fps on machines that could do 120.
+    powerPreference: "high-performance",
     // Low-latency canvas: where supported (Chrome + a compositor overlay
     // path) the swap bypasses the compositor queue, saving up to one vsync
     // of input->photon latency. Ignored by other browsers; if a platform
@@ -669,24 +681,25 @@ export function initRenderer(canvas) {
   };
   const shogTarget = { fbo: shogFbo, x: 0, y: 0, w: SHOG_TILE, h: SHOG_TILE };
 
-  /* ---- pixel-sprite scratch atlas (PORTRAIT + GUNPICKUP): NEAREST tiles
-     rendered at art resolution, upscaled by their quads ---- */
-  const fxTex = makeTexture(FX_ATLAS_SIZE, true);
-  const fxCols = Math.floor(FX_ATLAS_SIZE / FX_TILE);
-  const fxSlots = fxCols * fxCols;
-  const fxFbo = gl.createFramebuffer();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fxFbo);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fxTex, 0);
+  /* ---- pixel-sprite cache: baked-once sprites, rotated in 2D ----
+     PERSISTENT — never recycled per frame, unlike every scratch atlas above.
+     Each (colorIdx, mode) portrait is rendered through robot-core exactly
+     once (lazily, on first use), with a FIXED camera (the base yaw, no sway)
+     and a frozen clock (a neutral idle frame); every subsequent frame just
+     draws the cached tile as a rotated quad. Ground guns (GUNPICKUP) share
+     the atlas — one bake per weaponIdx at angle 0, negative Map keys — and
+     spin as rotated quads the same way. ~zero per-frame cost. */
+  const portraitTex = makeTexture(PORTRAIT_ATLAS_SIZE, true);
+  const portraitCols = Math.floor(PORTRAIT_ATLAS_SIZE / FX_TILE);
+  const portraitFbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, portraitFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, portraitTex, 0);
   if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-    throw new Error("Pixel-sprite atlas framebuffer is incomplete; the game cannot render.");
+    throw new Error("Portrait cache framebuffer is incomplete; the game cannot render.");
   }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  // Sprites queued for the current batch: (kind, a, b) per slot —
-  // kind 0 = portrait bust (a = colorIdx, b = time), kind 1 = ground gun
-  // (a = weaponIdx, b = angle), kind 2 = portrait headshot (as kind 0 but
-  // the close head-level camera). Rendered by renderQueuedSprites.
-  const fxQueue = new Float32Array(fxSlots * 3);
-  let fxUsed = 0;
+  // colorIdx * 2 + mode -> baked slot; ground guns use key -1 - weaponIdx.
+  const portraitCache = new Map();
   const portraitOpts = {
     pose: "idle", color: "coral", weapon: "fist", time: 0, facingDeg: 0,
     // rt/FX_TILE post blocks: one output texel per block = 64-texel art
@@ -696,10 +709,63 @@ export function initRenderer(canvas) {
       center: PORTRAIT_CENTER,
     },
   };
-  const gunOpts = {
+  const portraitTarget = { fbo: portraitFbo, x: 0, y: 0, w: FX_TILE, h: FX_TILE };
+  // Slot of the (colorIdx, mode) portrait, baking it on first use. The bake
+  // is a mid-stream 3D render: flush what is pending, keep the pipelines'
+  // attrib state disjoint (see renderQueuedSprites), rebind the batch after.
+  function portraitSlotFor(colorIdx, mode) {
+    const key = colorIdx * 2 + mode;
+    let slot = portraitCache.get(key);
+    if (slot !== undefined) return slot;
+    slot = portraitCache.size;
+    flush();
+    gl.disableVertexAttribArray(loc.aPos);
+    gl.disableVertexAttribArray(loc.aUv);
+    gl.disableVertexAttribArray(loc.aColor);
+    const headshot = mode > 0;
+    portraitOpts.color = ROBOT_COLORS[colorIdx] || ROBOT_COLORS[0];
+    portraitOpts.time = PORTRAIT_BAKE_TIME;
+    portraitOpts.orbit.yaw = headshot ? HEADSHOT_YAW : PORTRAIT_YAW;
+    portraitOpts.orbit.pitch = headshot ? HEADSHOT_PITCH : PORTRAIT_PITCH;
+    portraitOpts.orbit.halfV = headshot ? HEADSHOT_HALFV : PORTRAIT_HALFV;
+    portraitOpts.orbit.center = headshot ? HEADSHOT_CENTER : PORTRAIT_CENTER;
+    portraitTarget.x = (slot % portraitCols) * FX_TILE;
+    portraitTarget.y = Math.floor(slot / portraitCols) * FX_TILE;
+    robotPipe.render(portraitOpts, portraitTarget);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    bindBatchState();
+    portraitCache.set(key, slot);
+    return slot;
+  }
+  const gunBakeOpts = {
     weaponIdx: 0, angle: 0, px: ROBOT_TILE / GUN_ART, transparent: true,
   };
-  const fxTarget = { fbo: fxFbo, x: 0, y: 0, w: FX_TILE, h: FX_TILE };
+  const gunBakeTarget = { fbo: portraitFbo, x: 0, y: 0, w: GUN_ART, h: GUN_ART };
+  // Slot of the ground-gun sprite for `weaponIdx`, baked on first use: one
+  // renderGun at ANGLE 0 into a GUN_ART-texel corner of a cache tile. The
+  // camera is a true top-down ortho (robot-core topDownVP) and the model
+  // lies flat, so every visible face's normal points straight up: spinning
+  // the model about the vertical axis and rotating the baked sprite in 2D
+  // are equivalent (shading is yaw-invariant). Same mid-stream bake
+  // discipline as portraitSlotFor above.
+  function gunSlotFor(weaponIdx) {
+    const key = -1 - weaponIdx; // negative keys: guns; >= 0: portraits
+    let slot = portraitCache.get(key);
+    if (slot !== undefined) return slot;
+    slot = portraitCache.size;
+    flush();
+    gl.disableVertexAttribArray(loc.aPos);
+    gl.disableVertexAttribArray(loc.aUv);
+    gl.disableVertexAttribArray(loc.aColor);
+    gunBakeOpts.weaponIdx = weaponIdx;
+    gunBakeTarget.x = (slot % portraitCols) * FX_TILE;
+    gunBakeTarget.y = Math.floor(slot / portraitCols) * FX_TILE;
+    robotPipe.renderGun(gunBakeOpts, gunBakeTarget);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    bindBatchState();
+    portraitCache.set(key, slot);
+    return slot;
+  }
 
   /* ---- POSTFX: offscreen scene target + the full-screen post program ---- */
   const postProg = gl.createProgram();
@@ -742,10 +808,21 @@ export function initRenderer(canvas) {
   }
   // The framebuffer the batch draws into: null (the canvas) normally, the
   // scene FBO on frames that end in a post pass, the pixel-group scratch
-  // target inside a PIX_BEGIN/PIX_END group — plus the target's size (the
-  // viewport and the vertex shader's uRes).
+  // target inside a PIX_BEGIN/PIX_END group — plus the target's size:
+  // batchW/H is the coordinate space (the vertex shader's uRes), batchVW/VH
+  // the pixel size of the target (the viewport). They differ only on the
+  // canvas / scene targets, where the wasm records in CSS pixels but the
+  // backing buffer is sized to physical device pixels (CSS x data-dpr, see
+  // Graphics::sync_size) — the viewport mapping does the upscale, so every
+  // primitive lands on real screen pixels with no browser rescale. Group
+  // scratch targets are 1:1 (texels).
   let batchFbo = null;
   let batchW = 1, batchH = 1;
+  let batchVW = 1, batchVH = 1;
+  // This frame's canvas sizes: logical (CSS px — what the command stream is
+  // recorded in) and physical (the backing buffer).
+  let frameW = 1, frameH = 1;
+  let framePW = 1, framePH = 1;
   // The POSTFX request of the current frame (kind, t, r, g, b) or null.
   const postfx = { kind: 0, t: 0, r: 0, g: 0, b: 0 };
   let postfxActive = false;
@@ -798,8 +875,10 @@ export function initRenderer(canvas) {
     gl.bindTexture(gl.TEXTURE_2D, null);
     if (postLoc.aPos !== loc.aPos) gl.disableVertexAttribArray(postLoc.aPos);
     batchFbo = null;
-    batchW = w;
-    batchH = h;
+    batchW = frameW;
+    batchH = frameH;
+    batchVW = framePW;
+    batchVH = framePH;
     bindBatchState();
     gl.uniform1i(loc.uTex, 0);
   }
@@ -902,8 +981,10 @@ export function initRenderer(canvas) {
     warpRead = write;
     warpLive = true;
     batchFbo = null;
-    batchW = w;
-    batchH = h;
+    batchW = frameW;
+    batchH = frameH;
+    batchVW = framePW;
+    batchVH = framePH;
     bindBatchState();
     gl.uniform1i(loc.uTex, 0);
   }
@@ -967,6 +1048,7 @@ export function initRenderer(canvas) {
       px, w, h, tw, th, tex: tgt.tex, fbo: tgt.fbo,
       outer: pix, outerM: m, outerStack: stack.length,
       outerFbo: batchFbo, outerW: batchW, outerH: batchH,
+      outerVW: batchVW, outerVH: batchVH,
     };
     pixStack.push(g);
     pix = g;
@@ -975,6 +1057,8 @@ export function initRenderer(canvas) {
     batchFbo = g.fbo;
     batchW = tw;
     batchH = th;
+    batchVW = tw;
+    batchVH = th;
     bindBatchState();
     // Clear just the region this group uses (scissored; clears ignore the viewport).
     gl.enable(gl.SCISSOR_TEST);
@@ -994,15 +1078,18 @@ export function initRenderer(canvas) {
     batchFbo = g.outerFbo;
     batchW = g.outerW;
     batchH = g.outerH;
+    batchVW = g.outerVW;
+    batchVH = g.outerVH;
     bindBatchState();
     // The group texels are premultiplied (drawn with straight-alpha colour
     // over transparent black, coverage accumulated), so composite them with
     // (ONE, 1-a) — into the canvas or into an outer group's texels alike.
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     setTexture(g.tex);
-    // Snap the on-screen origin to whole pixels of the CURRENT target (device
-    // pixels, or the outer group's texels) so the art pixels do not shimmer
-    // as the object drifts by fractions of a pixel.
+    // Snap the on-screen origin to whole pixels of the CURRENT target's
+    // coordinate space (CSS pixels on the canvas/scene, the outer group's
+    // texels inside a group) so the art pixels do not shimmer as the object
+    // drifts by fractions of a pixel.
     const sx = m[0] * x + m[2] * y + m[4];
     const sy = m[1] * x + m[3] * y + m[5];
     const dx = Math.round(sx) - sx, dy = Math.round(sy) - sy;
@@ -1035,7 +1122,7 @@ export function initRenderer(canvas) {
   // runs after them (and it is cheap enough to be defensive about it).
   function bindBatchState() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, batchFbo);
-    gl.viewport(0, 0, batchW, batchH);
+    gl.viewport(0, 0, batchVW, batchVH);
     gl.useProgram(prog);
     gl.uniform2f(loc.uRes, batchW, batchH);
     gl.disable(gl.DEPTH_TEST);
@@ -1080,35 +1167,6 @@ export function initRenderer(canvas) {
       shogTarget.y = Math.floor(i / shogCols) * SHOG_TILE;
       shogPipe.render(shogOpts, shogTarget);
     }
-    for (let i = 0; i < fxUsed; i++) {
-      const q = i * 3;
-      fxTarget.x = (i % fxCols) * FX_TILE;
-      fxTarget.y = Math.floor(i / fxCols) * FX_TILE;
-      const kind = fxQueue[q];
-      if (kind < 0.5 || kind > 1.5) {
-        // portrait: slow rotation (a gentle sway) around the vertical axis;
-        // kind 2 = headshot (the camera pushed in / raised to head height)
-        const headshot = kind > 1.5;
-        portraitOpts.color = ROBOT_COLORS[fxQueue[q + 1] | 0] || ROBOT_COLORS[0];
-        portraitOpts.time = fxQueue[q + 2];
-        portraitOpts.orbit.yaw = headshot
-          ? HEADSHOT_YAW + HEADSHOT_SWAY * Math.sin(fxQueue[q + 2] * PORTRAIT_SWAY_W)
-          : PORTRAIT_YAW + PORTRAIT_SWAY * Math.sin(fxQueue[q + 2] * PORTRAIT_SWAY_W);
-        portraitOpts.orbit.pitch = headshot ? HEADSHOT_PITCH : PORTRAIT_PITCH;
-        portraitOpts.orbit.halfV = headshot ? HEADSHOT_HALFV : PORTRAIT_HALFV;
-        portraitOpts.orbit.center = headshot ? HEADSHOT_CENTER : PORTRAIT_CENTER;
-        fxTarget.w = FX_TILE;
-        fxTarget.h = FX_TILE;
-        robotPipe.render(portraitOpts, fxTarget);
-      } else {
-        // ground gun: tiny art-resolution rect in the tile's corner
-        gunOpts.weaponIdx = fxQueue[q + 1] | 0;
-        gunOpts.angle = fxQueue[q + 2];
-        fxTarget.w = GUN_ART;
-        fxTarget.h = GUN_ART;
-        robotPipe.renderGun(gunOpts, fxTarget);
-      }
-    }
     // The pipelines sampled their own scene texture on TEXTURE0; drop it so an
     // atlas is never both bound for sampling and attached to a framebuffer.
     gl.bindTexture(gl.TEXTURE_2D, null);
@@ -1121,11 +1179,10 @@ export function initRenderer(canvas) {
   let boundTex = null;
   function flush() {
     // before the batch that samples them
-    if (robotUsed > 0 || shogUsed > 0 || fxUsed > 0) renderQueuedSprites();
+    if (robotUsed > 0 || shogUsed > 0) renderQueuedSprites();
     if (vCount === 0) {
       robotUsed = 0;
       shogUsed = 0;
-      fxUsed = 0;
       return;
     }
     gl.bindTexture(gl.TEXTURE_2D, boundTex || whiteTex);
@@ -1135,7 +1192,6 @@ export function initRenderer(canvas) {
     vCount = 0;
     robotUsed = 0; // the quads sampling this batch's tiles are submitted: recycle
     shogUsed = 0;
-    fxUsed = 0;
   }
 
   function setTexture(tex) {
@@ -1508,62 +1564,95 @@ export function initRenderer(canvas) {
     quad(x - h, y - h, sizePx, sizePx, u0, v0, u1, v1, 1, 1, 1, 1);
   }
 
-  /* ---- pixel-sprites (PORTRAIT / GUNPICKUP): queue a live art-resolution
-     render into a NEAREST tile, draw it as an upscaled quad ---- */
-  function fxSlotTake(kind, a, b) {
-    setTexture(fxTex);
-    if (fxUsed >= fxSlots || vCount + 6 > MAX_VERTS) flush();
-    const slot = fxUsed++;
-    const q = slot * 3;
-    fxQueue[q] = kind;
-    fxQueue[q + 1] = a;
-    fxQueue[q + 2] = b;
-    return slot;
-  }
-
-  // Dialogue portrait: the live 3D robot from a 3/4 orbit camera, gently
-  // swaying, rendered at FX_TILE texels and NEAREST-upscaled to sizePx.
+  // Dialogue portrait: the baked (colorIdx, mode) face from the persistent
+  // portrait cache — a fixed-camera, frozen-pose 64-texel render made once —
+  // NEAREST-upscaled to sizePx on a quad that gently ROCKS around its centre
+  // (`time` only drives the 2D tilt: the classic Hotline-Miami portrait).
   // mode 0 = bust (slightly-elevated full-body camera), mode 1 = headshot
   // (pushed in / raised to head height: the face fills the tile). Screen
   // space (through the transform stack, like everything).
   function drawPortrait(colorIdx, x, y, sizePx, time, mode) {
-    const slot = fxSlotTake(mode > 0.5 ? 2 : 0, colorIdx, time);
-    const tx = (slot % fxCols) * FX_TILE;
-    const ty = Math.floor(slot / fxCols) * FX_TILE;
+    const ci = ROBOT_COLORS[colorIdx | 0] ? colorIdx | 0 : 0;
+    const slot = portraitSlotFor(ci, mode > 0.5 ? 1 : 0); // bakes on first use
+    setTexture(portraitTex);
+    if (vCount + 6 > MAX_VERTS) flush();
+    const tx = (slot % portraitCols) * FX_TILE;
+    const ty = Math.floor(slot / portraitCols) * FX_TILE;
     // v flipped: pass 2 renders bottom-up (see drawRobot)
-    const u0 = tx / FX_ATLAS_SIZE;
-    const v0 = (ty + FX_TILE) / FX_ATLAS_SIZE;
-    const u1 = (tx + FX_TILE) / FX_ATLAS_SIZE;
-    const v1 = ty / FX_ATLAS_SIZE;
+    const u0 = tx / PORTRAIT_ATLAS_SIZE;
+    const v0 = (ty + FX_TILE) / PORTRAIT_ATLAS_SIZE;
+    const u1 = (tx + FX_TILE) / PORTRAIT_ATLAS_SIZE;
+    const v1 = ty / PORTRAIT_ATLAS_SIZE;
+    // The rock: the finished pixel image tilts as a rigid sprite (rotated
+    // QUAD corners, NEAREST — chunky pixels and all). Phase-shifted by the
+    // draw position so side-by-side heads (SWARM) never rock in unison, on
+    // top of the per-head `time` offsets render_dialogue already passes.
+    const rock =
+      Math.sin(time * PORTRAIT_ROCK_W + x * 0.013 + y * 0.007) * PORTRAIT_ROCK_AMP;
     const h = sizePx / 2;
-    quad(x - h, y - h, sizePx, sizePx, u0, v0, u1, v1, 1, 1, 1, 1);
+    const c = Math.cos(rock), s = Math.sin(rock);
+    const ex = h * c, ey = h * s; // half-extent along the rotated x axis
+    const fx = -h * s, fy = h * c; // half-extent along the rotated y axis
+    vert(x - ex - fx, y - ey - fy, u0, v0, 1, 1, 1, 1);
+    vert(x + ex - fx, y + ey - fy, u1, v0, 1, 1, 1, 1);
+    vert(x + ex + fx, y + ey + fy, u1, v1, 1, 1, 1, 1);
+    vert(x - ex - fx, y - ey - fy, u0, v0, 1, 1, 1, 1);
+    vert(x + ex + fx, y + ey + fy, u1, v1, 1, 1, 1, 1);
+    vert(x - ex + fx, y - ey + fy, u0, v1, 1, 1, 1, 1);
   }
 
-  // Weapon lying on the ground: its 3D model, top-down, spun to `angle`
-  // (radians, screen convention), rendered at GUN_ART texels and
-  // NEAREST-upscaled to sizePx. World space (through the transform stack).
+  // Weapon lying on the ground: its 3D model top-down at GUN_ART texels,
+  // baked ONCE per weaponIdx at angle 0 into the persistent pixel-sprite
+  // cache, then NEAREST-upscaled to sizePx on a quad ROTATED in 2D by
+  // `angle` (radians, screen convention: positive = clockwise) around its
+  // centre — for the true top-down ortho camera the two are equivalent (see
+  // gunSlotFor). World space (through the transform stack).
   function drawGunPickup(weaponIdx, x, y, angle, sizePx) {
-    const slot = fxSlotTake(1, weaponIdx, angle);
-    const tx = (slot % fxCols) * FX_TILE;
-    const ty = Math.floor(slot / fxCols) * FX_TILE;
-    const u0 = tx / FX_ATLAS_SIZE;
-    const v0 = (ty + GUN_ART) / FX_ATLAS_SIZE;
-    const u1 = (tx + GUN_ART) / FX_ATLAS_SIZE;
-    const v1 = ty / FX_ATLAS_SIZE;
+    // renderGun falls back to the bar model for out-of-range indices; clamp
+    // the same way so the cache stays bounded to the 4 real weapons.
+    const wi = weaponIdx >= 0 && weaponIdx < 4 ? weaponIdx | 0 : 0;
+    const slot = gunSlotFor(wi); // bakes on first use
+    setTexture(portraitTex);
+    if (vCount + 6 > MAX_VERTS) flush();
+    const tx = (slot % portraitCols) * FX_TILE;
+    const ty = Math.floor(slot / portraitCols) * FX_TILE;
+    // v flipped: pass 2 renders bottom-up (see drawRobot)
+    const u0 = tx / PORTRAIT_ATLAS_SIZE;
+    const v0 = (ty + GUN_ART) / PORTRAIT_ATLAS_SIZE;
+    const u1 = (tx + GUN_ART) / PORTRAIT_ATLAS_SIZE;
+    const v1 = ty / PORTRAIT_ATLAS_SIZE;
     const h = sizePx / 2;
-    quad(x - h, y - h, sizePx, sizePx, u0, v0, u1, v1, 1, 1, 1, 1);
+    const c = Math.cos(angle), s = Math.sin(angle);
+    const ex = h * c, ey = h * s; // half-extent along the rotated x axis
+    const fx = -h * s, fy = h * c; // half-extent along the rotated y axis
+    vert(x - ex - fx, y - ey - fy, u0, v0, 1, 1, 1, 1);
+    vert(x + ex - fx, y + ey - fy, u1, v0, 1, 1, 1, 1);
+    vert(x + ex + fx, y + ey + fy, u1, v1, 1, 1, 1, 1);
+    vert(x - ex - fx, y - ey - fy, u0, v0, 1, 1, 1, 1);
+    vert(x + ex + fx, y + ey + fy, u1, v1, 1, 1, 1, 1);
+    vert(x - ex + fx, y - ey + fy, u0, v1, 1, 1, 1, 1);
   }
 
   /* ---- frame execution ---- */
   function frameRender(cmds, textArena) {
-    const w = canvas.width, h = canvas.height;
+    // Backing buffer = CSS size x devicePixelRatio (Graphics::sync_size, which
+    // publishes the ratio as data-dpr); the stream's coordinates are CSS px.
+    const pw = canvas.width, ph = canvas.height;
+    const dpr = parseFloat(canvas.dataset.dpr) || 1;
+    const w = pw / dpr, h = ph / dpr;
+    frameW = w;
+    frameH = h;
+    framePW = pw;
+    framePH = ph;
     // A POSTFX anywhere in the frame routes the whole frame through the
     // offscreen scene target (decided up front, before the first draw).
     postfxActive = scanPostfx(cmds);
-    if (postfxActive) ensureSceneTarget(w, h);
+    if (postfxActive) ensureSceneTarget(pw, ph);
     batchFbo = postfxActive ? sceneFbo : null;
     batchW = w;
     batchH = h;
+    batchVW = pw;
+    batchVH = ph;
     // A group left open by a truncated stream must not leak into this frame.
     pix = null;
     pixDepth = 0;
@@ -1578,7 +1667,6 @@ export function initRenderer(canvas) {
     vCount = 0;
     robotUsed = 0;
     shogUsed = 0;
-    fxUsed = 0;
 
     let i = 0;
     const n = cmds.length;
@@ -1689,9 +1777,10 @@ export function initRenderer(canvas) {
     }
     while (pixStack.length) pixEnd(0, 0); // unterminated groups: close them where they are
     flush();
+    // The post passes work on the final pixels: physical resolution.
     const warpFrame = postfxActive && (postfx.kind | 0) === 10;
-    if (warpFrame) runWarpPass(w, h);
-    else if (postfxActive) runPostPass(w, h);
+    if (warpFrame) runWarpPass(pw, ph);
+    else if (postfxActive) runPostPass(pw, ph);
     if (!warpFrame) warpLive = false; // next warp frame starts from a clean accumulator
   }
 

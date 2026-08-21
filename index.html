@@ -35,6 +35,10 @@
             width: 100%;
             height: 100%;
             display: block;
+            /* The canvas is focusable (tabindex) so it can take keyboard
+               input; without this, Chrome draws its blue focus ring around
+               the whole game whenever it has focus — i.e. always. */
+            outline: none;
         }
         #loading {
             position: absolute;
@@ -166,6 +170,10 @@
                 show('SAVE FAILED: ' + e.message + ' — serve via `python3 serve.py`, token from .editor-token', 'bad');
             });
         }
+        // Tiny settings store for wasm (the SETTINGS modal): localStorage,
+        // string values, null when unset.
+        window.getSetting = function (name) { try { return localStorage.getItem('om.' + name); } catch (e) { return null; } };
+        window.setSetting = function (name, value) { try { localStorage.setItem('om.' + name, value); } catch (e) {} };
         // Open an external link in a new tab (called from wasm — the ABOUT
         // modal's repo URL). noopener: the new tab gets no handle back.
         window.openExternal = function (url) { window.open(url, '_blank', 'noopener'); };
@@ -177,12 +185,12 @@
         };
         // ?viz PROPS page SAVE: props/props.json (src/props.rs settings_json);
         // the generated src/props_data.rs is refreshed by `make gen-props`.
-        window.vizSaveProps = function (json) { vizPutJson('/props/props.json', json, 'make gen-props'); };
+        window.vizSaveProps = function (json) { vizPutJson('props/props.json', json, 'make gen-props'); };
         // ?viz LEVELS tab (native editor, src/editor_ui.rs) SAVE: one floor,
         // levels/<file> (src/editor.rs to_json); then `make gen-levels`.
         window.vizSaveLevel = function (file, json) {
             if (!/^floor_[0-9a-z]+\.json$/.test(file)) { throw new Error('bad level file name ' + file); }
-            vizPutJson('/levels/' + file, json, 'make gen-levels');
+            vizPutJson('levels/' + file, json, 'make gen-levels');
         };
     </script>
     <script type="module">

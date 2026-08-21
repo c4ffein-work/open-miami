@@ -109,7 +109,7 @@
   }
   async function fetchJSON(path) {
     // data paths are repo-root relative ("levels/…"); the page lives in tools/
-    const r = await fetch("/" + path.replace(/^\/+/, "") + "?t=" + Date.now(), { cache: "no-store" });
+    const r = await fetch("../" + path.replace(/^\/+/, "") + "?t=" + Date.now(), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status + " " + path);
     return r.json();
   }
@@ -176,7 +176,7 @@
     renderErrors(v);
     if (v.errors.length) { status("SAVE BLOCKED: " + v.errors.length + " error" + (v.errors.length > 1 ? "s" : ""), "bad"); return false; }
     const text = currentText();
-    const path = "/" + S.dir + S.cur.file;
+    const path = "../" + S.dir + S.cur.file;
     status("SAVING…", "");
     try {
       // Writes need the shared secret (serve.py prints it at startup as

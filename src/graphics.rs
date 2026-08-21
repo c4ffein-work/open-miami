@@ -52,6 +52,12 @@ const TEXT_SEP: char = '\u{1f}';
 #[cfg(target_arch = "wasm32")]
 pub struct Graphics {
     canvas: HtmlCanvasElement,
+    // devicePixelRatio the backing buffer was last sized with. The game keeps
+    // recording in CSS-pixel coordinates (width()/height() divide by this);
+    // renderer.js reads the same value back from the canvas's `data-dpr`
+    // attribute and scales at the viewport, so one canvas pixel is one
+    // physical screen pixel — no browser rescale, no blur on HiDPI.
+    dpr: RefCell<f64>,
     // Interior mutability keeps the draw API `&self`, matching the previous
     // canvas-context backend so no call site changes.
     cmds: RefCell<Vec<f32>>,
@@ -74,36 +80,70 @@ impl Graphics {
             .dyn_into::<HtmlCanvasElement>()
             .map_err(|_| "Element with id 'glcanvas' is not a canvas")?;
 
-        // Set canvas size to window size
-        let width = window
-            .inner_width()
-            .map_err(|_| "Failed to get window width")?
-            .as_f64()
-            .unwrap_or(960.0) as u32;
-        let height = window
-            .inner_height()
-            .map_err(|_| "Failed to get window height")?
-            .as_f64()
-            .unwrap_or(720.0) as u32;
-        canvas.set_width(width);
-        canvas.set_height(height);
-
         // The WebGL context is created and owned by renderer.js; Rust never
         // touches the canvas beyond sizing it.
-        Ok(Graphics {
+        let graphics = Graphics {
             canvas,
+            dpr: RefCell::new(1.0),
             cmds: RefCell::new(Vec::with_capacity(4096)),
             texts: RefCell::new(String::new()),
             text_count: RefCell::new(0),
-        })
+        };
+        graphics.sync_size();
+        Ok(graphics)
     }
 
+    /// Match the backing buffer to the canvas's CSS size x devicePixelRatio,
+    /// so the frame is rendered at real screen pixels whatever the display
+    /// scaling. Publishes the ratio as `data-dpr` on the canvas for
+    /// renderer.js (buffer size and attribute always change together, so the
+    /// renderer's CSS-pixel space always matches what the game recorded).
+    /// Cheap when nothing changed; the game loop polls it about once a second
+    /// to follow window resizes, browser zoom and monitor moves.
+    pub fn sync_size(&self) {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let dpr = window.device_pixel_ratio().max(0.1);
+        // CSS size of the canvas (it is styled 100% x 100% of the viewport);
+        // fall back to the window's inner size if layout hasn't run yet.
+        let (css_w, css_h) = match (self.canvas.client_width(), self.canvas.client_height()) {
+            (w, h) if w > 0 && h > 0 => (w as f64, h as f64),
+            _ => (
+                window
+                    .inner_width()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(960.0),
+                window
+                    .inner_height()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(720.0),
+            ),
+        };
+        let width = (css_w * dpr).round().max(1.0) as u32;
+        let height = (css_h * dpr).round().max(1.0) as u32;
+        if width == self.canvas.width()
+            && height == self.canvas.height()
+            && (dpr - *self.dpr.borrow()).abs() < 1e-6
+        {
+            return;
+        }
+        self.canvas.set_width(width);
+        self.canvas.set_height(height);
+        let _ = self.canvas.set_attribute("data-dpr", &format!("{dpr}"));
+        *self.dpr.borrow_mut() = dpr;
+    }
+
+    // Logical (CSS-pixel) size — the coordinate space every draw call, HUD
+    // layout and mouse event lives in, independent of the display scaling.
     pub fn width(&self) -> f32 {
-        self.canvas.width() as f32
+        (self.canvas.width() as f64 / *self.dpr.borrow()) as f32
     }
 
     pub fn height(&self) -> f32 {
-        self.canvas.height() as f32
+        (self.canvas.height() as f64 / *self.dpr.borrow()) as f32
     }
 
     /// Hand the accumulated frame to the JS renderer and reset for the next
@@ -295,20 +335,21 @@ impl Graphics {
         ]);
     }
 
-    /// Draw a DIALOGUE PORTRAIT: the live 3D robot rendered by the JS
-    /// robot-core pipeline from a 3/4 orbit camera that slowly rotates
-    /// around the model's vertical axis (a gentle ~±25° sway at 0.15 Hz,
-    /// derived from `time`, so the lit face keeps toward the viewer),
-    /// rasterized at a small art resolution (64 texels) and upscaled
-    /// NEAREST — a pixelated, visibly rotating character portrait.
-    /// `mode` picks the framing: 0 = the full head-to-toe BUST (the
-    /// slightly-elevated camera), 1 = a HEADSHOT — the camera pushed in and
-    /// raised to head height so the face fills most of the tile (the
-    /// letterbox dialogue bar's face). `color_idx` follows the
+    /// Draw a DIALOGUE PORTRAIT: a Hotline-Miami-style pixel-art face.
+    /// The renderer bakes each (`color_idx`, `mode`) portrait through the
+    /// JS robot-core pipeline exactly ONCE — a fixed 3/4 camera, a frozen
+    /// neutral idle frame, rasterized at a small art resolution (64
+    /// texels) — then draws the cached image upscaled NEAREST on a quad
+    /// that gently ROCKS in 2D around its centre (~±5°, driven by
+    /// `time`): the finished pixel image tilts as a rigid sprite, chunky
+    /// pixels and all. `mode` picks the framing: 0 = the full head-to-toe
+    /// BUST (the slightly-elevated camera), 1 = a HEADSHOT — the camera
+    /// pushed in and raised to head height so the face fills most of the
+    /// tile (the letterbox dialogue bar's face). `color_idx` follows the
     /// [`draw_robot`](Self::draw_robot) colour table. Screen space (through
     /// the current transform); the portrait is a square quad of `size_px`
-    /// px centered on `center`. `time` drives both the idle animation and
-    /// the sway.
+    /// px centered on `center`. `time` only phases the rock — offsetting
+    /// it desynchronizes side-by-side portraits.
     pub fn draw_robot_portrait(
         &self,
         color_idx: u32,
@@ -332,9 +373,12 @@ impl Graphics {
     /// box-built guns the robots hold, plus the melee bar), seen from the
     /// game's true top-down camera, laid flat on its side and spun to
     /// `angle` (radians, screen convention: 0 = muzzle toward +x, positive
-    /// = clockwise), rasterized at a small art resolution and upscaled
-    /// NEAREST (pixel-art, like the portrait). World space (through the
-    /// current transform); a square quad of `size_px` px on `center`.
+    /// = clockwise), rasterized ONCE per weapon at a small art resolution
+    /// (the JS renderer bakes it at angle 0 into its persistent sprite
+    /// cache and rotates the quad in 2D — equivalent under the top-down
+    /// ortho camera) and upscaled NEAREST (pixel-art, like the portrait).
+    /// World space (through the current transform); a square quad of
+    /// `size_px` px on `center`.
     ///   weapon_idx: 0 bar (melee), 1 pistol, 2 machinegun, 3 shotgun
     pub fn draw_gun_pickup(&self, weapon_idx: u32, center: Vec2, angle: f32, size_px: f32) {
         self.push(&[

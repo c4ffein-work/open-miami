@@ -284,23 +284,29 @@ impl System for AISystem {
             None => return, // No player, nothing to do
         };
 
-        // Get walls before any mutable borrows (clone to avoid borrow conflicts)
-        let walls: Vec<Wall> = world.walls().to_vec();
-
         // Pull the world's RNG state into a local so it can be threaded through
         // the AI update without conflicting with component borrows of `world`.
         // It is written back at the end so the sequence continues across ticks.
         let mut rng = world.rng_state();
 
-        // Reuse the cached navigation grid unless the walls changed (level swap)
+        // Reuse the cached navigation grid unless the walls changed (level
+        // swap). The cache's owned wall list doubles as the wall slice used
+        // through the enemy loop below (it is borrowed from `self`, not
+        // `world`, so it can outlive the mutable component borrows): the
+        // wall clone is only paid when the walls actually changed.
         let walls_changed = match &self.nav_cache {
-            Some((cached_walls, _)) => *cached_walls != walls,
+            Some((cached_walls, _)) => cached_walls.as_slice() != world.walls(),
             None => true,
         };
         if walls_changed {
-            self.nav_cache = Some((walls.clone(), NavigationGrid::new(&walls)));
+            let walls = world.walls().to_vec();
+            let grid = NavigationGrid::new(&walls);
+            self.nav_cache = Some((walls, grid));
         }
-        let nav_grid = &self.nav_cache.as_ref().unwrap().1;
+        let (walls, nav_grid) = {
+            let cache = self.nav_cache.as_ref().unwrap();
+            (cache.0.as_slice(), &cache.1)
+        };
 
         // Query all enemies
         let enemies: Vec<Entity> = world.query::<Enemy>();
@@ -327,7 +333,7 @@ impl System for AISystem {
                 .is_some_and(|ai| ai.state == AIState::Passive)
             {
                 if crate::systems::passive::update_passive(
-                    world, entity, &mut rng, nav_grid, &walls, dt,
+                    world, entity, &mut rng, nav_grid, walls, dt,
                 ) {
                     passive_hurt = true;
                 }
@@ -354,7 +360,7 @@ impl System for AISystem {
 
             // Calculate distance to player and line of sight
             let distance = enemy_pos.distance_to(&player_pos);
-            let has_los = has_line_of_sight(enemy_pos.to_vec2(), player_pos.to_vec2(), &walls);
+            let has_los = has_line_of_sight(enemy_pos.to_vec2(), player_pos.to_vec2(), walls);
 
             // Get enemy rotation to check vision cone
             let enemy_rotation = world
@@ -400,13 +406,13 @@ impl System for AISystem {
                                     // HUNTER soldier: disciplined patrol (move,
                                     // sweep a look-around, pause, repeat).
                                     Self::update_wander_behavior(
-                                        &mut rng, ai, &enemy_pos, &walls, dt,
+                                        &mut rng, ai, &enemy_pos, walls, dt,
                                     );
                                 }
                                 EnemyType::Wandering => {
                                     // DRIFTER feral: erratic, objective-less
                                     // twitching — no careful look-around.
-                                    Self::update_feral_wander(&mut rng, ai, &enemy_pos, &walls, dt);
+                                    Self::update_feral_wander(&mut rng, ai, &enemy_pos, walls, dt);
                                 }
                             }
                         }
@@ -532,7 +538,7 @@ impl System for AISystem {
                     let has_clear_path = has_line_of_sight_with_padding(
                         enemy_pos.to_vec2(),
                         target.to_vec2(),
-                        &walls,
+                        walls,
                         wall_padding,
                     );
 
@@ -615,7 +621,7 @@ impl System for AISystem {
                         let has_clear_path = has_line_of_sight_with_padding(
                             enemy_pos.to_vec2(),
                             target.to_vec2(),
-                            &walls,
+                            walls,
                             wall_padding,
                         );
 

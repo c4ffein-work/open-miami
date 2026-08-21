@@ -179,37 +179,56 @@ function cross(a,b){return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-
 function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
 function norm(a){const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l];}
 
-/* ---------- shaders ---------- */
+/* ---------- shaders ----------
+   The robot scene pass is MATRIX-PALETTE SKINNED: the whole robot (and the
+   held weapon / a ground weapon) lives in ONE static merged vertex buffer, a
+   per-vertex part index selects the part's pose matrix out of a mat4 uniform
+   array, and per-vertex selectors pick the body/accent colors out of a small
+   color table — so a robot is ONE drawArrays (two when armed: body + weapon)
+   instead of one call per box. Uniform budget: 20 mat4 (80 vec4) + uVP (4) +
+   6 vec3 colors (6) = 90 vec4, well inside the WebGL1 minimum of 128.
+   Lighting / part-id-in-alpha are EXACTLY the legacy per-part shader: the
+   normal is transformed by the pose matrix's upper-left 3x3 (what
+   M4.normalFromModel produced) and the color math is unchanged, the values
+   just arrive through varyings (constant across a part) instead of uniforms. */
+const PALETTE_PARTS = 20; // 15 body slots (incl. the bare-hand barrel) + 5 weapon boxes
+const WEAPON_SLOT0 = 15; // palette slot of a held weapon's first box
 const sceneVS = `
 attribute vec3 aPos;
 attribute vec3 aNormal;
-uniform mat4 uMVP;
-uniform mat3 uNormalMat;
+attribute vec4 aExtra;  // x part/palette index, y color sel, z accent sel, w part id
+uniform mat4 uVP;
+uniform mat4 uPart[${PALETTE_PARTS}];
+uniform vec3 uColors[6];
 varying vec3 vN;
-varying float vDepth;
+varying vec3 vColor;
+varying vec3 vAccent;
+varying float vId;
 void main(){
-  vec4 p = uMVP * vec4(aPos,1.0);
-  gl_Position = p;
-  vN = normalize(uNormalMat * aNormal);
-  vDepth = p.z;
+  mat4 M = uPart[int(aExtra.x + 0.5)];
+  gl_Position = uVP * (M * vec4(aPos,1.0));
+  // upper-left 3x3 of the pose matrix = the legacy uNormalMat
+  vN = normalize(mat3(M[0].xyz, M[1].xyz, M[2].xyz) * aNormal);
+  vColor = uColors[int(aExtra.y + 0.5)];
+  vAccent = uColors[int(aExtra.z + 0.5)];
+  vId = aExtra.w;
 }
 `;
 const sceneFS = `
 precision mediump float;
 varying vec3 vN;
-varying float vDepth;
-uniform vec3 uColor;
-uniform vec3 uAccent;
-uniform float uId;
+varying vec3 vColor;
+varying vec3 vAccent;
+varying float vId;
 void main(){
   vec3 L = normalize(vec3(0.35, 0.9, 0.45));
   float ndl = max(dot(normalize(vN), L), 0.0);
   float amb = 0.35;
   float shade = amb + ndl*0.75;
-  vec3 base = mix(uColor, uAccent, clamp(vN.y*0.5+0.2,0.0,1.0)*0.4);
+  vec3 base = mix(vColor, vAccent, clamp(vN.y*0.5+0.2,0.0,1.0)*0.4);
   vec3 col = base * shade;
   // store part id in alpha so post pass can detect part boundaries as edges
-  gl_FragColor = vec4(col, uId);
+  gl_FragColor = vec4(col, vId);
 }
 `;
 const postVS = `
@@ -294,6 +313,71 @@ function makeCube(){
     for(const tri of [[a,b,c],[a,c,d]]) for(const vtx of tri){ p.push(...vtx); n.push(...f.n); }
   }
   return {pos:new Float32Array(p), nrm:new Float32Array(n), count:p.length/3};
+}
+
+/* ---------- the merged skinned mesh (built once per pipeline) ----------
+   Every box any robot render can need, as instances of the unit cube tagged
+   with (palette index, color selector, accent selector, part id) — 10 floats
+   per vertex, interleaved. Layout (in the LEGACY DRAW ORDER, so depth-equal
+   ties resolve identically):
+     [0]   14 body cubes  (torso, head, visor, hips, legs, arms)
+     [504] the bare-hand barrel cube (drawn by extending the body range)
+     then the held weapon models (palette slots 15+), then the ground weapon
+     models (palette slots 0+; their own color/id tags — see renderGun).
+   Color selectors index the per-render uColors table:
+     0 pal.body  1 pal.accent  2 pal.trim  3 GUN_METAL  4 GUN_DARK  5 GROUND_ACCENT */
+const COL_BODY=0, COL_ACCENT=1, COL_TRIM=2, COL_METAL=3, COL_DARK=4, COL_GROUND=5;
+// (colorSel, accentSel, id) per body palette slot — the exact colors/ids the
+// legacy _drawPart calls passed (ids: 0.4/0.45/0.5 +- 0.32 legs, 0.6/0.65
+// +- 0.62 arms; the clamping of -0.02 / 1.2x to the 8-bit alpha range is
+// unchanged, it happens at framebuffer write time exactly as before).
+const BODY_PART_TAGS = [
+  [COL_BODY,   COL_ACCENT, 0.2],        // 0  torso
+  [COL_BODY,   COL_ACCENT, 0.35],       // 1  head
+  [COL_ACCENT, COL_ACCENT, 0.9],        // 2  visor strip
+  [COL_TRIM,   COL_BODY,   0.25],       // 3  hips
+  [COL_BODY,   COL_ACCENT, 0.4 -0.32],  // 4  L thigh
+  [COL_TRIM,   COL_ACCENT, 0.45-0.32],  // 5  L shin
+  [COL_TRIM,   COL_BODY,   0.5 -0.32],  // 6  L foot
+  [COL_BODY,   COL_ACCENT, 0.4 +0.32],  // 7  R thigh
+  [COL_TRIM,   COL_ACCENT, 0.45+0.32],  // 8  R shin
+  [COL_TRIM,   COL_BODY,   0.5 +0.32],  // 9  R foot
+  [COL_BODY,   COL_ACCENT, 0.6 -0.62],  // 10 L upper arm
+  [COL_TRIM,   COL_ACCENT, 0.65-0.62],  // 11 L forearm
+  [COL_BODY,   COL_ACCENT, 0.6 +0.62],  // 12 R upper arm
+  [COL_TRIM,   COL_ACCENT, 0.65+0.62],  // 13 R forearm
+  [COL_ACCENT, COL_ACCENT, 0.95],       // 14 bare-hand barrel
+];
+const BODY_CUBES = 14; // without the barrel; 15 with
+function buildMergedMesh(){
+  const cube = makeCube();
+  const data = [];
+  let cubes = 0;
+  function addCube(partIdx, colSel, accSel, id){
+    for(let v=0; v<cube.count; v++){
+      data.push(cube.pos[v*3], cube.pos[v*3+1], cube.pos[v*3+2],
+                cube.nrm[v*3], cube.nrm[v*3+1], cube.nrm[v*3+2],
+                partIdx, colSel, accSel, id);
+    }
+    cubes++;
+  }
+  const weaponColSel = (c, accentSel) =>
+    c === "accent" ? accentSel : (c === GUN_METAL ? COL_METAL : COL_DARK);
+  BODY_PART_TAGS.forEach(([colSel, accSel, id], slot) => addCube(slot, colSel, accSel, id));
+  const held = {};
+  for(const w of ["pistol", "machinegun", "shotgun"]){
+    const first = cubes * cube.count;
+    WEAPON_MODELS[w].forEach((b, j) =>
+      addCube(WEAPON_SLOT0 + j, weaponColSel(b.c, COL_ACCENT), COL_ACCENT, b.id));
+    held[w] = {first, count: cubes*cube.count - first};
+  }
+  const ground = GROUND_WEAPON_MODELS.map((model) => {
+    const first = cubes * cube.count;
+    // one shared id (0.9) + the ground accent for every box: see renderGun
+    model.forEach((b, j) => addCube(j, weaponColSel(b.c, COL_GROUND), COL_GROUND, 0.9));
+    return {first, count: cubes*cube.count - first};
+  });
+  return {data: new Float32Array(data), vertCount: cube.count, held, ground};
 }
 
 /* ---------- camera builders ---------- */
@@ -576,45 +660,51 @@ class RobotPipeline extends SpritePipeline {
     this.sLoc = {
       aPos: gl.getAttribLocation(this.sceneProg,"aPos"),
       aNormal: gl.getAttribLocation(this.sceneProg,"aNormal"),
-      uMVP: gl.getUniformLocation(this.sceneProg,"uMVP"),
-      uNormalMat: gl.getUniformLocation(this.sceneProg,"uNormalMat"),
-      uColor: gl.getUniformLocation(this.sceneProg,"uColor"),
-      uAccent: gl.getUniformLocation(this.sceneProg,"uAccent"),
-      uId: gl.getUniformLocation(this.sceneProg,"uId"),
+      aExtra: gl.getAttribLocation(this.sceneProg,"aExtra"),
+      uVP: gl.getUniformLocation(this.sceneProg,"uVP"),
+      uPart: gl.getUniformLocation(this.sceneProg,"uPart[0]"),
+      uColors: gl.getUniformLocation(this.sceneProg,"uColors[0]"),
     };
-    this.cube = makeCube();
-    this.posBuf = this._staticBuffer(this.cube.pos);
-    this.nrmBuf = this._staticBuffer(this.cube.nrm);
+    const mesh = buildMergedMesh();
+    this.cubeVerts = mesh.vertCount;            // 36 verts per cube instance
+    this.meshBuf = this._staticBuffer(mesh.data);
+    this.heldRanges = mesh.held;                // weapon name -> {first, count}
+    this.groundRanges = mesh.ground;            // weaponIdx  -> {first, count}
+    this.palette = new Float32Array(PALETTE_PARTS * 16); // the mat4 uniform array
+    // uColors: [body, accent, trim] filled per render; the fixed tail never changes
+    this.colorTable = new Float32Array(18);
+    this.colorTable.set(GUN_METAL, COL_METAL * 3);
+    this.colorTable.set(GUN_DARK, COL_DARK * 3);
+    this.colorTable.set(GROUND_ACCENT, COL_GROUND * 3);
   }
 
-  // `accent` is the same palette accent for every part of one robot: it is
-  // uploaded once per render(); only the body color changes (and is only
-  // re-uploaded when the color array actually changes) to keep the GL call
-  // count per robot low.
-  _drawPart(VP, local, colBody, accent, id){
+  // Bind the merged skinned mesh (interleaved pos3/nrm3/extra4, 40-byte stride).
+  _bindMesh(){
     const gl=this.gl, sLoc=this.sLoc;
-    const mvp = M4.mul(VP, local);
-    gl.uniformMatrix4fv(sLoc.uMVP, false, mvp);
-    gl.uniformMatrix3fv(sLoc.uNormalMat, false, M4.normalFromModel(local));
-    if(colBody !== this._lastColor){ gl.uniform3fv(sLoc.uColor, colBody); this._lastColor = colBody; }
-    if(accent !== this._lastAccent){ gl.uniform3fv(sLoc.uAccent, accent); this._lastAccent = accent; }
-    gl.uniform1f(sLoc.uId, id);
-    gl.drawArrays(gl.TRIANGLES, 0, this.cube.count);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.meshBuf);
+    gl.enableVertexAttribArray(sLoc.aPos);    gl.vertexAttribPointer(sLoc.aPos,   3,gl.FLOAT,false,40,0);
+    gl.enableVertexAttribArray(sLoc.aNormal); gl.vertexAttribPointer(sLoc.aNormal,3,gl.FLOAT,false,40,12);
+    gl.enableVertexAttribArray(sLoc.aExtra);  gl.vertexAttribPointer(sLoc.aExtra, 4,gl.FLOAT,false,40,24);
+  }
+  _unbindMesh(){
+    // mirror the legacy exit state: aPos stays enabled for the post pass
+    this.gl.disableVertexAttribArray(this.sLoc.aNormal);
+    this.gl.disableVertexAttribArray(this.sLoc.aExtra);
+  }
+  // Upload the shared per-draw uniforms: view-projection, the color table and
+  // the first `slots` pose matrices of the palette.
+  _uploadUniforms(VP, slots){
+    const gl=this.gl, sLoc=this.sLoc;
+    gl.uniformMatrix4fv(sLoc.uVP, false, VP);
+    gl.uniform3fv(sLoc.uColors, this.colorTable);
+    gl.uniformMatrix4fv(sLoc.uPart, false, this.palette.subarray(0, slots*16));
   }
 
-  // draw a box-built weapon model anchored to the gun-hand.
-  // handNode is the right forearm's "elbow" transform; we shift down to the grip.
-  _drawWeapon(VP, handNode, parts, accent){
-    const anchor = M4.mul(handNode, M4.translate(0, -0.42, 0.0));
-    for(const b of parts){
-      const local = M4.mul(anchor, M4.mul(M4.translate(b.t[0],b.t[1],b.t[2]),
-                                          M4.scale(b.s[0],b.s[1],b.s[2])));
-      const col = (b.c === "accent") ? accent : b.c;
-      this._drawPart(VP, local, col, accent, b.id);
-    }
-  }
+  // Fill the palette with this frame's pose matrices (the same matrices the
+  // legacy per-part draws computed) and issue the 1-2 skinned draw calls.
   _renderRobot(VP, pal, plan, facingRad, weapon){
-    const body=pal.body, accent=pal.accent, trim=pal.trim;
+    const gl=this.gl;
+    const P=this.palette, S=16;
     const recoil = plan.recoil || 0.0;
     const weaponParts = (weapon && weapon !== "fist") ? WEAPON_MODELS[weapon] : null;
     const holdingWeapon = !!(weaponParts && weaponParts.length);
@@ -623,34 +713,32 @@ class RobotPipeline extends SpritePipeline {
     let root = M4.mul(M4.translate(0, plan.bob, plan.zback), M4.rotY(facingRad));
     if(plan.lean) root = M4.mul(root, M4.rotX(plan.lean));
 
-    // torso
-    this._drawPart(VP, part(root, 0,1.15,0, 0,0,0, 0.9,1.0,0.55).draw, body, accent, 0.2);
-    // head
-    this._drawPart(VP, part(root, 0,1.95,0.02, 0,0,0, 0.62,0.55,0.55).draw, body, accent, 0.35);
-    // visor strip (accent)
-    this._drawPart(VP, part(root, 0,1.98,0.28, 0,0,0, 0.5,0.16,0.08).draw, accent, accent, 0.9);
-    // hips
-    this._drawPart(VP, part(root, 0,0.72,0, 0,0,0, 0.8,0.3,0.5).draw, trim, body, 0.25);
+    // torso / head / visor strip / hips -> palette slots 0-3
+    P.set(part(root, 0,1.15,0, 0,0,0, 0.9,1.0,0.55).draw, 0*S);
+    P.set(part(root, 0,1.95,0.02, 0,0,0, 0.62,0.55,0.55).draw, 1*S);
+    P.set(part(root, 0,1.98,0.28, 0,0,0, 0.5,0.16,0.08).draw, 2*S);
+    P.set(part(root, 0,0.72,0, 0,0,0, 0.8,0.3,0.5).draw, 3*S);
 
     // legs (pivot at hip, swing around X so they step fwd/back along Z)
-    const self=this;
-    function leg(sideX, ph){
+    function leg(sideX, ph, slot){
       const hipPivot = M4.mul(root, M4.translate(sideX,0.6,0));
       const swung = M4.mul(hipPivot, M4.rotX(ph));
       const thigh = M4.mul(swung, M4.mul(M4.translate(0,-0.28,0), M4.scale(0.3,0.62,0.32)));
-      self._drawPart(VP, thigh, body, accent, 0.4+sideX);
+      P.set(thigh, slot*S);
       const knee = M4.mul(swung, M4.translate(0,-0.6,0));
       const shinRot = M4.mul(knee, M4.rotX(Math.max(0,-ph)*0.6));
       const shin = M4.mul(shinRot, M4.mul(M4.translate(0,-0.28,0), M4.scale(0.26,0.6,0.28)));
-      self._drawPart(VP, shin, trim, accent, 0.45+sideX);
+      P.set(shin, (slot+1)*S);
       const foot = M4.mul(shinRot, M4.mul(M4.translate(0,-0.6,0.06), M4.scale(0.32,0.22,0.5)));
-      self._drawPart(VP, foot, trim, body, 0.5+sideX);
+      P.set(foot, (slot+2)*S);
     }
-    leg(-0.32, plan.legA);
-    leg( 0.32, plan.legB);
+    leg(-0.32, plan.legA, 4);
+    leg( 0.32, plan.legB, 7);
 
-    // arms (pivot at shoulder)
-    function arm(sideX, ph, forward, gunHand){
+    // arms (pivot at shoulder); the gun-hand grows the held weapon (slots 15+)
+    // or the bare-hand barrel (slot 14)
+    let barrelDrawn = false;
+    function arm(sideX, ph, forward, gunHand, slot){
       const shoulder = M4.mul(root, M4.translate(sideX,1.5,0));
       let rot;
       if(forward){
@@ -663,26 +751,46 @@ class RobotPipeline extends SpritePipeline {
         }
       }
       const upper = M4.mul(rot, M4.mul(M4.translate(0,-0.26,0), M4.scale(0.24,0.55,0.26)));
-      self._drawPart(VP, upper, body, accent, 0.6+sideX);
+      P.set(upper, slot*S);
       let elbow = M4.mul(rot, M4.translate(0,-0.52,0));
       if(!forward && plan.elbow){
         // relaxed hang: a soft natural bend at the elbow
         elbow = M4.mul(elbow, M4.rotX(plan.elbow));
       }
       const fore = M4.mul(elbow, M4.mul(M4.translate(0,-0.24,0), M4.scale(0.2,0.5,0.22)));
-      self._drawPart(VP, fore, trim, accent, 0.65+sideX);
+      P.set(fore, (slot+1)*S);
       if(gunHand && holdingWeapon){
-        // a held weapon replaces the bare-hand barrel
-        self._drawWeapon(VP, elbow, weaponParts, accent);
+        // a held weapon replaces the bare-hand barrel; anchored at the grip
+        const anchor = M4.mul(elbow, M4.translate(0, -0.42, 0.0));
+        for(let j=0;j<weaponParts.length;j++){
+          const b = weaponParts[j];
+          P.set(M4.mul(anchor, M4.mul(M4.translate(b.t[0],b.t[1],b.t[2]),
+                                      M4.scale(b.s[0],b.s[1],b.s[2]))), (WEAPON_SLOT0+j)*S);
+        }
       } else if(forward){
         const barrel = M4.mul(elbow, M4.mul(M4.translate(0,-0.5,0.0), M4.scale(0.14,0.5,0.14)));
-        self._drawPart(VP, barrel, accent, accent, 0.95);
+        P.set(barrel, 14*S);
+        barrelDrawn = true;
       }
     }
     // the right arm is the gun-hand: force it forward whenever a weapon is held,
     // so the weapon sticks out in front (like the shoot pose) from every pose.
-    arm(-0.62, plan.armLp, false, false);
-    arm( 0.62, plan.armRp, plan.shoot || holdingWeapon, true);
+    arm(-0.62, plan.armLp, false, false, 10);
+    arm( 0.62, plan.armRp, plan.shoot || holdingWeapon, true, 12);
+
+    this.colorTable.set(pal.body, COL_BODY*3);
+    this.colorTable.set(pal.accent, COL_ACCENT*3);
+    this.colorTable.set(pal.trim, COL_TRIM*3);
+    const slots = holdingWeapon ? WEAPON_SLOT0 + weaponParts.length
+                                : (barrelDrawn ? 15 : 14);
+    this._uploadUniforms(VP, slots);
+    // body (+ the barrel, which sits right after it in the buffer) ...
+    gl.drawArrays(gl.TRIANGLES, 0, (barrelDrawn ? BODY_CUBES+1 : BODY_CUBES) * this.cubeVerts);
+    // ... then the held weapon: everything after the forearms, like before
+    if(holdingWeapon){
+      const r = this.heldRanges[weapon];
+      gl.drawArrays(gl.TRIANGLES, r.first, r.count);
+    }
   }
 
   /* render one robot.
@@ -707,11 +815,9 @@ class RobotPipeline extends SpritePipeline {
     // Unarmed robots stand / walk at ease rather than in the combat rig.
     const plan = posePlan(pose, time, weapon === "fist");
     gl.useProgram(this.sceneProg);
-    gl.bindBuffer(gl.ARRAY_BUFFER,this.posBuf); gl.enableVertexAttribArray(this.sLoc.aPos); gl.vertexAttribPointer(this.sLoc.aPos,3,gl.FLOAT,false,0,0);
-    gl.bindBuffer(gl.ARRAY_BUFFER,this.nrmBuf); gl.enableVertexAttribArray(this.sLoc.aNormal); gl.vertexAttribPointer(this.sLoc.aNormal,3,gl.FLOAT,false,0,0);
-    this._lastColor = null; this._lastAccent = null; // program uniforms are ours again
+    this._bindMesh();
     this._renderRobot(VP, pal, plan, facingRad, weapon);
-    gl.disableVertexAttribArray(this.sLoc.aNormal);
+    this._unbindMesh();
 
     // pass 2: post -> target rect (or the whole canvas)
     this._postPass(target, opts.px, !!opts.transparent);
@@ -728,32 +834,34 @@ class RobotPipeline extends SpritePipeline {
      target: see SpritePipeline._postPass. */
   renderGun(opts, target){
     const gl=this.gl;
-    const idx = opts.weaponIdx|0;
-    const parts = GROUND_WEAPON_MODELS[idx] || GROUND_WEAPON_MODELS[0];
+    const idx = GROUND_WEAPON_MODELS[opts.weaponIdx|0] ? (opts.weaponIdx|0) : 0;
+    const parts = GROUND_WEAPON_MODELS[idx];
 
     this._beginScene();
     const VP = topDownVP(opts.halfV || 0.72);
     gl.useProgram(this.sceneProg);
-    gl.bindBuffer(gl.ARRAY_BUFFER,this.posBuf); gl.enableVertexAttribArray(this.sLoc.aPos); gl.vertexAttribPointer(this.sLoc.aPos,3,gl.FLOAT,false,0,0);
-    gl.bindBuffer(gl.ARRAY_BUFFER,this.nrmBuf); gl.enableVertexAttribArray(this.sLoc.aNormal); gl.vertexAttribPointer(this.sLoc.aNormal,3,gl.FLOAT,false,0,0);
-    this._lastColor = null; this._lastAccent = null;
+    this._bindMesh();
 
     // Ground frame: lift to the camera's focus height, spin around vertical
     // (negated: world +z is screen +y/down, so -yaw = clockwise on screen),
     // lay the model on its side (gun local X/thickness -> world up, the
     // barrel's local -Y -> world +x) and centre it on its midpoint.
+    // The ground vertices carry ONE shared part id (0.9): at the tiny
+    // ground-art resolution every texel neighbours a part boundary, so
+    // per-part ids would ink the whole weapon black. The silhouette pass
+    // still outlines it. Colors: gunmetal + the fixed GROUND_ACCENT.
     let base = M4.mul(M4.translate(0,0.9,0), M4.rotY(-(opts.angle||0)));
     base = M4.mul(base, M4.mul(M4.rotZ(Math.PI/2), M4.translate(0, GROUND_WEAPON_CENTER[idx]||0, 0)));
-    for(const b of parts){
-      const local = M4.mul(base, M4.mul(M4.translate(b.t[0],b.t[1],b.t[2]),
-                                        M4.scale(b.s[0],b.s[1],b.s[2])));
-      const col = (b.c === "accent") ? GROUND_ACCENT : b.c;
-      // One shared part id: at the tiny ground-art resolution every texel
-      // neighbours a part boundary, so per-part ids would ink the whole
-      // weapon black. The silhouette pass still outlines it.
-      this._drawPart(VP, local, col, GROUND_ACCENT, 0.9);
+    const P=this.palette;
+    for(let j=0;j<parts.length;j++){
+      const b = parts[j];
+      P.set(M4.mul(base, M4.mul(M4.translate(b.t[0],b.t[1],b.t[2]),
+                                M4.scale(b.s[0],b.s[1],b.s[2]))), j*16);
     }
-    gl.disableVertexAttribArray(this.sLoc.aNormal);
+    this._uploadUniforms(VP, parts.length);
+    const r = this.groundRanges[idx];
+    gl.drawArrays(gl.TRIANGLES, r.first, r.count);
+    this._unbindMesh();
 
     // No interior linework at all (the art is a handful of texels): raise the
     // luma-ink threshold out of reach and disable the id-boundary ink; only

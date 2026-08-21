@@ -9,9 +9,9 @@
 //! DIAGONAL cut (top edge further right, bottom edge further left, meeting
 //! the bottom bar), the cut overdrawn with accent edge lines; the fill is
 //! built from thin horizontal slices (exact, no clipping needed). On the slab
-//! sits the live rotating pixelated 3D headshot, big and borderless (SWARM =
-//! three out-of-phase headshots down the diagonal, CORRUPTOR = the live
-//! shoggoth, UPLINK = its carrier glyph). The world keeps rendering between
+//! sits the baked pixel-art headshot, gently rocking in 2D, big and
+//! borderless (SWARM = three out-of-phase headshots down the diagonal,
+//! CORRUPTOR = the live shoggoth, UPLINK = its carrier glyph). The world keeps rendering between
 //! the bars and left of the slab. Screen space — drawn with the HUD, after
 //! `camera.reset`, outside the world pixel group.
 
@@ -63,7 +63,7 @@ fn robot_color_idx(who: &str) -> Option<u32> {
 }
 
 /// Draw the dialogue letterbox + face slab for this frame's
-/// [`DialogueView`]. `now` is elapsed seconds (drives the portrait animation
+/// [`DialogueView`]. `now` is elapsed seconds (drives the portrait's 2D rock
 /// and the blink).
 pub fn render_dialogue(graphics: &Graphics, view: &DialogueView, accent: (u8, u8, u8), now: f32) {
     if view.slide <= 0.0 {
@@ -199,11 +199,12 @@ pub fn render_dialogue(graphics: &Graphics, view: &DialogueView, accent: (u8, u8
 /// translucent panel with a diagonal-cut left border (top edge further
 /// right, bottom edge further left, meeting the bottom bar), accent edge
 /// lines along the cut, and the speaker's portrait floating borderless on
-/// it. Robot speakers are the ACTUAL live 3D robot in HEADSHOT framing
-/// (opcode PORTRAIT mode 1): the camera pushed in and raised to head
-/// height, gently swaying, rendered at a small art resolution and upscaled
-/// NEAREST — a pixelated, visibly moving face, BIG. SWARM = three smaller
-/// out-of-phase headshots stepping down the diagonal; CORRUPTOR = the LIVE
+/// it. Robot speakers are the robot in HEADSHOT framing (opcode PORTRAIT
+/// mode 1): a fixed close head-level camera, BAKED ONCE by the renderer at a
+/// small art resolution, upscaled NEAREST and gently ROCKED in 2D by `now` —
+/// a chunky Hotline-Miami-style portrait, BIG. SWARM = three smaller
+/// out-of-phase headshots stepping down the diagonal (their `now` offsets
+/// phase-shift the rock); CORRUPTOR = the LIVE
 /// shoggoth (its top-down smiley mask reads perfectly); UPLINK = an
 /// abstract carrier glyph from primitives.
 fn draw_slab(graphics: &Graphics, view: &DialogueView, accent: (u8, u8, u8), now: f32) {

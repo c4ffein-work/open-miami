@@ -1706,6 +1706,10 @@ struct SfxBus {
 pub struct AudioEngine {
     /// `None` if the browser refused to give us an audio context.
     ctx: Option<AudioContext>,
+    /// Master enable (the SETTINGS sound toggle): off = the whole
+    /// `AudioContext` is suspended — music and SFX alike — and the autoplay
+    /// unlock refuses to resume it. `Cell` because `play_*` take `&self`.
+    enabled: Cell<bool>,
     /// Pre-rendered white noise, reused (via cheap buffer-source nodes) for
     /// every percussive/whoosh sound.
     noise: Option<AudioBuffer>,
@@ -1748,6 +1752,7 @@ impl AudioEngine {
             ctx,
             noise,
             sfx,
+            enabled: Cell::new(true),
             rng: Cell::new(0x2545_F491),
             music_bus,
             music_filter,
@@ -1765,9 +1770,31 @@ impl AudioEngine {
     /// so the integrator should call this on the first input (e.g. pressing
     /// Enter to start the game).
     pub fn resume(&self) {
+        if !self.enabled.get() {
+            return;
+        }
         if let Some(ctx) = &self.ctx {
             let _ = ctx.resume();
         }
+    }
+
+    /// The SETTINGS sound toggle: `false` suspends the whole `AudioContext`
+    /// (music and SFX go silent instantly, nothing else changes — schedulers
+    /// idle against the frozen audio clock), `true` resumes it.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.set(on);
+        if let Some(ctx) = &self.ctx {
+            if on {
+                let _ = ctx.resume();
+            } else {
+                let _ = ctx.suspend();
+            }
+        }
+    }
+
+    /// Whether sound is currently enabled (the SETTINGS checkbox state).
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.get()
     }
 
     // --- one-shot SFX: attacks ---------------------------------------------

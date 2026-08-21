@@ -37,6 +37,10 @@ pub struct BulletSystem;
 impl System for BulletSystem {
     fn run(&mut self, world: &mut World, dt: f32) {
         let bullets: Vec<Entity> = world.query::<Bullet>();
+        // One enemy-list query for the whole tick (query allocates + sorts):
+        // nothing spawns mid-loop, and enemies killed by an earlier bullet
+        // are skipped by the per-bullet Health check below.
+        let enemies: Vec<Entity> = world.query::<Enemy>();
         let mut bullets_to_remove = Vec::new();
 
         for bullet_entity in bullets {
@@ -88,10 +92,9 @@ impl System for BulletSystem {
             }
 
             // Check enemy collision
-            let enemies: Vec<Entity> = world.query::<Enemy>();
             let mut hit_enemy = false;
 
-            for enemy_entity in enemies {
+            for &enemy_entity in &enemies {
                 let (enemy_pos, enemy_radius, enemy_health) = match (
                     world.get_component::<Position>(enemy_entity),
                     world.get_component::<Radius>(enemy_entity),

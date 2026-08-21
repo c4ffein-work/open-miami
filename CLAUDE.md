@@ -17,6 +17,15 @@
 - shoggoth-core.js extends robot-core's exported `SpritePipeline` (shared
   pass-1 target + inked post pass + `M4`); the 2D-primitive
   `Graphics::draw_shoggoth` is only the `?viz` gallery / level-map thumbnail
+- SIZING: the canvas backing buffer is CSS size x devicePixelRatio
+  (`Graphics::sync_size`, polled ~1/s by the game loop — window resizes,
+  browser zoom and monitor-DPR changes are picked up live); the wasm records
+  every frame in CSS-pixel coordinates and publishes the ratio as `data-dpr`
+  on the canvas, renderer.js keeps `uRes` in CSS px while the viewport is the
+  physical buffer, so primitives rasterize at real screen pixels (no browser
+  rescale/blur on HiDPI). The camera derives its zoom from the viewport
+  (`REF_VIEW_W/H`, `ZOOM_SCALE_MIN/MAX` in src/camera.rs: ~constant visible
+  area whatever the window size/aspect, clamped for legibility)
 - Opcode 14 = `POSTFX kind t r g b`: when present anywhere in a frame,
   renderer.js renders the whole frame into an offscreen scene FBO and draws it
   through a full-screen post shader. Kinds 0-9 (table mirrored in renderer.js
@@ -59,15 +68,18 @@
   headless acceptance test for this on the PROPS page (rotating layers of
   DATACENTER, OUTDOOR and LOBBY props: only their boxes may differ between
   frozen clocks)
-- Opcodes 17/18 = PIXEL SPRITES, live 3D renders at ART resolution into a
-  NEAREST scratch atlas (64px tiles), upscaled by their quads — never
-  smoothed. 17 PORTRAIT `colorIdx x y sizePx time mode` (screen space,
-  `Graphics::draw_robot_portrait`): the dialogue portrait — the robot
-  through robot-core from a 3/4 orbit camera, slowly rotating (a gentle
-  ±25° yaw sway at 0.15 Hz of `time`), 64-texel art; `mode` 0 = the
-  full-body bust (slightly-elevated camera), 1 = HEADSHOT (camera pushed in
-  and raised to head height — near-eye-level, head + shoulders fill the
-  tile; the dialogue frame's borderless face);
+- Opcodes 17/18 = PIXEL SPRITES at ART resolution, upscaled by their quads —
+  never smoothed. 17 PORTRAIT `colorIdx x y sizePx time mode` (screen space,
+  `Graphics::draw_robot_portrait`): the dialogue portrait — BAKED ONCE per
+  (colorIdx, mode) through robot-core (fixed 3/4 camera, frozen neutral idle
+  frame, 64-texel art) into a PERSISTENT NEAREST cache atlas in renderer.js
+  (512², 64px tiles, Map keyed colorIdx*2+mode — NOT the per-frame scratch
+  atlas), then drawn every frame as that rigid pixel image on a quad that
+  gently ROCKS in 2D (~±5° at 1.5 rad/s of `time`, phase also offset by draw
+  position — the Hotline-Miami portrait look; `time` only drives the rock);
+  `mode` 0 = the full-body bust (slightly-elevated camera), 1 = HEADSHOT
+  (camera pushed in and raised to head height — near-eye-level, head +
+  shoulders fill the tile; the dialogue frame's borderless face);
   render_dialogue.rs draws the JRPG letterbox (a ~52 px black bar at the
   top, a ~170 px one at the bottom carrying the name + typewriter line
   from the left edge) plus a RIGHT-SIDE FACE SLAB between the bars — a
@@ -79,8 +91,12 @@
   `weaponIdx x y angle sizePx` (world space, `Graphics::draw_gun_pickup`,
   weaponIdx 0 bar/1 pistol/2 machinegun/3 shotgun = robot-core's
   `GROUND_WEAPON_MODELS`): a weapon lying flat as its 3D model
-  (`RobotPipeline.renderGun`, top-down, laid on its side, spun by `angle`),
-  22-texel art; render.rs draws pickups with a stable position-hashed
+  (`RobotPipeline.renderGun`, top-down, laid on its side), BAKED ONCE per
+  weaponIdx at angle 0 (24-texel art, `GUN_ART`) into the same persistent
+  cache atlas as the portraits (negative Map keys) and drawn as that rigid
+  pixel sprite on a quad rotated in 2D by `angle` — equivalent to spinning
+  the model, since the top-down ortho camera only sees up-facing normals;
+  render.rs draws pickups with a stable position-hashed
   resting angle and thrown weapons with their spin. Unarmed robots
   (weapon = fist) get a RELAXED pose variant in robot-core's `posePlan`
   (arms hanging loose w/ splay + elbow bend, easy walk swing); combat poses

@@ -9,6 +9,18 @@ pub use crate::math::{rect_visible, ViewCull, CULL_MARGIN};
 /// camera in closer to the characters.
 pub const DEFAULT_ZOOM: f32 = 1.6;
 
+/// The viewport the game was tuned at: `set_viewport` scales the zoom from
+/// it by the geometric mean of the two axes (~constant visible AREA whatever
+/// the window size or aspect — a 2:1 window trades height of view for width
+/// instead of simply seeing more), clamped so the graphics never shrink
+/// below readability on a small window nor balloon on a huge one. Inside the
+/// clamp band, what you can see stays fair; at the band's edges, legibility
+/// wins and the window sees less (or more) of the world instead.
+pub const REF_VIEW_W: f32 = 960.0;
+pub const REF_VIEW_H: f32 = 720.0;
+pub const ZOOM_SCALE_MIN: f32 = 0.75;
+pub const ZOOM_SCALE_MAX: f32 = 1.5;
+
 /// How far (in screen px, before zoom) the view may be pushed toward the mouse
 /// while Shift is held — a look-ahead so you can peek down a corridor.
 pub const LOOK_MAX_PX: f32 = 260.0;
@@ -65,10 +77,14 @@ impl Camera {
     }
 
     /// Record the real canvas size so apply()/screen_to_world()/visible_bounds()
-    /// all agree even when the window isn't 960x720.
+    /// all agree even when the window isn't 960x720, and derive the zoom from
+    /// it (see `REF_VIEW_W`): bigger windows draw the world bigger rather than
+    /// revealing arbitrarily much of it, until legibility caps out.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.canvas_width = width;
         self.canvas_height = height;
+        let area_scale = ((width * height) / (REF_VIEW_W * REF_VIEW_H)).sqrt();
+        self.zoom = DEFAULT_ZOOM * area_scale.clamp(ZOOM_SCALE_MIN, ZOOM_SCALE_MAX);
     }
 
     pub fn follow_player(&mut self, player_pos: Vec2) {
