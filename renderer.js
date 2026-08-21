@@ -562,6 +562,27 @@ export function initRenderer(canvas) {
     throw new Error("WebGL is not available; the game cannot render.");
   }
 
+  /* ---- perf tracing (?perf; collector = window.__perf in index.html) ----
+     PERF is null on a normal run: every check below is a single falsy test
+     and the gl.drawArrays shim is only installed when tracing is on, so
+     disabled runs keep the raw function and pay nothing. */
+  const PERF = (typeof window !== "undefined" && window.__perf && window.__perf.enabled)
+    ? window.__perf : null;
+  if (PERF) {
+    // Count every draw call on this context — the batch pipeline, the
+    // robot/shoggoth sprite pipelines and the post passes all share `gl`.
+    const rawDrawArrays = gl.drawArrays.bind(gl);
+    gl.drawArrays = function (mode, first, count) {
+      PERF._draws++;
+      return rawDrawArrays(mode, first, count);
+    };
+  }
+  // Per-frame accumulators (renderQueuedSprites runs a variable number of
+  // times per frame, once per flush that has queued sprites).
+  let perfSpriteMs = 0;   // total ms spent in sprite passes this frame
+  let perfSpriteT0 = 0;   // first sprite pass start (span anchor)
+  let perfRobotN = 0;     // robots + bosses rendered live this frame
+
   /* ---- program ---- */
   function compile(type, src) {
     const s = gl.createShader(type);
@@ -1143,6 +1164,12 @@ export function initRenderer(canvas) {
   // Run the queued robot / shoggoth renders into their atlas tiles. Leaves the
   // batch state rebound (and TEXTURE0 unbound — flush binds what it needs).
   function renderQueuedSprites() {
+    let perfT = 0;
+    if (PERF) {
+      perfT = performance.now();
+      if (perfSpriteT0 === 0) perfSpriteT0 = perfT;
+      perfRobotN += robotUsed + shogUsed;
+    }
     // Our attrib arrays would otherwise stay enabled (pointing at the batch
     // VBO) while the sprite programs draw; keep the pipelines disjoint.
     gl.disableVertexAttribArray(loc.aPos);
@@ -1171,6 +1198,7 @@ export function initRenderer(canvas) {
     // atlas is never both bound for sampling and attached to a framebuffer.
     gl.bindTexture(gl.TEXTURE_2D, null);
     bindBatchState();
+    if (PERF) perfSpriteMs += performance.now() - perfT;
   }
 
   // The pipeline's constructor left its own buffers bound: put ours back.
@@ -1635,6 +1663,18 @@ export function initRenderer(canvas) {
 
   /* ---- frame execution ---- */
   function frameRender(cmds, textArena) {
+    // Perf (?perf): the `walk` span covers the opcode loop + batch building
+    // (including the intermediate flushes it triggers); `sprites` is the
+    // accumulated live robot/boss passes, `submit` the final upload + draw,
+    // `postfx` the post pass. All nest inside the wasm side's `flush` span.
+    let perfT0 = 0, perfD0 = 0;
+    if (PERF) {
+      perfT0 = performance.now();
+      perfD0 = PERF._draws;
+      perfSpriteMs = 0;
+      perfSpriteT0 = 0;
+      perfRobotN = 0;
+    }
     // Backing buffer = CSS size x devicePixelRatio (Graphics::sync_size, which
     // publishes the ratio as data-dpr); the stream's coordinates are CSS px.
     const pw = canvas.width, ph = canvas.height;
@@ -1776,12 +1816,23 @@ export function initRenderer(canvas) {
       }
     }
     while (pixStack.length) pixEnd(0, 0); // unterminated groups: close them where they are
+    const perfTSubmit = PERF ? performance.now() : 0;
+    if (PERF) window.perfSpan("walk", perfT0, perfTSubmit - perfT0);
     flush();
+    const perfTPost = PERF ? performance.now() : 0;
+    if (PERF) window.perfSpan("submit", perfTSubmit, perfTPost - perfTSubmit);
     // The post passes work on the final pixels: physical resolution.
     const warpFrame = postfxActive && (postfx.kind | 0) === 10;
     if (warpFrame) runWarpPass(pw, ph);
     else if (postfxActive) runPostPass(pw, ph);
     if (!warpFrame) warpLive = false; // next warp frame starts from a clean accumulator
+    if (PERF) {
+      if (postfxActive) window.perfSpan("postfx", perfTPost, performance.now() - perfTPost);
+      if (perfSpriteMs > 0) window.perfSpan("sprites", perfSpriteT0, perfSpriteMs);
+      window.perfCount("cmds", cmds.length);
+      window.perfCount("draws", PERF._draws - perfD0);
+      window.perfCount("robots", perfRobotN);
+    }
   }
 
   return frameRender;

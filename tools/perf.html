@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Open Miami // perf trace viewer</title>
+<style>
+  /* Self-contained: works from file:// or serve.py. The game font (VT323)
+     is loaded from the repo via the FontFace API at startup — referencing
+     it from CSS during the initial document load can leave the face in an
+     error state (see the note in index.html); until (or unless) it loads,
+     everything falls back to the system monospace stack in --mono. */
+  :root {
+    --bg: #0b0e13; --panel: #12161f; --edge: #232a38; --text: #cdd6e4;
+    --dim: #6b7688; --accent: #ff3399; --cyan: #00e5ff; --good: #3ce08c;
+    --mono: ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 var(--mono);
+  }
+  header {
+    padding: 14px 20px 10px; border-bottom: 1px solid var(--edge);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 {
+    margin: 0; font-size: 18px; letter-spacing: 2px; color: var(--accent);
+    text-shadow: 0 0 12px rgba(255, 51, 153, 0.5);
+  }
+  header .hint { color: var(--dim); font-size: 12px; }
+  #meta { color: var(--cyan); font-size: 12px; word-break: break-all; }
+  section { padding: 12px 20px; }
+  h2 {
+    font-size: 13px; letter-spacing: 2px; color: var(--cyan);
+    margin: 4px 0 8px; text-transform: uppercase;
+  }
+  #load-row { display: flex; gap: 10px; align-items: stretch; }
+  textarea {
+    flex: 1; height: 84px; background: var(--panel); color: var(--text);
+    border: 1px solid var(--edge); border-radius: 4px; padding: 8px;
+    font: 14px var(--mono); resize: vertical;
+  }
+  textarea:focus { outline: 1px solid var(--accent); }
+  button {
+    background: #1a1030; color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 4px; padding: 0 22px; font: 700 16px var(--mono);
+    letter-spacing: 2px; cursor: pointer;
+  }
+  button:hover { background: var(--accent); color: #10040c; }
+  body.dragover { outline: 3px dashed var(--cyan); outline-offset: -6px; }
+  #status { margin-top: 6px; font-size: 12px; color: var(--dim); }
+  #status.bad { color: #ff5470; }
+  canvas.chart {
+    display: block; width: 100%; background: var(--panel);
+    border: 1px solid var(--edge); border-radius: 4px;
+  }
+  #chart-wrap, #flame-wrap { display: none; }
+  #legend { margin-top: 6px; font-size: 12px; color: var(--dim); }
+  #legend span.key { display: inline-block; margin-right: 14px; }
+  #legend i {
+    display: inline-block; width: 10px; height: 10px; margin-right: 5px;
+    border-radius: 2px; vertical-align: -1px;
+  }
+  #flame-info { font-size: 12px; color: var(--dim); margin: 4px 0 8px; }
+  #flame-info b { color: var(--text); }
+  table { border-collapse: collapse; font-size: 13px; min-width: 460px; }
+  th, td { padding: 4px 14px 4px 0; text-align: right; border-bottom: 1px solid var(--edge); }
+  th { color: var(--cyan); font-weight: 400; letter-spacing: 1px; }
+  th:first-child, td:first-child { text-align: left; }
+  td.name i {
+    display: inline-block; width: 9px; height: 9px; margin-right: 6px;
+    border-radius: 2px; vertical-align: 0;
+  }
+  #summary-wrap { display: none; }
+  .tables { display: flex; gap: 48px; flex-wrap: wrap; align-items: flex-start; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PERF TRACE</h1>
+  <span class="hint">capture: run the game with <b>?floor=N&amp;debug&amp;perf</b>, press <b>P</b>, paste the console JSON below (or drop a .json file anywhere)</span>
+</header>
+
+<section>
+  <div id="load-row">
+    <textarea id="paste" placeholder='{"meta":{...},"frames":[...]}' spellcheck="false"></textarea>
+    <button id="load">LOAD</button>
+  </div>
+  <div id="status">no capture loaded</div>
+  <div id="meta"></div>
+</section>
+
+<section id="chart-wrap">
+  <h2>Frames (stacked self-time, click a frame)</h2>
+  <canvas id="chart" class="chart" height="260"></canvas>
+  <div id="legend"></div>
+</section>
+
+<section id="flame-wrap">
+  <h2>Frame timeline</h2>
+  <div id="flame-info"></div>
+  <canvas id="flame" class="chart" height="200"></canvas>
+  <div class="tables" style="margin-top:10px">
+    <table id="frame-spans"></table>
+    <table id="frame-counts"></table>
+  </div>
+</section>
+
+<section id="summary-wrap">
+  <h2>Summary</h2>
+  <div class="tables">
+    <table id="sum-spans"></table>
+    <table id="sum-counts"></table>
+  </div>
+</section>
+
+<script>
+"use strict";
+/* Hand-written viewer for the ?perf capture blob — no dependencies.
+   Frame format (index.html collector): { t0, t1, dur, gap,
+     spans: [[name, startMs, durMs], ...], counts: {name: value} }. */
+
+const GUIDES = [16.7, 33.3];
+// Canvas font, upgraded to the game font once it loads (see loader below).
+let FONT = "ui-monospace, Menlo, Consolas, monospace";
+const GAP_COLOR = "#39404f";
+const PALETTE = {
+  sim: "#ff3399", scenario: "#ffd166", record: "#9d6bff", flush: "#00e5ff",
+  walk: "#3ce08c", sprites: "#ff8a3c", submit: "#4c8dff", postfx: "#ff5470",
+};
+// Stable stacking order; unknown names append after these.
+const ORDER = ["sim", "scenario", "record", "flush", "walk", "sprites", "submit", "postfx"];
+
+let data = null;      // {meta, frames}
+let names = [];       // span names in stacking order
+let selected = -1;    // clicked frame index
+
+function colorOf(name) {
+  if (PALETTE[name]) return PALETTE[name];
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return "hsl(" + (h % 360) + ", 70%, 60%)";
+}
+
+function normSpans(frame) {
+  // Tolerate both [name, start, dur] triples and {name, start, dur} objects.
+  const out = [];
+  for (const s of (frame.spans || [])) {
+    if (Array.isArray(s) && s.length >= 3) out.push({ name: String(s[0]), start: +s[1], dur: +s[2] });
+    else if (s && typeof s === "object" && "name" in s) out.push({ name: String(s.name), start: +s.start, dur: +s.dur });
+  }
+  return out.filter((s) => isFinite(s.start) && isFinite(s.dur) && s.dur >= 0);
+}
+
+// Nest spans by time containment (a stack over the start-sorted list) and
+// return {roots, all} where each node = {name,start,dur,depth,children,self}.
+function buildTree(spans) {
+  const sorted = spans.slice().sort((a, b) => (a.start - b.start) || (b.dur - a.dur));
+  const roots = [], stack = [], all = [];
+  const EPS = 0.005;
+  for (const s of sorted) {
+    const node = { ...s, end: s.start + s.dur, depth: 0, children: [] };
+    while (stack.length) {
+      const top = stack[stack.length - 1];
+      if (node.start >= top.start - EPS && node.end <= top.end + EPS) break;
+      stack.pop();
+    }
+    if (stack.length) {
+      const top = stack[stack.length - 1];
+      node.depth = top.depth + 1;
+      top.children.push(node);
+    } else {
+      roots.push(node);
+    }
+    stack.push(node);
+    all.push(node);
+  }
+  for (const n of all) {
+    n.self = Math.max(0, n.dur - n.children.reduce((a, c) => a + c.dur, 0));
+  }
+  return { roots, all };
+}
+
+function fmt(ms) { return (Math.round(ms * 100) / 100).toFixed(2); }
+
+function analyze() {
+  const seen = new Set();
+  names = [];
+  for (const f of data.frames) {
+    f._spans = normSpans(f);
+    f._tree = buildTree(f._spans);
+    // Per-name totals (a name may appear more than once per frame, e.g. the
+    // two scenario sections) and self-times for the stacked chart.
+    f._total = {}; f._self = {};
+    for (const n of f._tree.all) {
+      f._total[n.name] = (f._total[n.name] || 0) + n.dur;
+      f._self[n.name] = (f._self[n.name] || 0) + n.self;
+      seen.add(n.name);
+    }
+    if (!isFinite(f.gap) || f.gap < 0) f.gap = 0;
+    if (!isFinite(f.dur)) f.dur = f._spans.reduce((a, s) => a + s.dur, 0);
+  }
+  names = ORDER.filter((n) => seen.has(n)).concat([...seen].filter((n) => !ORDER.includes(n)).sort());
+}
+
+/* ---- stacked bar chart ---- */
+function drawChart() {
+  const cv = document.getElementById("chart");
+  const cssW = cv.clientWidth || 900;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = cssW * dpr; cv.height = 260 * dpr;
+  const ctx = cv.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const W = cssW, H = 260, padL = 44, padB = 18, padT = 8;
+  ctx.clearRect(0, 0, W, H);
+  const frames = data.frames;
+  if (!frames.length) return;
+  // Y scale: clamp to ~1.5x the p95 frame total so one startup stall does
+  // not flatten the whole capture; outlier bars clip at the top.
+  const totals = frames.map((f) => f.dur + f.gap).sort((a, b) => a - b);
+  const p95 = totals[Math.min(totals.length - 1, Math.floor(totals.length * 0.95))];
+  const maxMs = Math.max(40, Math.min(totals[totals.length - 1], p95 * 1.5));
+  const y = (ms) => Math.max(padT, H - padB - (ms / maxMs) * (H - padB - padT));
+  const bw = (W - padL - 4) / frames.length;
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i];
+    const x = padL + i * bw;
+    let acc = 0;
+    for (const name of names) {
+      const v = f._self[name] || 0;
+      if (v <= 0) continue;
+      ctx.fillStyle = colorOf(name);
+      ctx.fillRect(x, y(acc + v), Math.max(bw - 0.5, 0.5), y(acc) - y(acc + v));
+      acc += v;
+    }
+    // Uninstrumented remainder of the frame's wall time, then the GAP band.
+    const rest = Math.max(0, f.dur - acc);
+    if (rest > 0) {
+      ctx.fillStyle = "#1d2330";
+      ctx.fillRect(x, y(acc + rest), Math.max(bw - 0.5, 0.5), y(acc) - y(acc + rest));
+      acc += rest;
+    }
+    if (f.gap > 0) {
+      ctx.fillStyle = GAP_COLOR;
+      ctx.fillRect(x, y(acc + f.gap), Math.max(bw - 0.5, 0.5), y(acc) - y(acc + f.gap));
+    }
+    if (i === selected) {
+      ctx.strokeStyle = "#ffffff";
+      ctx.strokeRect(x + 0.5, padT + 0.5, Math.max(bw - 1, 1), H - padB - padT - 1);
+    }
+  }
+  // Guides + axis labels.
+  ctx.font = "13px " + FONT;
+  for (const g of GUIDES) {
+    if (g > maxMs) continue;
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(padL, y(g)); ctx.lineTo(W, y(g)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#8f9aae";
+    ctx.fillText(g.toFixed(1), 6, y(g) + 4);
+  }
+  ctx.fillStyle = "#6b7688";
+  ctx.fillText("0", 6, y(0) + 4);
+  ctx.fillText(frames.length + " frames — click one", padL, H - 4);
+  cv.onclick = (e) => {
+    const r = cv.getBoundingClientRect();
+    const i = Math.floor((e.clientX - r.left - padL) / bw);
+    if (i >= 0 && i < frames.length) { selected = i; drawChart(); drawFlame(); }
+  };
+}
+
+function legend() {
+  const el = document.getElementById("legend");
+  el.innerHTML = "";
+  const add = (name, color) => {
+    const s = document.createElement("span");
+    s.className = "key";
+    const i = document.createElement("i");
+    i.style.background = color;
+    s.appendChild(i);
+    s.appendChild(document.createTextNode(name));
+    el.appendChild(s);
+  };
+  for (const n of names) add(n, colorOf(n));
+  add("uninstrumented", "#1d2330");
+  add("gap (vsync/present)", GAP_COLOR);
+}
+
+/* ---- single-frame flame view ---- */
+function drawFlame() {
+  const wrap = document.getElementById("flame-wrap");
+  if (selected < 0 || selected >= data.frames.length) { wrap.style.display = "none"; return; }
+  wrap.style.display = "block";
+  const f = data.frames[selected];
+  const info = document.getElementById("flame-info");
+  info.innerHTML = "frame <b>#" + selected + "</b> — wall <b>" + fmt(f.dur) +
+    " ms</b>, gap to next start <b>" + fmt(f.gap) + " ms</b>" +
+    (f.t0 != null ? " — t0 " + fmt(f.t0) + " ms" : "");
+
+  const cv = document.getElementById("flame");
+  const cssW = cv.clientWidth || 900;
+  const maxDepth = f._tree.all.reduce((a, n) => Math.max(a, n.depth), 0);
+  const rowH = 26, padT = 6, axisH = 20;
+  const cssH = padT + (maxDepth + 2) * rowH + axisH; // +1 row for the gap
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = cssW * dpr; cv.height = cssH * dpr;
+  cv.style.height = cssH + "px";
+  const ctx = cv.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, cssW, cssH);
+  const span0 = f.t0 != null ? f.t0 : Math.min(...f._spans.map((s) => s.start), 0);
+  const total = Math.max(f.dur + f.gap, 0.001);
+  const sx = (t) => ((t - span0) / total) * (cssW - 2) + 1;
+  ctx.font = "14px " + FONT;
+  ctx.textBaseline = "middle";
+  const bar = (x0, x1, row, color, label) => {
+    const yy = padT + row * rowH;
+    const w = Math.max(x1 - x0, 1);
+    ctx.fillStyle = color;
+    ctx.fillRect(x0, yy, w, rowH - 5);
+    if (label) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x0, yy, w, rowH - 5); ctx.clip();
+      ctx.fillStyle = "#0b0e13";
+      ctx.fillText(label, x0 + 4, yy + (rowH - 5) / 2 + 1);
+      ctx.restore();
+    }
+  };
+  for (const n of f._tree.all) {
+    bar(sx(n.start), sx(n.end), n.depth, colorOf(n.name), n.name + " " + fmt(n.dur) + "ms");
+  }
+  if (f.gap > 0 && f.t1 != null) {
+    bar(sx(f.t1), sx(f.t1 + f.gap), maxDepth + 1, GAP_COLOR, "gap " + fmt(f.gap) + "ms");
+  }
+  // Time axis (ms from frame start).
+  const axisY = cssH - axisH + 4;
+  ctx.fillStyle = "#6b7688";
+  ctx.strokeStyle = "#232a38";
+  const step = total > 24 ? 8 : total > 12 ? 4 : 2;
+  for (let t = 0; t <= total; t += step) {
+    const x = sx(span0 + t);
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, axisY); ctx.stroke();
+    ctx.fillText(t + "ms", x + 2, axisY + 6);
+  }
+
+  // Span + counter tables for this frame.
+  const st = document.getElementById("frame-spans");
+  let html = "<tr><th>span</th><th>ms</th></tr>";
+  for (const n of f._tree.all) {
+    html += "<tr><td class='name'><i style='background:" + colorOf(n.name) + "'></i>" +
+      "&nbsp;".repeat(n.depth * 2) + n.name + "</td><td>" + fmt(n.dur) + "</td></tr>";
+  }
+  html += "<tr><td class='name'><i style='background:" + GAP_COLOR + "'></i>gap</td><td>" + fmt(f.gap) + "</td></tr>";
+  st.innerHTML = html;
+  const ct = document.getElementById("frame-counts");
+  const counts = f.counts || {};
+  const keys = Object.keys(counts);
+  ct.innerHTML = keys.length
+    ? "<tr><th>counter</th><th>value</th></tr>" +
+      keys.map((k) => "<tr><td>" + k + "</td><td>" + counts[k] + "</td></tr>").join("")
+    : "";
+}
+
+/* ---- capture summary ---- */
+function percentile(sorted, p) {
+  if (!sorted.length) return 0;
+  const i = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+  return sorted[i];
+}
+
+function drawSummary() {
+  document.getElementById("summary-wrap").style.display = "block";
+  const frames = data.frames;
+  const rows = [];
+  const series = (get) => {
+    const vals = frames.map(get).filter((v) => v > 0 || v === 0);
+    const sorted = vals.slice().sort((a, b) => a - b);
+    const avg = vals.reduce((a, v) => a + v, 0) / (vals.length || 1);
+    return { avg, p95: percentile(sorted, 95), max: sorted[sorted.length - 1] || 0 };
+  };
+  for (const name of names.concat(["frame", "gap"])) {
+    const s = name === "frame" ? series((f) => f.dur)
+      : name === "gap" ? series((f) => f.gap)
+        : series((f) => f._total[name] || 0);
+    rows.push([name, s.avg, s.p95, s.max]);
+  }
+  document.getElementById("sum-spans").innerHTML =
+    "<tr><th>span</th><th>avg ms</th><th>p95 ms</th><th>max ms</th></tr>" +
+    rows.map(([n, a, p, m]) =>
+      "<tr><td class='name'><i style='background:" +
+      (n === "gap" ? GAP_COLOR : n === "frame" ? "#8f9aae" : colorOf(n)) + "'></i>" + n +
+      "</td><td>" + fmt(a) + "</td><td>" + fmt(p) + "</td><td>" + fmt(m) + "</td></tr>").join("");
+  const counters = {};
+  for (const f of frames) {
+    for (const k of Object.keys(f.counts || {})) {
+      (counters[k] = counters[k] || []).push(f.counts[k]);
+    }
+  }
+  const ck = Object.keys(counters).sort();
+  document.getElementById("sum-counts").innerHTML = ck.length
+    ? "<tr><th>counter</th><th>avg</th><th>max</th></tr>" +
+      ck.map((k) => {
+        const v = counters[k];
+        const avg = v.reduce((a, x) => a + x, 0) / v.length;
+        return "<tr><td>" + k + "</td><td>" + fmt(avg) + "</td><td>" + Math.max(...v) + "</td></tr>";
+      }).join("")
+    : "";
+}
+
+function showMeta() {
+  const m = data.meta || {};
+  const parts = [];
+  if (m.dpr) parts.push("dpr " + m.dpr);
+  if (m.canvas) {
+    parts.push("canvas " + m.canvas.w + "x" + m.canvas.h + " px (css " + m.canvas.cssW + "x" + m.canvas.cssH + ")");
+  }
+  if (m.timestamp) parts.push(m.timestamp);
+  if (m.userAgent) parts.push(m.userAgent);
+  document.getElementById("meta").textContent = parts.join(" — ");
+}
+
+function load(text) {
+  const status = document.getElementById("status");
+  try {
+    let obj = JSON.parse(text.trim());
+    if (Array.isArray(obj)) obj = { meta: {}, frames: obj }; // bare frames array
+    if (!obj || !Array.isArray(obj.frames)) throw new Error("no frames[] in blob");
+    data = obj;
+    analyze();
+    selected = -1;
+    status.className = "";
+    status.textContent = data.frames.length + " frames loaded, " +
+      names.length + " span kinds: " + names.join(", ");
+    showMeta();
+    document.getElementById("chart-wrap").style.display = "block";
+    legend();
+    drawChart();
+    document.getElementById("flame-wrap").style.display = "none";
+    drawSummary();
+  } catch (e) {
+    status.className = "bad";
+    status.textContent = "load failed: " + e.message;
+  }
+}
+
+document.getElementById("load").addEventListener("click", () => {
+  load(document.getElementById("paste").value);
+});
+// Drag-drop a .json file anywhere on the page.
+window.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dragover"); });
+window.addEventListener("dragleave", () => document.body.classList.remove("dragover"));
+window.addEventListener("drop", (e) => {
+  e.preventDefault();
+  document.body.classList.remove("dragover");
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!file) return;
+  file.text().then((t) => {
+    document.getElementById("paste").value = t.length > 20000 ? t.slice(0, 20000) + "…" : t;
+    load(t);
+  });
+});
+window.addEventListener("resize", () => {
+  if (!data) return;
+  drawChart();
+  if (selected >= 0) drawFlame();
+});
+// Load the game font (VT323) from the repo via the FontFace API — a CSS
+// @font-face referenced during the initial document load can end up in an
+// error state (see index.html's note). Best-effort: if the file is not
+// reachable (page copied elsewhere), the monospace fallback stays.
+(function () {
+  if (typeof FontFace === "undefined") return;
+  try {
+    const face = new FontFace("GameFont", "url('../assets/fonts/VT323-Regular.ttf')");
+    face.load().then((f) => {
+      document.fonts.add(f);
+      const stack = "'GameFont', ui-monospace, Menlo, Consolas, monospace";
+      document.documentElement.style.setProperty("--mono", stack);
+      FONT = stack;
+      if (data) {
+        drawChart();
+        if (selected >= 0) drawFlame();
+      }
+    }).catch(() => {});
+  } catch (e) { /* keep the fallback stack */ }
+})();
+</script>
+</body>
+</html>

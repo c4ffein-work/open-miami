@@ -95,6 +95,11 @@ mod wasm_entry {
     const MAX_FRAME_DT: f32 = 0.1;
     /// Hold R this long (seconds) while alive to restart the floor.
     const RESTART_HOLD_SECS: f32 = 1.0;
+    /// Safety cap for the loading screen's PRECOMPUTING step: if the audio
+    /// pre-renders have not finished by then (broken OfflineAudioContext,
+    /// pathologically slow machine), the game starts anyway — every sound
+    /// falls back to live synthesis until its bake lands.
+    const PRECOMPUTE_CAP_MS: f64 = 6000.0;
 
     #[wasm_bindgen]
     extern "C" {
@@ -111,6 +116,13 @@ mod wasm_entry {
         // Open an external link in a new tab (defined in index.html).
         #[wasm_bindgen(js_namespace = window, js_name = openExternal)]
         fn open_external(url: &str);
+        // The HTML loading overlay: progress during the PRECOMPUTING
+        // (audio pre-render) step, and the hide call once the game may show
+        // its first screen (both defined in index.html).
+        #[wasm_bindgen(js_namespace = window, js_name = loadingProgress)]
+        fn loading_progress(done: u32, total: u32);
+        #[wasm_bindgen(js_namespace = window, js_name = loadingDone)]
+        fn loading_done();
         // Persistent settings (localStorage; defined in index.html).
         #[wasm_bindgen(js_namespace = window, js_name = getSetting)]
         fn get_setting(name: &str) -> Option<String>;
@@ -121,6 +133,75 @@ mod wasm_entry {
         // own pixel crosshair instead.
         #[wasm_bindgen(js_namespace = window, js_name = setCursorHidden)]
         fn set_cursor_hidden(hidden: bool);
+    }
+
+    /// Per-frame performance tracing (`?perf`): thin externs to the collector
+    /// in index.html (`window.__perf`). Every entry point checks
+    /// [`perf::enabled`] first, so a run without the flag never crosses the
+    /// wasm->JS boundary (the JS side guards again, belt and braces).
+    mod perf {
+        use wasm_bindgen::prelude::*;
+
+        #[wasm_bindgen]
+        extern "C" {
+            #[wasm_bindgen(js_namespace = window, js_name = perfSpan)]
+            fn js_span(name: &str, start: f64, dur: f64);
+            #[wasm_bindgen(js_namespace = window, js_name = perfFrameStart)]
+            fn js_frame_start(t: f64);
+            #[wasm_bindgen(js_namespace = window, js_name = perfFrameEnd)]
+            fn js_frame_end(t: f64);
+        }
+
+        thread_local! {
+            /// Read once from the URL on first use; wasm is single-threaded.
+            static ENABLED: bool = super::url_flag("perf");
+        }
+
+        pub fn enabled() -> bool {
+            ENABLED.with(|e| *e)
+        }
+
+        /// Same clock as the game loop's `performance.now()`.
+        fn now() -> f64 {
+            web_sys::window()
+                .and_then(|w| w.performance())
+                .map(|p| p.now())
+                .unwrap_or(0.0)
+        }
+
+        /// Open a trace frame at the rAF timestamp the loop already has.
+        /// Only called on frames that actually run (the FPS cap's skipped
+        /// frames must not open frames).
+        pub fn frame_start(t: f64) {
+            if enabled() {
+                js_frame_start(t);
+            }
+        }
+
+        /// Close the trace frame (computes its own end timestamp).
+        pub fn frame_end() {
+            if enabled() {
+                js_frame_end(now());
+            }
+        }
+
+        /// An open span; dropping it reports `[name, start, dur]` to the
+        /// collector — so it survives early returns. [`span`] returns `None`
+        /// when tracing is off: no clock read, no boundary crossing.
+        pub struct Span {
+            name: &'static str,
+            start: f64,
+        }
+
+        impl Drop for Span {
+            fn drop(&mut self) {
+                js_span(self.name, self.start, now() - self.start);
+            }
+        }
+
+        pub fn span(name: &'static str) -> Option<Span> {
+            enabled().then(|| Span { name, start: now() })
+        }
     }
 
     /// The `?viz` PROPS page's editable state of one prop: its art-pixel
@@ -1011,6 +1092,12 @@ mod wasm_entry {
         /// The pause menu's stacked SETTINGS modal is open (Esc pops one
         /// layer: settings -> pause -> game).
         pause_in_settings: bool,
+        /// The PRECOMPUTING step: the HTML loading overlay stays up while
+        /// the audio pre-render queue burns down at full budget, BEFORE the
+        /// first screen shows (works for any entry, `?floor=N` included).
+        /// Ends on completion or at the [`PRECOMPUTE_CAP_MS`] safety cap.
+        precomputing: bool,
+        precompute_started: f64,
         /// FPS counter (`?debug` only): frames counted since `fps_window`
         /// started, the window's start time (ms), and the last readout.
         fps_frames: u32,
@@ -1114,6 +1201,8 @@ mod wasm_entry {
                 cursor_hidden: false,
                 music_frozen: false,
                 pause_in_settings: false,
+                precomputing: true,
+                precompute_started: 0.0,
                 fps_frames: 0,
                 fps_window: 0.0,
                 fps_value: 0.0,
@@ -1279,6 +1368,29 @@ mod wasm_entry {
             };
             self.last_time = current_time;
 
+            // PRECOMPUTING: while the HTML loading overlay is still up, burn
+            // the audio pre-render queue down at full budget and report
+            // progress — the first screen only shows once every voice is
+            // baked (or the safety cap fires). No screen runs, no input is
+            // consumed; works identically for `?floor=N` starts.
+            if self.precomputing {
+                if self.precompute_started == 0.0 {
+                    self.precompute_started = current_time;
+                }
+                self.audio.set_pump_budget(8);
+                self.audio.update(current_time / 1000.0);
+                let (done, total) = self.audio.bake_progress();
+                loading_progress(done, total);
+                if self.audio.bake_complete()
+                    || current_time - self.precompute_started >= PRECOMPUTE_CAP_MS
+                {
+                    self.precomputing = false;
+                    loading_done();
+                }
+                input::end_frame();
+                return;
+            }
+
             // Follow window resizes, browser zoom and DPR changes (reading
             // layout sizes can force style work, so poll ~1/s, not per frame).
             if current_time - self.last_size_check >= 1000.0 {
@@ -1354,11 +1466,27 @@ mod wasm_entry {
                 }
             }
 
-            // Keep the music scheduler fed regardless of screen.
+            // Keep the music scheduler fed regardless of screen. (`music`
+            // span: note scheduling / node creation for the tracker.) The
+            // voice pre-render queue burns down fast on non-gameplay screens
+            // (a bake-kick hitch is invisible there) and gently in-game.
+            self.audio
+                .set_pump_budget(if self.screen == GameScreen::InGame {
+                    1
+                } else {
+                    6
+                });
+            let music_span = perf::span("music");
             self.audio.update(current_time / 1000.0);
+            drop(music_span);
 
-            // Hand the completed frame to the JS WebGL renderer.
+            // Hand the completed frame to the JS WebGL renderer. The `flush`
+            // span measures the whole JS renderer synchronously (frameRender
+            // runs inside it); renderer sub-spans nest inside it on the
+            // timeline.
+            let flush_span = perf::span("flush");
             graphics.flush();
+            drop(flush_span);
 
             // Update input state for next frame
             input::end_frame();
@@ -2877,6 +3005,7 @@ mod wasm_entry {
                 }
             }
 
+            let sim_span = perf::span("sim");
             if gate.is_some() {
                 // TUTORIAL FREEZE: only the player-driven systems advance
                 // (same list as the headless sim — see sim::gate_frozen_step).
@@ -2906,12 +3035,14 @@ mod wasm_entry {
                 // Drop weapons from downed enemies (player collects via the E key)
                 self.pickup_system.run(&mut self.world, dt);
             }
+            drop(sim_span);
 
             // Scenario (triggers -> dialogue / waves / doors / objective) and
             // elevator extraction. Both keep running while the completion
             // card plays so the doors stay lit. (While a gate is active the
             // scenario tick is a no-op — the clock is frozen — and the
             // elevators hold too.)
+            let scenario_span = perf::span("scenario");
             if let Some(sc) = self.scenario.as_mut() {
                 sc.tick(&mut self.world, dt);
                 for sfx in sc.drain_sfx() {
@@ -2926,6 +3057,7 @@ mod wasm_entry {
                     }
                 }
             }
+            drop(scenario_span);
             if gate.is_none() {
                 self.elevator_system.run(&mut self.world, dt);
             }
@@ -2942,6 +3074,11 @@ mod wasm_entry {
                 .as_ref()
                 .map(|sc| sc.floor().accent_rgb())
                 .unwrap_or((217, 119, 87));
+
+            // `record` span: the command-recording portion of the frame (world
+            // + HUD drawing, to the end of update_game). A drop guard so early
+            // returns (floor restart, extraction) still close it.
+            let _record_span = perf::span("record");
 
             // EXPERIMENT `?pixel=N`: the whole world layer (everything between
             // camera.apply and camera.reset) is rasterized at N-px art
@@ -3100,11 +3237,18 @@ mod wasm_entry {
                 crate::components::WeaponType::Shotgun => 2,
                 crate::components::WeaponType::Melee => 3,
             };
+            // Split point: `record` ends here — everything below (event
+            // drain, SFX voice creation in WebAudio, checkpoint snapshots,
+            // death/restart handling) is the `events` span, so audio-driven
+            // main-thread stalls show up under their own name.
+            drop(_record_span);
+            let _events_span = perf::span("events");
             let events = self.world.drain_events();
             // Bridge the frame's events into the scenario: a success on the
             // gated input releases the active tutorial gate (running the rest
             // of its step), and a `checkpoint` action that ran this frame is
             // snapshotted here, after the whole tick settled.
+            let gate_notify_span = perf::span("scenario");
             if let Some(sc) = self.scenario.as_mut() {
                 sc.gate_notify(&mut self.world, &events);
                 if sc.take_checkpoint_request() {
@@ -3114,6 +3258,10 @@ mod wasm_entry {
                     });
                 }
             }
+            drop(gate_notify_span);
+            // `sfx` span: the one-shot voice creation for this frame's
+            // events — WebAudio graph building, the suspected hitch source.
+            let _sfx_span = perf::span("sfx");
             for event in events {
                 use crate::components::{GameEvent, WeaponType};
                 match event {
@@ -3432,9 +3580,11 @@ mod wasm_entry {
                     || current_time - state.last_frame_ms >= 1000.0 / state.fps_cap as f64 * 0.9
             };
             if run {
+                perf::frame_start(current_time);
                 let mut state = game_state.borrow_mut();
                 state.last_frame_ms = current_time;
                 state.update(&graphics, current_time);
+                perf::frame_end();
             }
 
             // Schedule next frame

@@ -20,15 +20,37 @@
 //! designs through a [`web_sys::DynamicsCompressorNode`]. Everything gets
 //! per-play pitch / timing jitter (see the SFX section of [`AudioEngine`]).
 //!
+//! Because building those per-event node graphs live can stall the main
+//! thread (measured 30–100 ms on macOS Chrome), each one-shot kind is
+//! pre-rendered at startup: the same voice builders run into an
+//! [`web_sys::OfflineAudioContext`] and the resulting dry buffers replace
+//! live graph construction with a single `AudioBufferSourceNode` per play —
+//! see the "pre-rendered voices" section of [`AudioEngine`]. Until (or
+//! unless) a kind's buffers are ready, its `play_*` uses the live path.
+//!
+//! The MUSIC notes get the same treatment (the tracker's oscillator+gain
+//! construction per note was the last measured stall source, 70–113 ms):
+//! a song's pitch set is finite pattern data, so every distinct voice ×
+//! pitch it can schedule is baked at its exact frequency into a short mono
+//! buffer by the identical note builders (see [`AudioEngine::music_keys`] /
+//! `BakedMusic`), and `schedule_step` then fires one buffer source per note
+//! into the same live music bus — the per-bar lowpass sweep is untouched.
+//! The bake queue is prioritized: combat SFX first, then the current
+//! song's voices, then the rare SFX; a song switch re-enumerates and bakes
+//! in the background while unbaked notes fall back to live synthesis.
+//!
 //! Robustness first: if the `AudioContext` (or any node) fails to build we
 //! silently degrade to silence. Nothing in here ever panics or unwraps a
 //! fallible Web Audio call — every `Result` is swallowed so the game runs fine
 //! even when audio is unavailable or blocked by the browser.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
-    AudioBuffer, AudioContext, AudioDestinationNode, BiquadFilterNode, BiquadFilterType, GainNode,
-    OscillatorType, OverSampleType,
+    AudioBuffer, AudioContext, AudioDestinationNode, BaseAudioContext, BiquadFilterNode,
+    BiquadFilterType, GainNode, OfflineAudioContext, OscillatorType, OverSampleType,
 };
 
 /// Look-ahead window (seconds) for the music scheduler: we queue notes this far
@@ -1668,6 +1690,199 @@ mod sms_tables {
     pub const METAL02_TRANSIENTS: &[(f32, f32)] = &[(0.0272, 0.251), (0.0559, 1.000)];
 }
 
+/// How many pre-rendered jitter variants each one-shot SFX kind gets (see
+/// [`BakedSfx`]): a random one is picked per play, plus a small
+/// `playback_rate` jitter, so repeated shots never sound stamped.
+const SFX_VARIANTS: usize = 3;
+
+/// Every pre-renderable one-shot SFX voice. The discriminant indexes
+/// [`BakedSfx::bufs`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SfxKind {
+    AttackGun,
+    AttackMachinegun,
+    AttackShotgun,
+    AttackClub,
+    HitGun,
+    HitMachinegun,
+    HitShotgun,
+    HitClub,
+    EnemyDown,
+    PlayerHurt,
+    Pickup,
+    Throw,
+    Death,
+    LevelClear,
+    MaskCrack,
+    Elevator,
+}
+
+/// All kinds, in pre-render order (the combat sounds first — they are the
+/// expensive ones and the ones a firefight needs early).
+const SFX_KINDS: [SfxKind; 16] = [
+    SfxKind::AttackGun,
+    SfxKind::AttackMachinegun,
+    SfxKind::AttackShotgun,
+    SfxKind::AttackClub,
+    SfxKind::HitGun,
+    SfxKind::HitMachinegun,
+    SfxKind::HitShotgun,
+    SfxKind::HitClub,
+    SfxKind::EnemyDown,
+    SfxKind::PlayerHurt,
+    SfxKind::Pickup,
+    SfxKind::Throw,
+    SfxKind::Death,
+    SfxKind::LevelClear,
+    SfxKind::MaskCrack,
+    SfxKind::Elevator,
+];
+
+/// Where a pre-rendered voice plugs back into the live bus at play time: the
+/// same dry input + wet send its live synthesis uses, so the room, compressor
+/// and soft-clip behavior stay live and identical (only the *synthesis* is
+/// baked — always dry, before the reverb send).
+#[derive(Clone, Copy)]
+enum SfxRoute {
+    /// The gun / hit path ([`AudioEngine::voice_real`]) at this wet level.
+    Real(f64),
+    /// The melee / misc. compressed path ([`AudioEngine::voice`]) at this
+    /// wet level.
+    Melee(f64),
+    /// The bus's pre-wired default room voice ([`AudioEngine::sfx_out`]).
+    Room,
+}
+
+/// Per-kind pre-render parameters (mirrors the values inside each `play_*`).
+struct SfxSpec {
+    /// The live-bus routing reapplied at play time.
+    route: SfxRoute,
+    /// Seconds of dry voice to render (covers the longest tail incl. jitter;
+    /// the reverb tail is added live by the convolver, not baked).
+    len: f64,
+    /// Per-play `playback_rate` jitter — matches the magnitude of the live
+    /// path's top-level per-play pitch jitter (0 for the musical chimes,
+    /// which the live path never detunes).
+    rate_jitter: f64,
+}
+
+impl SfxKind {
+    /// The pre-render spec for this kind. `route`/`wet` mirror the `voice*`
+    /// call at the top of the kind's `synth_*` builder.
+    fn spec(self) -> SfxSpec {
+        let (route, len, rate_jitter) = match self {
+            SfxKind::AttackGun => (SfxRoute::Real(REAL_762X39.wet), 1.1, 0.05),
+            SfxKind::AttackMachinegun => (SfxRoute::Real(REAL_556.wet), 1.4, 0.05),
+            SfxKind::AttackShotgun => (SfxRoute::Real(REAL_762X54R.wet), 1.4, 0.05),
+            SfxKind::AttackClub => (SfxRoute::Melee(0.16), 0.55, 0.06),
+            SfxKind::HitGun => (SfxRoute::Real(0.5), 0.85, 0.05),
+            SfxKind::HitMachinegun => (SfxRoute::Real(0.5), 1.35, 0.08),
+            SfxKind::HitShotgun => (SfxRoute::Real(0.55), 0.85, 0.05),
+            SfxKind::HitClub => (SfxRoute::Real(0.5), 0.95, 0.05),
+            SfxKind::EnemyDown => (SfxRoute::Real(0.55), 1.5, 0.05),
+            SfxKind::PlayerHurt => (SfxRoute::Melee(0.30), 1.6, 0.05),
+            SfxKind::Pickup => (SfxRoute::Room, 0.35, 0.0),
+            SfxKind::Throw => (SfxRoute::Room, 0.4, 0.0),
+            SfxKind::Death => (SfxRoute::Room, 0.85, 0.0),
+            SfxKind::LevelClear => (SfxRoute::Room, 0.6, 0.0),
+            SfxKind::MaskCrack => (SfxRoute::Room, 0.55, 0.0),
+            SfxKind::Elevator => (SfxRoute::Room, 1.5, 0.0),
+        };
+        SfxSpec {
+            route,
+            len,
+            rate_jitter,
+        }
+    }
+}
+
+/// How many kinds at the head of [`SFX_KINDS`] are baked BEFORE the music
+/// voices: the combat sounds (attacks, hits, enemy-down, hurt, pickup,
+/// throw) a first firefight needs — the rare tail (death, level-clear,
+/// mask-crack, elevator) bakes after the music voices instead.
+const SFX_COMBAT_KINDS: usize = 12;
+
+/// A JS promise callback kept alive in [`BakedSfx::pending`].
+type RenderCallback = Closure<dyn FnMut(JsValue)>;
+
+/// The pre-rendered one-shot voices, shared with the async offline-render
+/// completion callbacks via `Rc`. A kind switches to its baked buffers —
+/// permanently — once all [`SFX_VARIANTS`] of them landed; until then its
+/// `play_*` keeps the live per-node synthesis (the fallback), so nothing
+/// changes while rendering is still in flight (or unavailable).
+struct BakedSfx {
+    /// `bufs[kind as usize]` = the finished variants for that kind (mono,
+    /// dry, at the live context's sample rate).
+    bufs: RefCell<Vec<Vec<AudioBuffer>>>,
+    /// Next variant index to kick, `kind * SFX_VARIANTS + variant`.
+    next: Cell<usize>,
+    /// The in-flight render's completion closures, kept alive until the next
+    /// kick replaces them (renders are sequential, so by then they have
+    /// fired). Bounded: at most one pair ever lives here.
+    pending: RefCell<Vec<RenderCallback>>,
+}
+
+/// One pre-renderable MUSIC voice: a tracker channel role × the scale
+/// degree it plays (drums carry no pitch; a pad key bakes its whole triad
+/// into one buffer). The set of keys a song can ever schedule is FINITE —
+/// its lanes are static pattern data — so [`AudioEngine::music_keys`]
+/// enumerates it exactly and each key is baked at its exact pitch (no
+/// `playback_rate` transposition: the timbre is untouched).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MusicKey {
+    /// Bass lane note at this scale degree.
+    Bass(i32),
+    /// Lead lane note at this scale degree.
+    Lead(i32),
+    /// Pad lane note: the full triad (root + third + fifth) in one buffer.
+    Pad(i32),
+    /// Arp lane note at this scale degree.
+    Arp(i32),
+    /// Drum lane kick.
+    Kick,
+    /// Drum lane hat.
+    Hat,
+    /// Drum lane snare.
+    Snare,
+}
+
+/// One music voice's bake slot: `None` until its offline render lands, then
+/// the finished mono buffer (song gain and envelope baked in — velocity/mix
+/// are per-song constants, so playback needs no gain node at all).
+struct MusicSlot {
+    key: MusicKey,
+    buf: Option<AudioBuffer>,
+}
+
+/// The pre-rendered note voices of the CURRENT song (see the
+/// "pre-rendered voices" section of [`AudioEngine`]): `schedule_step`
+/// swaps a note's per-node oscillator synthesis for one
+/// `AudioBufferSourceNode` into the same music bus the moment its slot is
+/// baked; unbaked slots fall back to the live path per note. Shared with
+/// the async completion callbacks via `Rc`.
+struct BakedMusic {
+    /// The finite voice set of the current song, in bake-priority order
+    /// (drums first — the densest lane — then bass, lead, arp, pad).
+    slots: RefCell<Vec<MusicSlot>>,
+    /// Next slot index to kick.
+    next: Cell<usize>,
+    /// Bumped by every [`AudioEngine::rebuild_music_bake`] (song switch): a
+    /// completion callback for a previous song's render sees the mismatch
+    /// and drops its buffer instead of landing it in the wrong slot.
+    gen: Cell<u32>,
+    /// The in-flight render's completion closures (same lifecycle as
+    /// [`BakedSfx::pending`]).
+    pending: RefCell<Vec<RenderCallback>>,
+}
+
+/// The offline render target while a pre-render is being *built*: the voice
+/// builders create their nodes in `ctx` and the voice front-end feeds `sink`
+/// (the offline destination) instead of the live bus.
+struct OfflineRender {
+    ctx: BaseAudioContext,
+    sink: web_sys::AudioNode,
+}
+
 /// The persistent SFX bus. Every one-shot flows in through a per-shot *voice*
 /// (see [`AudioEngine::voice`]) that splits into a dry path and a wet send.
 /// There are two parallel paths: the melee / misc. one drawn below
@@ -1735,6 +1950,25 @@ pub struct AudioEngine {
     mute: [bool; NUM_CHANNELS],
     /// Per-channel solo flags. If any is set, only soloed channels sound.
     solo: [bool; NUM_CHANNELS],
+    /// Pre-rendered one-shot voices (see [`BakedSfx`]); `Rc` so the async
+    /// offline-render completion callbacks can write finished buffers in.
+    baked: Rc<BakedSfx>,
+    /// Pre-rendered music note voices of the current song ([`BakedMusic`]).
+    baked_music: Rc<BakedMusic>,
+    /// One offline render in flight at a time — SFX or music (they are
+    /// chained frame by frame so graph construction never bursts onto a
+    /// single frame). Shared with the completion callbacks via `Rc`.
+    renders_in_flight: Rc<Cell<u32>>,
+    /// How many offline renders may run concurrently (the game loop sets it
+    /// per screen: gentle in-game, aggressive on loading/menu screens where
+    /// a construction hitch cannot be seen).
+    pump_budget: Cell<u32>,
+    /// Set when `OfflineAudioContext` turns out to be unavailable: the whole
+    /// bake queue (SFX and music) is abandoned, everything stays live.
+    render_dead: Cell<bool>,
+    /// `Some` only while an offline pre-render is being built: the voice
+    /// builders then target this context/sink instead of the live bus.
+    render: RefCell<Option<OfflineRender>>,
 }
 
 impl AudioEngine {
@@ -1748,7 +1982,7 @@ impl AudioEngine {
             .as_ref()
             .map(Self::make_music_bus)
             .unwrap_or((None, None));
-        Self {
+        let engine = Self {
             ctx,
             noise,
             sfx,
@@ -1763,7 +1997,24 @@ impl AudioEngine {
             song: SONGS[0],
             mute: [false; NUM_CHANNELS],
             solo: [false; NUM_CHANNELS],
-        }
+            baked: Rc::new(BakedSfx {
+                bufs: RefCell::new(vec![Vec::new(); SFX_KINDS.len()]),
+                next: Cell::new(0),
+                pending: RefCell::new(Vec::new()),
+            }),
+            baked_music: Rc::new(BakedMusic {
+                slots: RefCell::new(Vec::new()),
+                next: Cell::new(0),
+                gen: Cell::new(0),
+                pending: RefCell::new(Vec::new()),
+            }),
+            renders_in_flight: Rc::new(Cell::new(0)),
+            pump_budget: Cell::new(1),
+            render_dead: Cell::new(false),
+            render: RefCell::new(None),
+        };
+        engine.rebuild_music_bake();
+        engine
     }
 
     /// Resume the context. Browsers start it suspended until a user gesture,
@@ -1797,6 +2048,36 @@ impl AudioEngine {
         self.enabled.get()
     }
 
+    /// How many offline pre-renders may run concurrently (see `update`).
+    pub fn set_pump_budget(&self, n: u32) {
+        self.pump_budget.set(n.max(1));
+    }
+
+    /// Pre-render progress `(done, total)` across the SFX variants and the
+    /// current song's note voices — the loading screen's PRECOMPUTING bar.
+    pub fn bake_progress(&self) -> (u32, u32) {
+        let sfx_done: usize = self.baked.bufs.borrow().iter().map(Vec::len).sum();
+        let sfx_total = SFX_KINDS.len() * SFX_VARIANTS;
+        let slots = self.baked_music.slots.borrow();
+        let music_done = slots.iter().filter(|s| s.buf.is_some()).count();
+        let music_total = slots.len();
+        (
+            (sfx_done + music_done) as u32,
+            (sfx_total + music_total) as u32,
+        )
+    }
+
+    /// Whether the pre-render queue is finished (or can never finish — no
+    /// `OfflineAudioContext`, or renders died: the live path serves forever
+    /// and the loading screen must not wait).
+    pub fn bake_complete(&self) -> bool {
+        if self.ctx.is_none() || self.render_dead.get() {
+            return true;
+        }
+        let (done, total) = self.bake_progress();
+        done >= total
+    }
+
     // --- one-shot SFX: attacks ---------------------------------------------
     //
     // The guns follow the measured profile of field-recorded gunshots
@@ -1814,6 +2095,18 @@ impl AudioEngine {
     /// GUN attack — a 7.62×39 single: bright uncompressed crack,
     /// mid-dominant plateau body, the room, then the slide cycling.
     pub fn play_attack_gun(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::AttackGun) {
+            return; // pre-rendered voice fired: 2–3 nodes instead of ~50
+        }
+        self.synth_attack_gun();
+    }
+
+    /// The live synthesis of [`Self::play_attack_gun`] — also what the
+    /// offline pre-render runs (see [`Self::render_variant`]).
+    fn synth_attack_gun(&self) {
         let t = self.t0();
         let out = match self.voice_real(REAL_762X39.wet, 1.3) {
             Some(v) => v,
@@ -1835,6 +2128,17 @@ impl AudioEngine {
     /// each a bright crack + plateau body, their room tails overlapping into
     /// a continuous wash; bolt clacks under each round, clatter after.
     pub fn play_attack_machinegun(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::AttackMachinegun) {
+            return;
+        }
+        self.synth_attack_machinegun();
+    }
+
+    /// Live synthesis of [`Self::play_attack_machinegun`] (also pre-rendered).
+    fn synth_attack_machinegun(&self) {
         let t = self.t0();
         let out = match self.voice_real(REAL_556.wet, 1.3) {
             Some(v) => v,
@@ -1873,6 +2177,17 @@ impl AudioEngine {
     /// low-mid body, the room, then a real pump reload: ~1 s of multiple
     /// bright 2–8 kHz clacks (pump back at +270 ms, forward, shell), no low.
     pub fn play_attack_shotgun(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::AttackShotgun) {
+            return;
+        }
+        self.synth_attack_shotgun();
+    }
+
+    /// Live synthesis of [`Self::play_attack_shotgun`] (also pre-rendered).
+    fn synth_attack_shotgun(&self) {
         let t = self.t0();
         let out = match self.voice_real(REAL_762X54R.wet, 1.3) {
             Some(v) => v,
@@ -1890,6 +2205,17 @@ impl AudioEngine {
     /// in [`Self::play_hit_club`]. Style-independent (the round-2 recipe,
     /// restored verbatim).
     pub fn play_attack_club(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::AttackClub) {
+            return;
+        }
+        self.synth_attack_club();
+    }
+
+    /// Live synthesis of [`Self::play_attack_club`] (also pre-rendered).
+    fn synth_attack_club(&self) {
         let t = self.t0();
         let out = match self.voice(0.16, 1.0) {
             Some(v) => v,
@@ -1972,6 +2298,17 @@ impl AudioEngine {
     /// real bus (wet 0.5, drive 1.3), ±5 % pitch; nothing else on top but
     /// the 40 % quiet ricochet.
     pub fn play_hit_gun(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::HitGun) {
+            return;
+        }
+        self.synth_hit_gun();
+    }
+
+    /// Live synthesis of [`Self::play_hit_gun`] (also pre-rendered).
+    fn synth_hit_gun(&self) {
         let t = self.t0();
         let out = match self.voice_real(0.5, 1.3) {
             Some(v) => v,
@@ -1988,6 +2325,17 @@ impl AudioEngine {
     /// burst rate, level 0.75, ±8 % pitch, a ricochet on about one round in
     /// three.
     pub fn play_hit_machinegun(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::HitMachinegun) {
+            return;
+        }
+        self.synth_hit_machinegun();
+    }
+
+    /// Live synthesis of [`Self::play_hit_machinegun`] (also pre-rendered).
+    fn synth_hit_machinegun(&self) {
         let t = self.t0();
         let out = match self.voice_real(0.5, 1.3) {
             Some(v) => v,
@@ -2009,6 +2357,17 @@ impl AudioEngine {
     /// SHOTGUN hit — 3–4 overlapping METAL02 plays spread over
     /// 25 ms at pitch 0.85–1.0 (a bigger plate) plus the pellet debris ticks.
     pub fn play_hit_shotgun(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::HitShotgun) {
+            return;
+        }
+        self.synth_hit_shotgun();
+    }
+
+    /// Live synthesis of [`Self::play_hit_shotgun`] (also pre-rendered).
+    fn synth_hit_shotgun(&self) {
         let t = self.t0();
         let out = match self.voice_real(0.55, 1.3) {
             Some(v) => v,
@@ -2044,6 +2403,17 @@ impl AudioEngine {
     /// scale 1.25 (a bigger, slower body) with the bat contact tick and a
     /// hollow 130 Hz body knock kept on top.
     pub fn play_hit_club(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::HitClub) {
+            return;
+        }
+        self.synth_hit_club();
+    }
+
+    /// Live synthesis of [`Self::play_hit_club`] (also pre-rendered).
+    fn synth_hit_club(&self) {
         let t = self.t0();
         let out = match self.voice_real(0.5, 1.3) {
             Some(v) => v,
@@ -2080,6 +2450,17 @@ impl AudioEngine {
     /// three falling METAL02 plays (pitch 0.9 / 0.8 / 0.7, time scale 1.2)
     /// with loose-part rattle between and after, ending on a low rumble.
     pub fn play_enemy_down(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::EnemyDown) {
+            return;
+        }
+        self.synth_enemy_down();
+    }
+
+    /// Live synthesis of [`Self::play_enemy_down`] (also pre-rendered).
+    fn synth_enemy_down(&self) {
         let t = self.t0();
         let out = match self.voice_real(0.55, 1.3) {
             Some(v) => v,
@@ -2215,7 +2596,7 @@ impl AudioEngine {
         pitch: f32,
         time_scale: f32,
     ) {
-        let (ctx, buf) = match (&self.ctx, &self.noise) {
+        let (ctx, buf) = match (self.bctx(), &self.noise) {
             (Some(c), Some(b)) => (c, b),
             _ => return,
         };
@@ -2338,21 +2719,33 @@ impl AudioEngine {
 
     /// Legacy alias — a generic gunshot. Forwards to [`Self::play_attack_gun`].
     pub fn play_shoot(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
         self.play_attack_gun();
     }
 
     /// Legacy alias — a generic bullet impact. Forwards to [`Self::play_hit_gun`].
     pub fn play_hit(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
         self.play_hit_gun();
     }
 
     /// Legacy alias for the old "fist" name — now the CLUB swing.
     pub fn play_attack_fist(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
         self.play_attack_club();
     }
 
     /// Legacy alias for the old "fist" name — now the CLUB impact.
     pub fn play_hit_fist(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
         self.play_hit_club();
     }
 
@@ -2360,6 +2753,17 @@ impl AudioEngine {
 
     /// Bright rising two-tone — weapon pickup / swap.
     pub fn play_pickup(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::Pickup) {
+            return;
+        }
+        self.synth_pickup();
+    }
+
+    /// Live synthesis of [`Self::play_pickup`] (also pre-rendered).
+    fn synth_pickup(&self) {
         let t = self.t0();
         self.tone(523.25, 523.25, t, 0.08, 0.20, OscillatorType::Triangle);
         self.tone(
@@ -2374,6 +2778,17 @@ impl AudioEngine {
 
     /// Filtered noise whoosh — a thrown weapon.
     pub fn play_throw(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::Throw) {
+            return;
+        }
+        self.synth_throw();
+    }
+
+    /// Live synthesis of [`Self::play_throw`] (also pre-rendered).
+    fn synth_throw(&self) {
         let t = self.t0();
         self.noise(t, 0.22, 0.22, BiquadFilterType::Highpass, 200.0, 1600.0);
     }
@@ -2382,6 +2797,17 @@ impl AudioEngine {
     /// slam, a big 130 → 45 Hz thump, a crunch band) driven hot, with a
     /// loud, longer clipped grunt.
     pub fn play_player_hurt(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::PlayerHurt) {
+            return;
+        }
+        self.synth_player_hurt();
+    }
+
+    /// Live synthesis of [`Self::play_player_hurt`] (also pre-rendered).
+    fn synth_player_hurt(&self) {
         let t = self.t0();
         let out = match self.voice(0.30, 4.0) {
             Some(v) => v,
@@ -2418,6 +2844,17 @@ impl AudioEngine {
 
     /// Longer downward dive — the player dies / SYSTEM HALTED.
     pub fn play_death(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::Death) {
+            return;
+        }
+        self.synth_death();
+    }
+
+    /// Live synthesis of [`Self::play_death`] (also pre-rendered).
+    fn synth_death(&self) {
         let t = self.t0();
         self.tone(420.0, 40.0, t, 0.65, 0.32, OscillatorType::Sawtooth);
         self.noise(t, 0.60, 0.18, BiquadFilterType::Lowpass, 1800.0, 120.0);
@@ -2425,6 +2862,17 @@ impl AudioEngine {
 
     /// Short triumphant arp — SECTOR PURGED.
     pub fn play_level_clear(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::LevelClear) {
+            return;
+        }
+        self.synth_level_clear();
+    }
+
+    /// Live synthesis of [`Self::play_level_clear`] (also pre-rendered).
+    fn synth_level_clear(&self) {
         let t = self.t0();
         let notes = [523.25, 659.25, 783.99, 1046.50];
         for (i, f) in notes.iter().enumerate() {
@@ -2435,6 +2883,17 @@ impl AudioEngine {
 
     /// Nasty shattering noise burst — a boss's mask breaks. A special hit.
     pub fn play_mask_crack(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::MaskCrack) {
+            return;
+        }
+        self.synth_mask_crack();
+    }
+
+    /// Live synthesis of [`Self::play_mask_crack`] (also pre-rendered).
+    fn synth_mask_crack(&self) {
         let t = self.t0();
         self.noise(t, 0.25, 0.40, BiquadFilterType::Highpass, 6000.0, 800.0);
         self.tone(300.0, 90.0, t, 0.18, 0.22, OscillatorType::Square);
@@ -2451,6 +2910,17 @@ impl AudioEngine {
     /// A rising, ominous elevator ding — the doors close and the floor drops.
     /// A swelling detuned drone climbs to a pair of bright bell dings.
     pub fn play_elevator(&self) {
+        if !self.enabled.get() {
+            return; // sound off: build NO nodes (the context is suspended anyway)
+        }
+        if self.play_baked(SfxKind::Elevator) {
+            return;
+        }
+        self.synth_elevator();
+    }
+
+    /// Live synthesis of [`Self::play_elevator`] (also pre-rendered).
+    fn synth_elevator(&self) {
         let t = self.t0();
         // Slow ominous swell rising a fifth.
         self.tone(110.0, 165.0, t, 0.95, 0.16, OscillatorType::Sawtooth);
@@ -2460,6 +2930,267 @@ impl AudioEngine {
         // The "ding" at the top — two chiming sines a fifth apart.
         self.tone(880.0, 880.0, t + 0.72, 0.5, 0.18, OscillatorType::Sine);
         self.tone(1318.5, 1318.5, t + 0.78, 0.45, 0.11, OscillatorType::Sine);
+    }
+
+    // --- pre-rendered voices -----------------------------------------------
+    //
+    // Building a fresh Web Audio graph per shot (oscillators + envelopes +
+    // WaveShaper + sends — ~50 nodes for a gunshot, ~250 for a burst)
+    // intermittently stalls the main thread 30–100 ms on macOS Chrome. So at
+    // startup each one-shot kind's voice is rendered — by the SAME synthesis
+    // code, redirected into an `OfflineAudioContext` — into SFX_VARIANTS dry
+    // mono `AudioBuffer`s (background, one render in flight at a time, driven
+    // from `update`). Once a kind's variants are all in, its `play_*` becomes
+    // ONE `AudioBufferSourceNode` + the 1–2 gain nodes of its bus routing:
+    // the room reverb, compressor and bus soft-clip stay live and identical
+    // because only the pre-send dry signal is baked. Per-play variety: a
+    // random variant + `playback_rate` jitter matching the live pitch jitter.
+
+    /// Play `kind` from its pre-rendered buffers. `false` = not ready yet
+    /// (or no context): the caller falls back to live synthesis.
+    fn play_baked(&self, kind: SfxKind) -> bool {
+        let bufs = self.baked.bufs.borrow();
+        let set = &bufs[kind as usize];
+        if set.len() < SFX_VARIANTS {
+            return false;
+        }
+        let ctx = match &self.ctx {
+            Some(c) => c,
+            None => return false,
+        };
+        let spec = kind.spec();
+        let out = match spec.route {
+            // Same dry input + wet send the live voice uses; drive 1.0 — the
+            // per-voice soft-clip is already baked into the buffer.
+            SfxRoute::Real(wet) => self.voice_route(wet, 1.0, true),
+            SfxRoute::Melee(wet) => self.voice_route(wet, 1.0, false),
+            SfxRoute::Room => self.sfx_out(),
+        };
+        let out = match out {
+            Some(o) => o,
+            None => return false,
+        };
+        let src = match ctx.create_buffer_source() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let variant = ((self.rand() * SFX_VARIANTS as f64) as usize).min(SFX_VARIANTS - 1);
+        src.set_buffer(Some(&set[variant]));
+        if spec.rate_jitter > 0.0 {
+            let _ = src
+                .playback_rate()
+                .set_value_at_time(self.jit(spec.rate_jitter) as f32, 0.0);
+        }
+        let _ = src.connect_with_audio_node(&out);
+        // The buffer carries the live path's SFX_LEAD of silence at its
+        // head, so "as soon as possible" keeps the same transient safety.
+        let sched: &web_sys::AudioScheduledSourceNode = src.as_ref();
+        let _ = sched.start();
+        true
+    }
+
+    /// Run `kind`'s live synthesis builder (used both by the `play_*`
+    /// fallbacks — indirectly — and by the offline pre-render).
+    fn synth(&self, kind: SfxKind) {
+        match kind {
+            SfxKind::AttackGun => self.synth_attack_gun(),
+            SfxKind::AttackMachinegun => self.synth_attack_machinegun(),
+            SfxKind::AttackShotgun => self.synth_attack_shotgun(),
+            SfxKind::AttackClub => self.synth_attack_club(),
+            SfxKind::HitGun => self.synth_hit_gun(),
+            SfxKind::HitMachinegun => self.synth_hit_machinegun(),
+            SfxKind::HitShotgun => self.synth_hit_shotgun(),
+            SfxKind::HitClub => self.synth_hit_club(),
+            SfxKind::EnemyDown => self.synth_enemy_down(),
+            SfxKind::PlayerHurt => self.synth_player_hurt(),
+            SfxKind::Pickup => self.synth_pickup(),
+            SfxKind::Throw => self.synth_throw(),
+            SfxKind::Death => self.synth_death(),
+            SfxKind::LevelClear => self.synth_level_clear(),
+            SfxKind::MaskCrack => self.synth_mask_crack(),
+            SfxKind::Elevator => self.synth_elevator(),
+        }
+    }
+
+    /// Advance the background pre-render: kick at most one offline render
+    /// per call (per frame). Called from [`Self::update`]. Priority order:
+    /// the combat one-shots first (the sounds a first firefight needs —
+    /// the first [`SFX_COMBAT_KINDS`] of [`SFX_KINDS`]), then the current
+    /// song's music note voices, then the rare one-shots (death,
+    /// level-clear, mask-crack, elevator). If `OfflineAudioContext` is
+    /// unavailable the whole queue is abandoned and everything stays on
+    /// live synthesis.
+    fn pump_prerender(&self) {
+        if self.ctx.is_none()
+            || self.renders_in_flight.get() >= self.pump_budget.get().max(1)
+            || self.render_dead.get()
+        {
+            return;
+        }
+        let combat = SFX_COMBAT_KINDS.min(SFX_KINDS.len()) * SFX_VARIANTS;
+        let total = SFX_KINDS.len() * SFX_VARIANTS;
+        let i = self.baked.next.get();
+        if i < combat {
+            self.kick_sfx_render(i);
+            return;
+        }
+        if self.pump_music_bake() {
+            return; // a music voice render was kicked this frame
+        }
+        if i < total {
+            self.kick_sfx_render(i);
+        }
+    }
+
+    /// Kick the offline render of SFX queue entry `i` (one variant of one
+    /// kind), advancing the queue on success and abandoning all baking on
+    /// failure (graceful: live synthesis forever).
+    fn kick_sfx_render(&self, i: usize) {
+        if self.render_variant(SFX_KINDS[i / SFX_VARIANTS]) {
+            self.baked.next.set(i + 1);
+        } else {
+            self.render_dead.set(true);
+        }
+    }
+
+    /// Kick the next unbaked music voice render, if any. `true` = one was
+    /// kicked (or baking just died) — the caller should not also kick an
+    /// SFX render this frame; `false` = every music slot is baked.
+    fn pump_music_bake(&self) -> bool {
+        let m = &self.baked_music;
+        let len = m.slots.borrow().len();
+        let mut i = m.next.get();
+        while i < len && m.slots.borrow()[i].buf.is_some() {
+            i += 1;
+        }
+        m.next.set(i);
+        if i >= len {
+            return false;
+        }
+        if self.render_music_slot(i) {
+            m.next.set(i + 1);
+        } else {
+            self.render_dead.set(true);
+        }
+        true
+    }
+
+    /// Build one offline variant of `kind`: redirect the voice builders into
+    /// a fresh mono `OfflineAudioContext` (same sample rate as the live one,
+    /// [`SfxSpec::len`] seconds), run the kind's live synthesis code
+    /// unchanged, then start the async render; its completion callback
+    /// stores the `AudioBuffer` and releases [`BakedSfx::busy`]. Returns
+    /// `false` if the offline context can't even be created.
+    fn render_variant(&self, kind: SfxKind) -> bool {
+        let live = match &self.ctx {
+            Some(c) => c,
+            None => return false,
+        };
+        let sr = live.sample_rate();
+        let spec = kind.spec();
+        let frames = ((sr as f64) * spec.len).ceil().max(1.0) as u32;
+        let off = match OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
+            1, frames, sr,
+        ) {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        let sink = AsRef::<web_sys::AudioNode>::as_ref(&off.destination()).clone();
+        *self.render.borrow_mut() = Some(OfflineRender {
+            ctx: AsRef::<BaseAudioContext>::as_ref(&off).clone(),
+            sink,
+        });
+        self.synth(kind);
+        *self.render.borrow_mut() = None;
+        let promise = match off.start_rendering() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        self.renders_in_flight.set(self.renders_in_flight.get() + 1);
+        let store = Rc::clone(&self.baked);
+        let inflight = Rc::clone(&self.renders_in_flight);
+        let kidx = kind as usize;
+        let done = Closure::once(move |v: JsValue| {
+            if let Ok(buf) = v.dyn_into::<AudioBuffer>() {
+                store.bufs.borrow_mut()[kidx].push(buf);
+            }
+            inflight.set(inflight.get().saturating_sub(1));
+        });
+        let inflight = Rc::clone(&self.renders_in_flight);
+        // A rejected render skips this variant: the kind never completes its
+        // set and permanently keeps the live path (graceful).
+        let fail = Closure::once(move |_e: JsValue| inflight.set(inflight.get().saturating_sub(1)));
+        let _ = promise.then2(&done, &fail);
+        // Keep the pair alive until the next kick (they will have fired by
+        // then — renders are strictly sequential).
+        // Concurrent renders may be pending: never clear here — the pile is
+        // pruned from update() once nothing is in flight.
+        let mut pending = self.baked.pending.borrow_mut();
+        pending.push(done);
+        pending.push(fail);
+        true
+    }
+
+    /// Build the offline render of music voice slot `i`: same recipe as
+    /// [`Self::render_variant`] — redirect the note builders into a fresh
+    /// mono `OfflineAudioContext` (live sample rate, [`Self::music_key_len`]
+    /// seconds), run the note's LIVE synthesis code unchanged at t = 0, then
+    /// start the async render; its completion callback stores the
+    /// `AudioBuffer` into the slot (unless the song changed meanwhile — the
+    /// [`BakedMusic::gen`] guard) and decrements [`Self::renders_in_flight`].
+    fn render_music_slot(&self, i: usize) -> bool {
+        let live = match &self.ctx {
+            Some(c) => c,
+            None => return false,
+        };
+        let key = match self.baked_music.slots.borrow().get(i) {
+            Some(slot) => slot.key,
+            None => return false,
+        };
+        let sr = live.sample_rate();
+        let frames = ((sr as f64) * self.music_key_len(key)).ceil().max(1.0) as u32;
+        let off = match OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
+            1, frames, sr,
+        ) {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        let sink = AsRef::<web_sys::AudioNode>::as_ref(&off.destination()).clone();
+        *self.render.borrow_mut() = Some(OfflineRender {
+            ctx: AsRef::<BaseAudioContext>::as_ref(&off).clone(),
+            sink,
+        });
+        self.synth_music_note(key, 0.0);
+        *self.render.borrow_mut() = None;
+        let promise = match off.start_rendering() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        self.renders_in_flight.set(self.renders_in_flight.get() + 1);
+        let store = Rc::clone(&self.baked_music);
+        let inflight = Rc::clone(&self.renders_in_flight);
+        let gen = self.baked_music.gen.get();
+        let done = Closure::once(move |v: JsValue| {
+            if store.gen.get() == gen {
+                if let Ok(buf) = v.dyn_into::<AudioBuffer>() {
+                    if let Some(slot) = store.slots.borrow_mut().get_mut(i) {
+                        slot.buf = Some(buf);
+                    }
+                }
+            }
+            inflight.set(inflight.get().saturating_sub(1));
+        });
+        let inflight = Rc::clone(&self.renders_in_flight);
+        // A rejected render leaves the slot unbaked forever: that one voice
+        // permanently keeps the live per-note path (graceful).
+        let fail = Closure::once(move |_e: JsValue| inflight.set(inflight.get().saturating_sub(1)));
+        let _ = promise.then2(&done, &fail);
+        // Concurrent renders may be pending: never clear here — the pile is
+        // pruned from update() once nothing is in flight.
+        let mut pending = self.baked_music.pending.borrow_mut();
+        pending.push(done);
+        pending.push(fail);
+        true
     }
 
     // --- SFX building blocks -----------------------------------------------
@@ -2648,7 +3379,7 @@ impl AudioEngine {
         f1: f64,
         q: f64,
     ) {
-        let (ctx, buf) = match (&self.ctx, &self.noise) {
+        let (ctx, buf) = match (self.bctx(), &self.noise) {
             (Some(c), Some(b)) => (c, b),
             _ => return,
         };
@@ -2740,7 +3471,7 @@ impl AudioEngine {
     /// (6–25 ms, lowpassed at ~3 kHz, decaying), the early reflections of
     /// whatever is played into it. Falls back to `out` if nodes fail.
     fn crack_bus(&self, out: &web_sys::AudioNode) -> web_sys::AudioNode {
-        let ctx = match &self.ctx {
+        let ctx = match self.bctx() {
             Some(c) => c,
             None => return out.clone(),
         };
@@ -2796,7 +3527,7 @@ impl AudioEngine {
         dur: f64,
         clamp: Option<f64>,
     ) {
-        let (ctx, buf) = match (&self.ctx, &self.noise) {
+        let (ctx, buf) = match (self.bctx(), &self.noise) {
             (Some(c), Some(b)) => (c, b),
             _ => return,
         };
@@ -2862,7 +3593,7 @@ impl AudioEngine {
         if depth <= 0.0 {
             return out.clone();
         }
-        let ctx = match &self.ctx {
+        let ctx = match self.bctx() {
             Some(c) => c,
             None => return out.clone(),
         };
@@ -2895,7 +3626,7 @@ impl AudioEngine {
         d20: f64,
         peak: f64,
     ) {
-        let ctx = match &self.ctx {
+        let ctx = match self.bctx() {
             Some(c) => c,
             None => return,
         };
@@ -3044,7 +3775,7 @@ impl AudioEngine {
     /// hoarseness) whose pitch sags, through a swept, resonant bandpass so it
     /// reads as an "uh!" rather than a buzz.
     fn grunt(&self, out: &web_sys::AudioNode, t: f64, f: f64, dur: f64, peak: f64) {
-        let ctx = match &self.ctx {
+        let ctx = match self.bctx() {
             Some(c) => c,
             None => return,
         };
@@ -3085,6 +3816,9 @@ impl AudioEngine {
 
     /// Begin the looping backing track using the current song (idempotent).
     pub fn start_music(&mut self) {
+        if !self.enabled.get() {
+            return; // sound off: don't schedule anything
+        }
         if self.music_playing {
             return;
         }
@@ -3101,11 +3835,17 @@ impl AudioEngine {
 
     /// Swap the active song. Takes effect from the next scheduled step, so a
     /// switch while playing is seamless (no gap, no restart of the audio clock).
-    /// The arrangement restarts from its first section.
+    /// The arrangement restarts from its first section. A NEW song's note
+    /// voices start baking in the background ([`BakedMusic`]); until each
+    /// lands its notes fall back to live oscillator synthesis per step.
     pub fn set_song(&mut self, spec: SongSpec) {
+        let changed = self.song.name != spec.name;
         self.song = spec;
         self.section = 0;
         self.step = 0;
+        if changed {
+            self.rebuild_music_bake();
+        }
     }
 
     /// Select a song by index into [`SONGS`] (clamped) and start playing it.
@@ -3336,6 +4076,22 @@ impl AudioEngine {
     /// Drive the look-ahead scheduler. Call every frame; `now_seconds` is
     /// unused (we trust the audio clock), kept for a stable game-loop signature.
     pub fn update(&mut self, _now_seconds: f64) {
+        // Chip away at the pre-render queue — combat SFX, then the song's
+        // music voices, then rare SFX — independent of the sound toggle, so
+        // the baked voices are ready the moment sound comes (back) on. Up to
+        // `pump_budget` renders run concurrently (the game loop raises the
+        // budget on loading/menu screens to burn the queue down before
+        // gameplay, where a construction hitch would be visible).
+        if self.renders_in_flight.get() == 0 {
+            self.baked.pending.borrow_mut().clear();
+            self.baked_music.pending.borrow_mut().clear();
+        }
+        for _ in 0..self.pump_budget.get().max(1) {
+            self.pump_prerender();
+        }
+        if !self.enabled.get() {
+            return; // sound off: the scheduler idles entirely
+        }
         if !self.music_playing {
             return;
         }
@@ -3383,29 +4139,105 @@ impl AudioEngine {
     }
 
     /// Schedule one step of the current section (all channels) at time `t`.
+    /// Every note goes through [`Self::music_note`]: one pre-baked
+    /// `AudioBufferSourceNode` when the voice's buffer is ready, the live
+    /// oscillator synthesis otherwise.
     fn schedule_step(&self, step: usize, t: f64) {
         let sec = match self.section_ref() {
             Some(s) => s,
             None => return,
         };
-        let s = &self.song;
-        let step_dur = self.step_dur();
-        let gain = MUSIC_GAIN * s.intensity;
-
         if self.channel_audible(0) {
             if let Some(d) = degree_at(sec.bass, step) {
-                let f = degree_freq(s.root, s.scale, d);
-                self.music_tone(f, f, t, step_dur * 1.9, gain * 1.3, s.bass_wave);
+                self.music_note(MusicKey::Bass(d), t);
             }
         }
         if self.channel_audible(1) {
             if let Some(d) = degree_at(sec.lead, step) {
-                let f = degree_freq(s.root, s.scale, d);
-                self.music_tone(f, f, t, step_dur * 0.9, gain, s.lead_wave);
+                self.music_note(MusicKey::Lead(d), t);
             }
         }
         if self.channel_audible(2) {
             if let Some(d) = degree_at(sec.pad, step) {
+                self.music_note(MusicKey::Pad(d), t);
+            }
+        }
+        if self.channel_audible(3) {
+            if let Some(d) = degree_at(sec.arp, step) {
+                self.music_note(MusicKey::Arp(d), t);
+            }
+        }
+        if self.channel_audible(4) {
+            match drum_at(sec.drums, step) {
+                Silent => {}
+                Kick => self.music_note(MusicKey::Kick, t),
+                Hat => self.music_note(MusicKey::Hat, t),
+                Snare => self.music_note(MusicKey::Snare, t),
+            }
+        }
+    }
+
+    /// Play one music voice at absolute time `t`: the pre-baked buffer if it
+    /// landed (a single source node into the live music bus — the per-bar
+    /// filter sweep still shapes it downstream), else the live synthesis.
+    fn music_note(&self, key: MusicKey, t: f64) {
+        if self.play_music_baked(key, t) {
+            return;
+        }
+        self.synth_music_note(key, t);
+    }
+
+    /// Fire `key` from its pre-rendered buffer at time `t`. `false` = not
+    /// baked yet (or no context): the caller falls back to live synthesis.
+    fn play_music_baked(&self, key: MusicKey, t: f64) -> bool {
+        let ctx = match &self.ctx {
+            Some(c) => c,
+            None => return false,
+        };
+        let slots = self.baked_music.slots.borrow();
+        let buf = match slots
+            .iter()
+            .find(|s| s.key == key)
+            .and_then(|s| s.buf.as_ref())
+        {
+            Some(b) => b,
+            None => return false,
+        };
+        let out = match self.music_out() {
+            Some(o) => o,
+            None => return false,
+        };
+        let src = match ctx.create_buffer_source() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        src.set_buffer(Some(buf));
+        if src.connect_with_audio_node(&out).is_err() {
+            return false;
+        }
+        let sched: &web_sys::AudioScheduledSourceNode = src.as_ref();
+        let _ = sched.start_with_when(t);
+        true
+    }
+
+    /// The LIVE synthesis of one music voice at absolute time `t` — also
+    /// what the offline pre-render runs (at t = 0, see
+    /// [`Self::render_music_slot`]), so a baked note is the identical
+    /// signal, just rendered ahead of time.
+    fn synth_music_note(&self, key: MusicKey, t: f64) {
+        let s = &self.song;
+        let step_dur = self.step_dur();
+        let gain = MUSIC_GAIN * s.intensity;
+        match key {
+            MusicKey::Bass(d) => {
+                let f = degree_freq(s.root, s.scale, d);
+                self.music_tone(f, f, t, step_dur * 1.9, gain * 1.3, s.bass_wave);
+            }
+            MusicKey::Lead(d) => {
+                let f = degree_freq(s.root, s.scale, d);
+                self.music_tone(f, f, t, step_dur * 0.9, gain, s.lead_wave);
+            }
+            MusicKey::Pad(d) => {
                 // Bloom the pad note into a triad (root + third + fifth), held
                 // across several steps with a slow attack for a chord bed.
                 for interval in [0, 2, 4] {
@@ -3413,16 +4245,84 @@ impl AudioEngine {
                     self.music_pad(f, t, step_dur * 4.0, gain * 0.45, s.pad_wave);
                 }
             }
-        }
-        if self.channel_audible(3) {
-            if let Some(d) = degree_at(sec.arp, step) {
+            MusicKey::Arp(d) => {
                 let f = degree_freq(s.root, s.scale, d);
                 self.music_tone(f, f, t, step_dur * 0.7, gain * 0.7, s.arp_wave);
             }
+            MusicKey::Kick => self.drum(Kick, t, gain),
+            MusicKey::Hat => self.drum(Hat, t, gain),
+            MusicKey::Snare => self.drum(Snare, t, gain),
         }
-        if self.channel_audible(4) {
-            self.drum(drum_at(sec.drums, step), t, gain);
+    }
+
+    /// Seconds of dry signal one music voice needs when baked: the note
+    /// duration its live envelope uses (a function of the song's step
+    /// length — see [`Self::synth_music_note`]) plus the builders' small
+    /// stop margin.
+    fn music_key_len(&self, key: MusicKey) -> f64 {
+        let sd = self.step_dur();
+        match key {
+            MusicKey::Bass(_) => sd * 1.9 + 0.03,
+            MusicKey::Lead(_) => sd * 0.9 + 0.03,
+            MusicKey::Pad(_) => sd * 4.0 + 0.03,
+            MusicKey::Arp(_) => sd * 0.7 + 0.03,
+            MusicKey::Kick => 0.21, // 0.18 s tone + stop margin (noise is 0.05)
+            MusicKey::Hat => 0.06,  // 0.03 s noise tick + margin
+            MusicKey::Snare => 0.16, // 0.13 s noise + margin (tone is 0.10)
         }
+    }
+
+    /// Enumerate the exact, finite voice set `song` can ever schedule: the
+    /// distinct scale degrees of each melodic lane across every section,
+    /// plus the up-to-three drum voices — in bake-priority order (drums
+    /// first, then bass, lead, arp, pad). Typically 30–45 keys per song.
+    fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
+        fn add(keys: &mut Vec<MusicKey>, k: MusicKey) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        let mut keys = Vec::new();
+        for sec in song.sections {
+            for &d in sec.drums {
+                match d {
+                    Silent => {}
+                    Kick => add(&mut keys, MusicKey::Kick),
+                    Hat => add(&mut keys, MusicKey::Hat),
+                    Snare => add(&mut keys, MusicKey::Snare),
+                }
+            }
+        }
+        type Lane = (fn(&Section) -> &'static [i32], fn(i32) -> MusicKey);
+        const LANES: [Lane; 4] = [
+            (|s| s.bass, MusicKey::Bass),
+            (|s| s.lead, MusicKey::Lead),
+            (|s| s.arp, MusicKey::Arp),
+            (|s| s.pad, MusicKey::Pad),
+        ];
+        for (pattern, mk) in LANES {
+            for sec in song.sections {
+                for &d in pattern(sec) {
+                    if d != REST {
+                        add(&mut keys, mk(d));
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// Reset the music bake queue for the current song: enumerate its voice
+    /// set fresh (all unbaked — notes fall back live until each render
+    /// lands) and invalidate any in-flight render of the previous song.
+    fn rebuild_music_bake(&self) {
+        let m = &self.baked_music;
+        m.gen.set(m.gen.get().wrapping_add(1));
+        *m.slots.borrow_mut() = Self::music_keys(&self.song)
+            .into_iter()
+            .map(|key| MusicSlot { key, buf: None })
+            .collect();
+        m.next.set(0);
     }
 
     /// Render one synthesized drum hit at absolute time `t` (routed to the bus).
@@ -3459,9 +4359,26 @@ impl AudioEngine {
 
     // --- helpers -----------------------------------------------------------
 
-    /// Current audio-clock time, or 0.0 if we have no context.
+    /// Current audio-clock time, or 0.0 if we have no context. During an
+    /// offline pre-render this is the offline clock (0.0 — rendering has not
+    /// started), so [`Self::t0`] lands the voice [`SFX_LEAD`] into the buffer,
+    /// exactly the lead it gets live.
     fn now(&self) -> f64 {
-        self.ctx.as_ref().map(|c| c.current_time()).unwrap_or(0.0)
+        self.bctx().map(|c| c.current_time()).unwrap_or(0.0)
+    }
+
+    /// The context nodes are currently built in: the [`OfflineAudioContext`]
+    /// while a pre-render is being assembled, the live [`AudioContext`]
+    /// otherwise. Node-creation methods live on [`BaseAudioContext`], which
+    /// both deref to — this is the whole trick that lets every voice builder
+    /// target either context unchanged.
+    fn bctx(&self) -> Option<BaseAudioContext> {
+        if let Some(r) = self.render.borrow().as_ref() {
+            return Some(r.ctx.clone());
+        }
+        self.ctx
+            .as_ref()
+            .map(|c| AsRef::<BaseAudioContext>::as_ref(c).clone())
     }
 
     fn destination(&self) -> Option<AudioDestinationNode> {
@@ -3469,8 +4386,14 @@ impl AudioEngine {
     }
 
     /// The node music voices connect to: the filtered music bus if we built it,
-    /// otherwise the raw destination (graceful fallback).
+    /// otherwise the raw destination (graceful fallback). During an offline
+    /// pre-render: the offline destination, so a note bakes its dry signal
+    /// only — the bus (and its per-bar filter sweep) stays live and is
+    /// reapplied at play time by [`Self::play_music_baked`].
     fn music_out(&self) -> Option<web_sys::AudioNode> {
+        if let Some(r) = self.render.borrow().as_ref() {
+            return Some(r.sink.clone());
+        }
         if let Some(bus) = &self.music_bus {
             Some(AsRef::<web_sys::AudioNode>::as_ref(bus).clone())
         } else {
@@ -3507,8 +4430,14 @@ impl AudioEngine {
     }
 
     /// The generic SFX output: the bus's default "room" voice if we have one,
-    /// otherwise the raw destination (graceful fallback).
+    /// otherwise the raw destination (graceful fallback). During an offline
+    /// pre-render: the offline destination, so the room-voice kinds render
+    /// their dry signal (their light room send is pre-wired into `room` and
+    /// stays live).
     fn sfx_out(&self) -> Option<web_sys::AudioNode> {
+        if let Some(r) = self.render.borrow().as_ref() {
+            return Some(r.sink.clone());
+        }
         if let Some(bus) = &self.sfx {
             Some(AsRef::<web_sys::AudioNode>::as_ref(&bus.room).clone())
         } else {
@@ -3535,7 +4464,26 @@ impl AudioEngine {
 
     /// The voice builder behind [`Self::voice`] / [`Self::voice_real`]:
     /// `real` selects the bus path (dry + reverb) the voice feeds.
+    ///
+    /// During an offline pre-render the voice is built DRY: the same input
+    /// gain and per-voice soft-clip, but feeding the offline destination
+    /// with no wet send — the send (and the whole live room / compressor /
+    /// bus clip) is reapplied at play time by [`Self::play_baked`], so the
+    /// baked buffer captures exactly the signal that live synthesis hands
+    /// to the bus.
     fn voice_route(&self, wet: f64, drive: f64, real: bool) -> Option<web_sys::AudioNode> {
+        if let Some(r) = self.render.borrow().as_ref() {
+            let input = r.ctx.create_gain().ok()?;
+            let _ = input.gain().set_value_at_time(1.0, 0.0);
+            let mut post: web_sys::AudioNode = AsRef::<web_sys::AudioNode>::as_ref(&input).clone();
+            if drive > 1.0 {
+                if let Some(clip) = Self::soft_clipper(&r.ctx, &post, (1.0 / drive) as f32) {
+                    post = clip;
+                }
+            }
+            let _ = post.connect_with_audio_node(&r.sink);
+            return Some(AsRef::<web_sys::AudioNode>::as_ref(&input).clone());
+        }
         let (ctx, bus) = match (&self.ctx, &self.sfx) {
             (Some(c), Some(b)) => (c, b),
             _ => return self.sfx_out(),
@@ -3572,7 +4520,7 @@ impl AudioEngine {
     /// 0.7+ only rounds off the loudest peaks. Returns the shaper as the new
     /// tail of the chain, or `None` (chain untouched) if a node fails.
     fn soft_clipper(
-        ctx: &AudioContext,
+        ctx: &BaseAudioContext,
         from: &web_sys::AudioNode,
         knee: f32,
     ) -> Option<web_sys::AudioNode> {
@@ -3643,7 +4591,7 @@ impl AudioEngine {
         attack: f64,
         wave: OscillatorType,
     ) {
-        let ctx = match &self.ctx {
+        let ctx = match self.bctx() {
             Some(c) => c,
             None => return,
         };
@@ -3745,7 +4693,7 @@ impl AudioEngine {
         f1: f64,
         q: f64,
     ) {
-        let (ctx, buf) = match (&self.ctx, &self.noise) {
+        let (ctx, buf) = match (self.bctx(), &self.noise) {
             (Some(c), Some(b)) => (c, b),
             _ => return,
         };
@@ -3805,7 +4753,7 @@ impl AudioEngine {
         wave: OscillatorType,
         wobble: f64,
     ) {
-        let ctx = match &self.ctx {
+        let ctx = match self.bctx() {
             Some(c) => c,
             None => return,
         };
@@ -4125,5 +5073,97 @@ impl AudioEngine {
 impl Default for AudioEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every note any song can ever schedule must map to an enumerated
+    /// [`MusicKey`], and the per-song voice set must stay small enough that
+    /// baking each exact pitch (no `playback_rate` transposition) is cheap.
+    /// Run with `--nocapture` to see the per-song counts.
+    #[test]
+    fn music_voice_sets_are_small_and_complete() {
+        for song in SONGS {
+            let keys = AudioEngine::music_keys(song);
+            assert!(!keys.is_empty(), "{}: empty voice set", song.name);
+            assert!(
+                keys.len() <= 64,
+                "{}: {} voices — too many to bake each exact pitch",
+                song.name,
+                keys.len()
+            );
+            // No duplicates (the queue bakes each key exactly once).
+            for (i, k) in keys.iter().enumerate() {
+                assert!(!keys[..i].contains(k), "{}: duplicate {:?}", song.name, k);
+            }
+            // Completeness: every schedulable note has a key.
+            for sec in song.sections {
+                for &d in sec.bass {
+                    assert!(d == REST || keys.contains(&MusicKey::Bass(d)));
+                }
+                for &d in sec.lead {
+                    assert!(d == REST || keys.contains(&MusicKey::Lead(d)));
+                }
+                for &d in sec.pad {
+                    assert!(d == REST || keys.contains(&MusicKey::Pad(d)));
+                }
+                for &d in sec.arp {
+                    assert!(d == REST || keys.contains(&MusicKey::Arp(d)));
+                }
+                for &dr in sec.drums {
+                    let key = match dr {
+                        Silent => continue,
+                        Kick => MusicKey::Kick,
+                        Hat => MusicKey::Hat,
+                        Snare => MusicKey::Snare,
+                    };
+                    assert!(keys.contains(&key));
+                }
+            }
+            let drums = keys
+                .iter()
+                .filter(|k| matches!(k, MusicKey::Kick | MusicKey::Hat | MusicKey::Snare))
+                .count();
+            let count = |f: fn(&MusicKey) -> bool| keys.iter().filter(|k| f(k)).count();
+            println!(
+                "{:14} {:2} voices (drums {} bass {:2} lead {:2} arp {:2} pad {:2})",
+                song.name,
+                keys.len(),
+                drums,
+                count(|k| matches!(k, MusicKey::Bass(_))),
+                count(|k| matches!(k, MusicKey::Lead(_))),
+                count(|k| matches!(k, MusicKey::Arp(_))),
+                count(|k| matches!(k, MusicKey::Pad(_))),
+            );
+        }
+    }
+
+    /// The bake-priority split must keep every attack and hit kind in the
+    /// combat prefix that renders before the music voices.
+    #[test]
+    fn combat_sfx_prefix_covers_attacks_and_hits() {
+        assert!(SFX_COMBAT_KINDS <= SFX_KINDS.len());
+        for kind in &SFX_KINDS[..SFX_COMBAT_KINDS] {
+            assert!(!matches!(
+                kind,
+                SfxKind::Death | SfxKind::LevelClear | SfxKind::MaskCrack | SfxKind::Elevator
+            ));
+        }
+        for combat in [
+            SfxKind::AttackGun,
+            SfxKind::AttackMachinegun,
+            SfxKind::AttackShotgun,
+            SfxKind::AttackClub,
+            SfxKind::HitGun,
+            SfxKind::HitMachinegun,
+            SfxKind::HitShotgun,
+            SfxKind::HitClub,
+        ] {
+            let pos = SFX_KINDS.iter().position(|k| *k == combat).unwrap();
+            assert!(pos < SFX_COMBAT_KINDS);
+        }
     }
 }

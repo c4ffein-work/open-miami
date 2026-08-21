@@ -162,6 +162,23 @@
 - The e2e toolchain runs on **Bun** (`bun install` / `bunx playwright ...`), not npm/node
 - Both the Makefile and the Playwright config enforce a 60-second timeout so a run cannot hang indefinitely
 
+## Perf Tracing (`?perf`)
+- Opt-in per-frame trace across engine / boundary / renderer: add `perf` to
+  the URL (e.g. `/?floor=2&debug&perf`), play a bit, press **P** — the last
+  300 frames are logged to the console as one JSON blob (and copied to the
+  clipboard, best-effort). Paste (or drag-drop) it into `tools/perf.html`
+  for a stacked per-frame chart (with the vsync GAP band + 16.7/33.3 ms
+  guides), a click-to-open single-frame flame timeline, and avg/p95/max
+  summaries. `window.__perfDump()` returns the same JSON string
+- Pieces: the collector `window.__perf` (index.html plain script:
+  `perfSpan`/`perfCount`/`perfFrameStart`/`perfFrameEnd`, all no-ops without
+  the flag), the wasm `perf` module in src/lib.rs (drop-guard spans `sim`,
+  `scenario`, `record`, `flush`; the Rust-side `enabled()` guard means a
+  disabled run never crosses the boundary), and renderer.js sub-spans
+  (`walk`, `sprites`, `submit`, `postfx` — they nest inside `flush` on the
+  timeline) + counters (`cmds`, `draws` via a gl.drawArrays shim installed
+  only when tracing, `robots`). Skipped FPS-cap frames never open a frame
+
 ## Debug Mode
 - The game has a built-in debug mode that can be toggled by pressing **I** during gameplay
 - Debug mode is OFF by default; it is enabled only when the URL carries `?debug` (`debug_enabled` in GameState, e.g. `/?floor=14&debug`). Without it, I/K/B/G and the debug HUD line do nothing
