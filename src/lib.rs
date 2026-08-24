@@ -833,7 +833,7 @@ mod wasm_entry {
     /// colour). Mirrors the kind table in renderer.js / `Graphics::postfx`.
     /// Peak `t` stays below 1 where full strength would blank the frame
     /// (BLUR-OUT at t = 1 is a solid colour).
-    const POSTFX_PREVIEWS: [(u32, &str, f32, Color); 13] = [
+    const POSTFX_PREVIEWS: [(u32, &str, f32, Color); 14] = [
         (0, "BLUR-OUT", 0.8, Color::new(0.05, 0.02, 0.10, 1.0)),
         (1, "SYNTHWAVE CRT", 1.0, Color::new(1.0, 0.25, 0.65, 1.0)),
         (2, "VHS TAPE", 1.0, Color::new(0.60, 0.60, 0.90, 1.0)),
@@ -848,6 +848,7 @@ mod wasm_entry {
         (11, "UI GREY", 0.8, Color::new(0.80, 0.82, 0.90, 1.0)),
         // r/g = the demo modal's half extents (fractions of the screen).
         (12, "MODAL STATIC", 0.9, Color::new(0.25, 0.22, 0.0, 1.0)),
+        (13, "TV STATIC", 0.3, Color::WHITE),
     ];
 
     /// How long an EFFECTS-tab POSTFX preview plays (ramp in, hold, ramp out).
@@ -1635,7 +1636,14 @@ mod wasm_entry {
             );
             graphics.save();
             graphics.translate(dx0, dy0);
-            crate::drive::render_drive(graphics, dw, dh, (self.last_time / 1000.0) as f32, 0.5);
+            crate::drive::render_drive(
+                graphics,
+                dw,
+                dh,
+                (self.last_time / 1000.0) as f32,
+                0.5,
+                0.0,
+            );
             graphics.restore();
             graphics.draw_rectangle_lines(Vec2::new(dx0, dy0), dw, dh, 2.0, coral);
         }
@@ -2446,20 +2454,15 @@ mod wasm_entry {
             let screen_height = graphics.height();
 
             // The glitchy synthwave DRIVE (drive.rs) runs behind the whole
-            // menu, dimmed so the text stays the star (its VHS POSTFX also
-            // washes the menu — deliberate: the title screen IS the tape).
+            // menu, dimmed (inside the drive shader — no full-screen blend)
+            // so the text stays the star.
             crate::drive::render_drive(
                 graphics,
                 screen_width,
                 screen_height,
                 (self.last_time / 1000.0) as f32,
-                0.35,
-            );
-            graphics.draw_rectangle(
-                Vec2::new(0.0, 0.0),
-                screen_width,
-                screen_height,
-                Color::new(0.02, 0.01, 0.04, 0.55),
+                0.5,
+                0.55,
             );
 
             // The neon pixel title: OPEN / MIAMI, hollow pink letters
@@ -2561,6 +2564,11 @@ mod wasm_entry {
                 16.0,
                 Color::GRAY,
             );
+
+            // A faint TV-static shimmer over the whole title screen — the
+            // SETTINGS/ABOUT modals' static at a twelfth of its coverage.
+            // (Last POSTFX wins, so an open modal's kind 12 replaces it.)
+            graphics.postfx(13, 0.9 / 12.0, Color::WHITE);
         }
 
         /// The shared SETTINGS / ABOUT modal chrome over the live title
@@ -2594,8 +2602,10 @@ mod wasm_entry {
             // the POSTFX itself right at the panel edge.
             graphics.draw_rectangle(Vec2::new(mx, my), mw, mh, Color::new(0.0, 0.0, 0.0, 1.0));
             graphics.draw_text(title, Vec2::new(mx + 28.0, my + 40.0), 36.0, Color::WHITE);
+            // The divider hugs the title (~24 px under its baseline) and
+            // leaves the larger share of air (~28 px) to the body below.
             graphics.draw_rectangle(
-                Vec2::new(mx + 28.0, my + 84.0),
+                Vec2::new(mx + 28.0, my + 64.0),
                 mw - 56.0,
                 6.0,
                 Color::WHITE,

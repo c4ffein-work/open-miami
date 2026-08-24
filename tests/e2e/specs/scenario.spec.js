@@ -34,7 +34,7 @@ test.describe('Open Miami - Floors & scenarios', () => {
 
     // Card ends -> floor 2 loads (COLD STORAGE: FREIGHT LIFT objective).
     texts = await expectFloor2(page);
-    expect(Number(hudValue(texts, 'Rogues:'))).toBeGreaterThan(0);
+    expect(Number(hudValue(texts, 'ROGUES:'))).toBeGreaterThan(0);
     await page.screenshot({ path: 'test-results/scenario-03-next-floor.png' });
 
     await expect(canvas).toBeVisible();

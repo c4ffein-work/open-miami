@@ -33,6 +33,17 @@
                                                       baked-once pixel-art sprite
                                                       of its 3D model, quad spun
                                                       in 2D by `angle`)
+    19 PIX_BLIT   sx sy sw sh x y                     (re-draw a rect of the
+                                                      LAST-closed pixel group
+                                                      at x y — its texels
+                                                      persist until the next
+                                                      PIX_BEGIN)
+    20 DRIVE      w h t glitch split px dim o0..o8    (the synthwave drive
+                                                      backdrop: every pixel
+                                                      computed in one opaque
+                                                      full-shader pass; Rust
+                                                      ships the tested tear /
+                                                      split schedules)
 
    Everything is drawn as vertex-colored, textured triangles in one
    interleaved dynamic buffer (a 1x1 white texture stands in for solid
@@ -194,7 +205,7 @@ void main(){
 
 /* ---- opcode argument counts (mirror of the table above); used by the POSTFX
    pre-scan, which has to walk the stream without executing it ---- */
-const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2, 6, 5];
+const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2, 6, 5, 6, 16];
 const OP_POSTFX = 14;
 
 /* ---- pixel-art group scratch target ---- */
@@ -427,6 +438,8 @@ void main(){
     c = mix(c, c * uColor, 0.20 * t);
   } else {
     // ---- 12 MODAL STATIC: uColor.r/.g = the centred modal's HALF extents
+    // (kind 13 TV STATIC never reaches this shader: frameRender draws it
+    // as a plain blended noise quad — no scene pass needed.)
     // as fractions of the screen. INSIDE that rect: the kind-11 grey/tape
     // wash (the modal itself). OUTSIDE: the scene blurred, desaturated and
     // buried under t coverage of hard 6-px binary white noise — real
@@ -545,8 +558,16 @@ void main(){
 
 export function initRenderer(canvas) {
   const gl = canvas.getContext("webgl", {
+    // Opaque canvas: the game paints every pixel every frame, so the
+    // compositor can scan it out directly instead of alpha-blending the
+    // whole buffer over the page background.
     alpha: false,
-    antialias: true,
+    // No MSAA: a pixel-art game gains almost nothing from it (sprites, text
+    // and pixel groups are texture quads; only screen-space circle/line
+    // edges smooth), while a multisampled default framebuffer makes every
+    // full-screen layer ~4x the bandwidth — enough to sink fill-rate-poor
+    // GPUs (Intel UHD-class Macs) at Retina resolutions.
+    antialias: false,
     premultipliedAlpha: true,
     preserveDrawingBuffer: false,
     // Dual-GPU laptops: without this Chrome may hand WebGL the INTEGRATED
@@ -655,6 +676,35 @@ export function initRenderer(canvas) {
   );
 
   const glyphTex = makeTexture(GLYPH_ATLAS_SIZE);
+
+  // ---- TV static (POSTFX kind 13): a pre-rolled noise sheet ----
+  // One texel = one 6-physical-px static cell: rgb = a hard black/white
+  // roll, alpha = that cell's own strength (0.4..1, so the film sparkles).
+  // Drawn as ONE alpha-blended full-screen quad (NEAREST, REPEAT, a random
+  // whole-texel UV offset per frame = fresh static) — the same look the
+  // MODAL STATIC's noise cells have, WITHOUT routing the frame through the
+  // scene FBO + a post pass, which costs two full-screen memory touches a
+  // bandwidth-starved GPU can feel.
+  const STATIC_SIZE = 512;
+  const staticTex = makeTexture(undefined, true);
+  {
+    gl.bindTexture(gl.TEXTURE_2D, staticTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    const noise = new Uint8Array(STATIC_SIZE * STATIC_SIZE * 4);
+    for (let i = 0; i < STATIC_SIZE * STATIC_SIZE; i++) {
+      const bw = Math.random() < 0.5 ? 0 : 255;
+      noise[i * 4] = bw;
+      noise[i * 4 + 1] = bw;
+      noise[i * 4 + 2] = bw;
+      noise[i * 4 + 3] = Math.round((0.4 + 0.6 * Math.random()) * 255);
+    }
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA, STATIC_SIZE, STATIC_SIZE, 0, gl.RGBA,
+      gl.UNSIGNED_BYTE, noise
+    );
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  }
 
   /* ---- robot scratch atlas: a render target the robot passes draw into ---- */
   // Tiles are handed out per frame in stream order and recycled after every
@@ -1010,6 +1060,369 @@ export function initRenderer(canvas) {
     gl.uniform1i(loc.uTex, 0);
   }
 
+  /* ---- DRIVE (opcode 20): the synthwave backdrop as ONE shader pass ----
+     Every pixel of the scene — banded dusk sky, cut-band sun, stars, digital
+     rain, the road rushing at the camera, palm silhouettes, tear bands,
+     red/cyan channel split, neon debris — is COMPUTED in the fragment
+     shader, shadertoy-style, AT ART RESOLUTION: the shader runs once per
+     art pixel into a tiny NEAREST target (the quantization for free), and
+     the finished image lands as one upscaled textured quad. No pixel-group
+     re-records, no stacked blended layers, and the scene math costs ~84K
+     fragment evaluations however large the canvas or DPR. The wasm
+     side (src/drive.rs) stays the source of truth for the deterministic
+     glitch schedules and ships them as op args; palm slots and debris
+     blocks are placed here per frame (same integer hash as Rust's
+     `hash01`) and handed over as uniforms so the per-pixel loop stays
+     cheap. The scene geometry constants mirror src/drive.rs's tunables. */
+  const DRIVE_VS = `
+attribute vec2 aPos;
+void main(){
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+  const DRIVE_FS = `
+precision highp float;
+uniform vec2 uSize;      // rect size, CSS px
+uniform float uTexH;     // render-target height, texels (for the y flip)
+uniform float uT;        // loop clock, seconds
+uniform float uGlitch;   // tear intensity 0..1
+uniform float uSplit;    // channel-split offset, CSS px (0 outside bursts)
+uniform float uPx;       // art-pixel size, CSS px
+uniform float uDim;      // darken the finished scene toward the menu black
+uniform float uOffs[9];  // per-band tear offsets, CSS px
+uniform float uSunSeed;  // sun-glitch hash seed, 0 = calm sun
+uniform vec4 uPalmA[24]; // xb yb ht lean
+uniform vec4 uPalmB[24]; // fogMix seed sway active
+uniform vec4 uDebris[7]; // x y w h  (w <= 0 = unused slot)
+uniform vec4 uDebrisC[7];// r g b a
+
+float h11(float a, float b) {
+  return fract(sin(a * 127.1 + b * 311.7) * 43758.5453);
+}
+float sdSeg(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  float t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+  return length(pa - ba * t);
+}
+
+// One pass of the scene at point p (rect-local CSS px). detail=false is the
+// ghost-pass variant: skips the glow / stars / rain like the old renderer.
+vec3 scene(vec2 p, bool detail) {
+  float w = uSize.x, h = uSize.y;
+  float horizon = h * 0.44;
+  float ppu = w * 0.14;
+  vec3 col;
+  if (p.y < horizon) {
+    // Sky: banded dusk gradient (22 bands).
+    float f0 = floor(p.y / horizon * 22.0) / 22.0;
+    col = f0 < 0.55
+      ? mix(vec3(0.06, 0.02, 0.13), vec3(0.30, 0.06, 0.34), f0 / 0.55)
+      : mix(vec3(0.30, 0.06, 0.34), vec3(0.86, 0.24, 0.33), (f0 - 0.55) / 0.45);
+    float sr = h * 0.21;
+    vec2 sc = vec2(w * 0.5, horizon - sr * 0.28);
+    if (detail) {
+      // Sun glow: two flat discs, like the old alpha circles.
+      float d = length(p - sc);
+      if (d < sr * 1.9) col = mix(col, vec3(1.0, 0.45, 0.35), 0.10);
+      if (d < sr * 1.4) col = mix(col, vec3(1.0, 0.55, 0.35), 0.12);
+      // Stars: one per sparse 42px cell, twinkling.
+      vec2 cell = floor(p / 42.0);
+      if (h11(cell.x + 11.0, cell.y + 17.0) < 0.15) {
+        vec2 sp2 = (cell + vec2(h11(cell.x, cell.y * 7.31 + 1.0), h11(cell.x + 3.7, cell.y + 9.1))) * 42.0;
+        if (sp2.y < horizon * 0.8) {
+          float rad = 0.7 + h11(cell.x + 5.0, cell.y + 2.0) * 1.1;
+          float tw = 0.5 + 0.5 * sin(uT * (0.8 + h11(cell.x + 8.0, cell.y + 4.0) * 2.2) + cell.x * 7.0 + cell.y * 13.0);
+          if (length(p - sp2) < rad) col = mix(col, vec3(1.0, 0.95, 1.0), 0.5 * tw * (1.0 - sp2.y / horizon));
+        }
+      }
+      // Digital rain: one 2px trail per column stride.
+      float colW = w / 22.0;
+      float ci = floor(p.x / colW);
+      float cx = ci * colW + h11(ci, 31.0) * (colW - 2.0);
+      if (p.x >= cx && p.x < cx + 2.0) {
+        float spd = 26.0 + h11(ci, 32.0) * 70.0;
+        float head = mod(uT * spd + h11(ci, 33.0) * 600.0, horizon + 40.0) - 20.0;
+        float ra = 0.05 + 0.18 * uGlitch;
+        for (int j = 0; j < 4; j++) {
+          float yy = head - float(j) * 7.0;
+          if (yy > 0.0 && yy < horizon && p.y >= yy && p.y < yy + 5.0)
+            col = mix(col, vec3(0.35, 1.0, 0.65), ra * (1.0 - float(j) * 0.22));
+        }
+      }
+    }
+    // Sun: banded disc, cuts growing toward the bottom, glitch slide.
+    float v = (p.y - (sc.y - sr)) / (2.0 * sr);
+    if (v >= 0.0 && v < 1.0) {
+      float si = floor(v * 26.0);
+      float f0s = si / 26.0;
+      float dy = abs((f0s + 0.5 / 26.0) * 2.0 * sr - sr);
+      if (dy < sr) {
+        float halfW = sqrt(sr * sr - dy * dy);
+        float cut = f0s > 0.45 ? (f0s - 0.45) / 0.55 * 0.55 : 0.0;
+        float dxs = uSunSeed > 0.5 ? (h11(uSunSeed, 400.0 + si) - 0.5) * 14.0 * uGlitch : 0.0;
+        if (fract(v * 26.0) < 1.0 - cut && abs(p.x - sc.x - dxs) < halfW)
+          col = mix(vec3(1.0, 0.88, 0.28), vec3(1.0, 0.22, 0.52), f0s);
+      }
+    }
+  } else {
+    // Ground + road, quantized in the same 48 screen rows as before.
+    float row = floor((p.y - horizon) / (h - horizon) * 48.0);
+    float ym = horizon + (h - horizon) * (row + 0.5) / 48.0;
+    float z = min((h - horizon) / (ym - horizon), 400.0);
+    float fog = pow(clamp(z / 36.0, 0.0, 1.0), 1.2);
+    float pd = z + uT * 13.0;
+    bool alt = mod(floor(pd / 2.4), 2.0) < 0.5;
+    col = mix(alt ? vec3(0.060, 0.025, 0.100) : vec3(0.045, 0.015, 0.085),
+              vec3(0.10, 0.035, 0.13), fog);
+    float halfW = 3.0 * ppu / z;
+    float ax = abs(p.x - w * 0.5);
+    if (halfW > 1.0 && ax < halfW) {
+      col = mix(alt ? vec3(0.130, 0.075, 0.190) : vec3(0.100, 0.055, 0.155),
+                vec3(0.11, 0.045, 0.145), fog);
+      float ew = max(halfW * 0.055, 1.2);
+      if (ax > halfW - ew) {
+        // Edge lines, alternating hot pink / pale.
+        vec3 ec = mix(alt ? vec3(1.0, 0.32, 0.62) : vec3(0.95, 0.90, 0.95),
+                      vec3(0.5, 0.2, 0.4), fog);
+        col = mix(col, ec, clamp(1.0 - fog * 0.6, 0.0, 1.0));
+      } else if (mod(floor(pd / 1.4), 2.0) < 0.5 && ax < max(halfW * 0.045, 1.0) * 0.5) {
+        // Centre dashes rushing at the camera.
+        col = mix(col, vec3(0.98, 0.92, 0.72), clamp(0.9 - fog * 0.7, 0.0, 1.0));
+      }
+    }
+  }
+  // Horizon glow line.
+  if (abs(p.y - horizon) <= 1.0) col = mix(col, vec3(1.0, 0.42, 0.70), 0.9);
+  // Palms, far to near (the uniform array is filled in draw order); a cheap
+  // bounding test skips the segment math for nearly every pixel.
+  for (int i = 0; i < 24; i++) {
+    vec4 A = uPalmA[i];
+    vec4 B = uPalmB[i];
+    if (B.w < 0.5) continue;
+    float ht = A.z;
+    if (p.y > A.y + uPx || p.y < A.y - ht * 1.7 || abs(p.x - A.x) > ht * 1.4) continue;
+    vec3 pc = mix(vec3(0.050, 0.015, 0.090), vec3(0.55, 0.16, 0.30), B.x * 0.8);
+    bool hit = false;
+    // Trunk: three tapering segments curving into the lean.
+    vec2 p0 = A.xy;
+    vec2 tp = p0;
+    for (int s = 1; s <= 3; s++) {
+      float f = float(s) / 3.0;
+      vec2 p1 = vec2(A.x + A.w * ht * pow(f, 1.6), A.y - ht * f);
+      if (sdSeg(p, p0, p1) < max(ht * 0.050 * (1.0 - 0.5 * f), uPx) * 0.5) hit = true;
+      p0 = p1;
+      tp = p1;
+    }
+    // Crown: drooping fronds fanned across the top.
+    for (int k = 0; k < 7; k++) {
+      float a = -3.14159265 * (0.12 + 0.76 * float(k) / 6.0) + B.z + (h11(B.y, 70.0 + float(k)) - 0.5) * 0.12;
+      float len = ht * (0.38 + 0.10 * h11(B.y, 80.0 + float(k)));
+      vec2 mid = tp + vec2(cos(a), sin(a)) * len * 0.6;
+      float a2 = cos(a) >= 0.0 ? a + 0.7 : a - 0.7;
+      vec2 e = mid + vec2(cos(a2), sin(a2)) * len * 0.5;
+      float th = max(ht * 0.022, uPx);
+      if (sdSeg(p, tp, mid) < th * 0.5 || sdSeg(p, mid, e) < max(th * 0.8, uPx) * 0.5) hit = true;
+    }
+    if (length(p - tp) < max(ht * 0.045, 1.5)) hit = true;
+    if (hit) col = pc;
+  }
+  return col;
+}
+
+void main() {
+  // This pass runs at ART RESOLUTION (one fragment per art pixel; the
+  // result is upscaled NEAREST by a textured quad), so each fragment IS
+  // its cell centre — the quantization comes for free and the whole scene
+  // costs ~1/(px*dpr)^2 of a native-resolution evaluation.
+  vec2 p = vec2(gl_FragCoord.x, uTexH - gl_FragCoord.y) * uPx;
+  // Tear: this band samples the scene shifted sideways; where the slice
+  // moved away, the backing void shows through.
+  float bandH = uSize.y / 9.0;
+  float band = clamp(floor(p.y / bandH), 0.0, 8.0);
+  float dx = 0.0;
+  for (int i = 0; i < 9; i++) if (float(i) == band) dx = uOffs[i];
+  p.x -= dx;
+  vec3 col;
+  if (p.x < -0.5 * uPx || p.x >= uSize.x + 0.5 * uPx) {
+    col = vec3(0.01, 0.0, 0.03);
+  } else {
+    col = scene(p, true);
+    // Channel split: red/cyan ghost passes over the base, like the old
+    // translated re-draws (0.75px threshold mirrored from scene_passes).
+    if (abs(uSplit) >= 0.75) {
+      col = mix(col, scene(p + vec2(uSplit, 0.0), false) * vec3(1.0, 0.12, 0.25), 0.26);
+      col = mix(col, scene(p - vec2(uSplit, 0.0), false) * vec3(0.10, 0.90, 1.0), 0.26);
+    }
+    // Neon debris blocks flash on top.
+    for (int i = 0; i < 7; i++) {
+      vec4 r = uDebris[i];
+      if (r.z <= 0.0) continue;
+      if (p.x >= r.x && p.x < r.x + r.z && p.y >= r.y && p.y < r.y + r.w)
+        col = mix(col, uDebrisC[i].rgb, uDebrisC[i].a);
+    }
+  }
+  // The menu dim, folded in here: what used to be a full-screen alpha rect
+  // blended over the backdrop is a free mix at art resolution.
+  col = mix(col, vec3(0.02, 0.01, 0.04), uDim);
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+  const driveProg = gl.createProgram();
+  gl.attachShader(driveProg, compile(gl.VERTEX_SHADER, DRIVE_VS));
+  gl.attachShader(driveProg, compile(gl.FRAGMENT_SHADER, DRIVE_FS));
+  gl.linkProgram(driveProg);
+  if (!gl.getProgramParameter(driveProg, gl.LINK_STATUS)) {
+    throw new Error("Drive program link failed: " + gl.getProgramInfoLog(driveProg));
+  }
+  const driveLoc = {
+    aPos: gl.getAttribLocation(driveProg, "aPos"),
+    uSize: gl.getUniformLocation(driveProg, "uSize"),
+    uTexH: gl.getUniformLocation(driveProg, "uTexH"),
+    uT: gl.getUniformLocation(driveProg, "uT"),
+    uGlitch: gl.getUniformLocation(driveProg, "uGlitch"),
+    uSplit: gl.getUniformLocation(driveProg, "uSplit"),
+    uPx: gl.getUniformLocation(driveProg, "uPx"),
+    uDim: gl.getUniformLocation(driveProg, "uDim"),
+    uOffs: gl.getUniformLocation(driveProg, "uOffs[0]"),
+    uSunSeed: gl.getUniformLocation(driveProg, "uSunSeed"),
+    uPalmA: gl.getUniformLocation(driveProg, "uPalmA[0]"),
+    uPalmB: gl.getUniformLocation(driveProg, "uPalmB[0]"),
+    uDebris: gl.getUniformLocation(driveProg, "uDebris[0]"),
+    uDebrisC: gl.getUniformLocation(driveProg, "uDebrisC[0]"),
+  };
+  // The drive's ART-RESOLUTION render target (ceil(w/px) x ceil(h/px)
+  // texels, NEAREST): the shader runs once per art pixel, the result is
+  // upscaled by a single textured quad — so the per-pixel scene math costs
+  // ~84K fragment evaluations instead of millions, whatever the canvas /
+  // DPR. Reallocated when the rect or art-pixel size changes.
+  let driveTex = null, driveFbo = null, driveTW = 0, driveTH = 0;
+  function ensureDriveTarget(tw, th) {
+    if (driveTW === tw && driveTH === th) return;
+    if (!driveTex) {
+      driveTex = gl.createTexture();
+      driveFbo = gl.createFramebuffer();
+      gl.bindTexture(gl.TEXTURE_2D, driveTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, driveTex);
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, driveFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, driveTex, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error("Drive framebuffer is incomplete; the backdrop cannot render.");
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    driveTW = tw;
+    driveTH = th;
+  }
+  const drivePalmA = new Float32Array(24 * 4);
+  const drivePalmB = new Float32Array(24 * 4);
+  const driveDebris = new Float32Array(7 * 4);
+  const driveDebrisC = new Float32Array(7 * 4);
+  // Exact port of src/drive.rs `hash01` (u32 wrapping arithmetic), so palm
+  // stutter / debris scheduling stay bit-identical to the primitive era.
+  function driveHash(a, b) {
+    let x = (Math.imul(a >>> 0, 374761393) + Math.imul(b >>> 0, 668265263)) >>> 0;
+    x = Math.imul(x ^ (x >>> 13), 1274126177) >>> 0;
+    return ((x ^ (x >>> 16)) & 0xffffff) / 0xffffff;
+  }
+  function drawDrive(w, h, t, glitch, split, px, dim, offs, offsBase) {
+    flush();
+    // Palm slots (mirrors the old `scene` palm loop, far to near): the
+    // per-slot placement runs once here; the shader only does bbox tests
+    // and, inside a palm's box, the trunk / frond segment distances.
+    const horizon = h * 0.44, ppu = w * 0.14;
+    const SPEED = 13.0, SPACING = 6.5, PX = 4.6, PH = 3.4, ZFAR = 36.0;
+    drivePalmA.fill(0);
+    drivePalmB.fill(0);
+    let pi = 0;
+    for (let i = 11; i >= 0; i--) {
+      for (const side of [-1, 1]) {
+        const slot = pi++;
+        const phase = side > 0 ? 0.5 : 0.0;
+        const travelled = (t * SPEED) / SPACING + phase;
+        const pid = ((Math.floor(travelled) + i) * 2 + (side > 0 ? 1 : 0)) >>> 0;
+        // Stutter: on hashed ~130ms buckets a palm freezes on the bucket's
+        // start time, then snaps forward.
+        const bkt = Math.floor(t / 0.13);
+        const te = driveHash(pid, (505 + bkt) >>> 0) < glitch * 0.4 ? bkt * 0.13 : t;
+        const trav = (te * SPEED) / SPACING + phase;
+        const off = trav - Math.floor(trav);
+        const z = (i + 1 - off) * SPACING;
+        if (z < 1.05 || z > ZFAR) continue;
+        const s = 1 / z;
+        const yb = horizon + (h - horizon) / z;
+        const xb = w * 0.5 + side * PX * ppu * s * (1 + 0.12 * driveHash(pid, 61));
+        const ht = PH * ppu * s * (0.8 + 0.4 * driveHash(pid, 62));
+        if (ht < 3) continue;
+        const fog = Math.pow(z / ZFAR, 1.3);
+        const lean = -side * 0.10 + (driveHash(pid, 63) - 0.5) * 0.24;
+        const sway = Math.sin(t * 1.1 + pid) * 0.05;
+        const o = slot * 4;
+        drivePalmA[o] = xb; drivePalmA[o + 1] = yb; drivePalmA[o + 2] = ht; drivePalmA[o + 3] = lean;
+        drivePalmB[o] = fog; drivePalmB[o + 1] = pid % 1024; drivePalmB[o + 2] = sway; drivePalmB[o + 3] = 1;
+      }
+    }
+    // Debris blocks: on hashed ~100ms buckets a handful of neon rects flash.
+    driveDebris.fill(0);
+    const db = Math.floor(t / 0.10);
+    if (glitch > 0 && driveHash(db, 611) < glitch * 0.5) {
+      const n = 2 + Math.floor(driveHash(db, 612) * 5);
+      for (let i = 0; i < n; i++) {
+        const kind = Math.floor(driveHash(db, 780 + i) * 3);
+        const c = kind === 0 ? [0.2, 0.95, 1.0] : kind === 1 ? [1.0, 0.25, 0.85] : [0.95, 0.95, 1.0];
+        const o = i * 4;
+        driveDebris[o] = driveHash(db, 700 + i) * w;
+        driveDebris[o + 1] = driveHash(db, 720 + i) * h;
+        // At least one art pixel each way, so quantized sampling can't miss.
+        driveDebris[o + 2] = Math.max(4 + driveHash(db, 740 + i) * 50, px);
+        driveDebris[o + 3] = Math.max(2 + driveHash(db, 760 + i) * 8, px);
+        driveDebrisC[o] = c[0]; driveDebrisC[o + 1] = c[1]; driveDebrisC[o + 2] = c[2];
+        driveDebrisC[o + 3] = 0.25 + 0.35 * driveHash(db, 790 + i);
+      }
+    }
+    // Sun-band glitch bucket (the shader hashes per slice off this seed).
+    const sb = Math.floor(t / 0.12);
+    const sunSeed = driveHash(sb, 399) < glitch * 0.3 ? (sb % 997) + 1 : 0;
+    // PASS 1: the scene, one fragment per art pixel, into the tiny target.
+    const tw = Math.ceil(w / px), th = Math.ceil(h / px);
+    ensureDriveTarget(tw, th);
+    gl.useProgram(driveProg);
+    gl.disableVertexAttribArray(loc.aUv);
+    gl.disableVertexAttribArray(loc.aColor);
+    gl.bindBuffer(gl.ARRAY_BUFFER, postVbo);
+    gl.enableVertexAttribArray(driveLoc.aPos);
+    gl.vertexAttribPointer(driveLoc.aPos, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform2f(driveLoc.uSize, w, h);
+    gl.uniform1f(driveLoc.uTexH, th);
+    gl.uniform1f(driveLoc.uT, t);
+    gl.uniform1f(driveLoc.uGlitch, glitch);
+    gl.uniform1f(driveLoc.uSplit, split);
+    gl.uniform1f(driveLoc.uPx, px);
+    gl.uniform1f(driveLoc.uDim, dim);
+    gl.uniform1fv(driveLoc.uOffs, offs.subarray(offsBase, offsBase + 9));
+    gl.uniform1f(driveLoc.uSunSeed, sunSeed);
+    gl.uniform4fv(driveLoc.uPalmA, drivePalmA);
+    gl.uniform4fv(driveLoc.uPalmB, drivePalmB);
+    gl.uniform4fv(driveLoc.uDebris, driveDebris);
+    gl.uniform4fv(driveLoc.uDebrisC, driveDebrisC);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, driveFbo);
+    gl.viewport(0, 0, tw, th);
+    gl.disable(gl.BLEND); // the backdrop is opaque
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    if (driveLoc.aPos !== loc.aPos) gl.disableVertexAttribArray(driveLoc.aPos);
+    bindBatchState(); // restores target, program, blend, attribs, buffers
+    // PASS 2: the finished art-pixel image as ONE NEAREST-upscaled quad at
+    // the current transform's origin (texel row 0 is the scene's bottom).
+    setTexture(driveTex);
+    quad(0, 0, w, h, 0, 1, 1, 0, 1, 1, 1, 1);
+  }
+
   /* ---- pixel-art groups: a NEAREST scratch target per nesting depth ---- */
   // Groups nest (depth <= PIX_DEPTH): each depth owns its own 1024x1024
   // scratch texture + FBO (an inner group's texture is sampled while the
@@ -1049,6 +1462,9 @@ export function initRenderer(canvas) {
   const pixStack = [];
   let pix = null;
   let pixDepth = 0; // number of REAL open groups
+  // The most recently CLOSED real group — its texels persist in the scratch
+  // texture until the next pixBegin, which is what PIX_BLIT re-draws from.
+  let lastPix = null;
   // Size of one texel of the open group in current LOCAL units (the min
   // thickness / min diameter clamps). 1/sqrt(|det m|) = local units per texel.
   function pixTexelLocal() {
@@ -1063,6 +1479,7 @@ export function initRenderer(canvas) {
       pixStack.push(PIX_SKIP);
       return;
     }
+    lastPix = null; // this begin may clear the texels a PIX_BLIT would sample
     flush();
     const tgt = pixTarget(pixDepth);
     const g = {
@@ -1091,6 +1508,7 @@ export function initRenderer(canvas) {
   function pixEnd(x, y) {
     const g = pixStack.pop();
     if (!g || g.skip) return;
+    lastPix = g; // the texels stay valid for PIX_BLIT until the next pixBegin
     flush(); // the group's content, into its scratch region
     pix = g.outer;
     pixDepth--;
@@ -1121,6 +1539,36 @@ export function initRenderer(canvas) {
     const u1 = g.w / g.px / PIX_MAX;
     const v0 = g.h / g.px / PIX_MAX;
     quad(x, y, g.w, g.h, 0, v0, u1, 0, 1, 1, 1, 1);
+    m[4] -= dx;
+    m[5] -= dy;
+    flush();
+    pixBlend();
+  }
+  // PIX_BLIT: re-draw the rect (sx, sy)..(sx+sw, sy+sh) — in the last-closed
+  // group's LOCAL units — of that group's scratch texels as a (sw, sh) quad
+  // at (x, y) in the current transform. This is what makes "rasterize once,
+  // place many times" possible (drive.rs's tear bands): each extra placement
+  // costs one textured quad instead of a re-record of the group's content.
+  // A no-op when there is no valid source (pass-through group, or a pixBegin
+  // has run since — its clear may have invalidated the texels).
+  function pixBlit(sx, sy, sw, sh, x, y) {
+    const g = lastPix;
+    if (!g || !(sw > 0 && sh > 0)) return;
+    flush();
+    // Same composite + snap as the PIX_END draw.
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    setTexture(g.tex);
+    const tx = m[0] * x + m[2] * y + m[4];
+    const ty = m[1] * x + m[3] * y + m[5];
+    const dx = Math.round(tx) - tx, dy = Math.round(ty) - ty;
+    m[4] += dx;
+    m[5] += dy;
+    // v flipped like PIX_END: local y = 0 is the group's TOP texel row.
+    const u0 = sx / g.px / PIX_MAX;
+    const u1 = (sx + sw) / g.px / PIX_MAX;
+    const v0 = (g.h - sy) / g.px / PIX_MAX;
+    const v1 = (g.h - sy - sh) / g.px / PIX_MAX;
+    quad(x, y, sw, sh, u0, v0, u1, v1, 1, 1, 1, 1);
     m[4] -= dx;
     m[5] -= dy;
     flush();
@@ -1685,8 +2133,15 @@ export function initRenderer(canvas) {
     framePW = pw;
     framePH = ph;
     // A POSTFX anywhere in the frame routes the whole frame through the
-    // offscreen scene target (decided up front, before the first draw).
+    // offscreen scene target (decided up front, before the first draw) —
+    // EXCEPT kind 13 (TV STATIC), which needs nothing from the scene and is
+    // drawn as a plain blended noise quad at the end of the frame instead.
     postfxActive = scanPostfx(cmds);
+    let staticOverlay = 0;
+    if (postfxActive && (postfx.kind | 0) === 13) {
+      staticOverlay = postfx.t;
+      postfxActive = false;
+    }
     if (postfxActive) ensureSceneTarget(pw, ph);
     batchFbo = postfxActive ? sceneFbo : null;
     batchW = w;
@@ -1697,6 +2152,7 @@ export function initRenderer(canvas) {
     pix = null;
     pixDepth = 0;
     pixStack.length = 0;
+    lastPix = null; // a PIX_BLIT never samples a previous frame's texels
     bindBatchState();
     gl.uniform1i(loc.uTex, 0);
 
@@ -1807,6 +2263,15 @@ export function initRenderer(canvas) {
           drawGunPickup(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4]);
           i += 5;
           break;
+        case 19: // PIX_BLIT
+          pixBlit(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4], cmds[i + 5]);
+          i += 6;
+          break;
+        case 20: // DRIVE (w h t glitch split px dim o0..o8)
+          drawDrive(cmds[i], cmds[i + 1], cmds[i + 2], cmds[i + 3], cmds[i + 4],
+            cmds[i + 5], cmds[i + 6], cmds, i + 7);
+          i += 16;
+          break;
         default:
           // Unknown opcode: the stream is corrupt; stop rather than
           // misinterpret the remaining floats.
@@ -1819,6 +2284,23 @@ export function initRenderer(canvas) {
     const perfTSubmit = PERF ? performance.now() : 0;
     if (PERF) window.perfSpan("walk", perfT0, perfTSubmit - perfT0);
     flush();
+    // TV STATIC (kind 13): one alpha-blended quad of the pre-rolled noise
+    // sheet over the finished frame — one texel per 6 physical px, a fresh
+    // random whole-texel offset each frame (REPEAT wrapping).
+    if (staticOverlay > 0) {
+      const savedM = m;
+      m = [1, 0, 0, 1, 0, 0];
+      const u0 = Math.floor(Math.random() * STATIC_SIZE) / STATIC_SIZE;
+      const v0 = Math.floor(Math.random() * STATIC_SIZE) / STATIC_SIZE;
+      setTexture(staticTex);
+      quad(
+        0, 0, frameW, frameH,
+        u0, v0, u0 + pw / 6 / STATIC_SIZE, v0 + ph / 6 / STATIC_SIZE,
+        1, 1, 1, staticOverlay
+      );
+      flush();
+      m = savedM;
+    }
     const perfTPost = PERF ? performance.now() : 0;
     if (PERF) window.perfSpan("submit", perfTSubmit, perfTPost - perfTSubmit);
     // The post passes work on the final pixels: physical resolution.

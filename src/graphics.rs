@@ -42,6 +42,8 @@ mod op {
     pub const PIX_END: f32 = 16.0; // x y  (close it: nearest-upscale the group at (x, y))
     pub const PORTRAIT: f32 = 17.0; // colorIdx x y sizePx time mode  (slow-orbit 3D robot portrait, pixel-art; mode 0 = bust, 1 = headshot)
     pub const GUN_PICKUP: f32 = 18.0; // weaponIdx x y angle sizePx  (3D weapon lying flat, pixel-art)
+    pub const PIX_BLIT: f32 = 19.0; // sx sy sw sh x y  (re-draw a rect of the LAST-closed pixel group at (x, y))
+    pub const DRIVE: f32 = 20.0; // w h t glitch split px dim o0..o8  (the synthwave drive backdrop, one full-shader pass)
 }
 
 /// Separator between entries in the per-frame text arena. renderer.js splits
@@ -229,6 +231,12 @@ impl Graphics {
         ]);
     }
 
+    /// DESIGN RULE: every string is UPPERCASED here, at the single rendering
+    /// boundary — VT323 renders far better in caps and the game's whole look
+    /// is all-caps. Write strings (code literals, level JSON dialogue,
+    /// editor labels) in whatever case reads best at the source; the screen
+    /// always shows caps. ASCII-only fold: glyphs like `·` / `→` pass
+    /// through untouched.
     pub fn draw_text(&self, text: &str, pos: Vec2, font_size: f32, color: Color) {
         let idx = {
             let mut texts = self.texts.borrow_mut();
@@ -236,7 +244,10 @@ impl Graphics {
             if *count > 0 {
                 texts.push(TEXT_SEP);
             }
+            let start = texts.len();
             texts.push_str(text);
+            // In place on the arena tail: no per-call allocation.
+            texts[start..].make_ascii_uppercase();
             let idx = *count;
             *count += 1;
             idx
@@ -451,6 +462,20 @@ impl Graphics {
     ///            pull + decay, the colour tints the trails. The renderer
     ///            clears the accumulator whenever the previous frame did not
     ///            use kind 10.
+    ///   kind 11 = UI GREY: the modal wash — desaturated, tape noise,
+    ///            scanlines, vignette; the colour tints the wash
+    ///   kind 12 = MODAL STATIC: colour.r/.g carry a centred panel's half
+    ///            extents (fractions of the screen); inside passes through,
+    ///            outside is blurred, desaturated and buried under `t`
+    ///            coverage of hard 6-px binary static
+    ///   kind 13 = TV STATIC: the frame untouched plus the same 6-px static
+    ///            grain over every cell at OPACITY `t` — no wash, no blur;
+    ///            at low `t` a faint dead-channel shimmer (the title screen
+    ///            runs 0.075 — the modal static's strength / 12). The one
+    ///            kind that is NOT a post pass: renderer.js draws it as a
+    ///            single alpha-blended quad of a pre-rolled noise texture,
+    ///            so it never routes the frame through the scene target
+    ///            (two full-screen memory touches weak GPUs can feel)
     /// Only the last POSTFX of a frame applies. Any other kind is a no-op.
     pub fn postfx(&self, kind: u32, t: f32, color: Color) {
         self.push(&[op::POSTFX, kind as f32, t, color.r, color.g, color.b]);
@@ -505,6 +530,68 @@ impl Graphics {
     /// stable frame to frame.
     pub fn pixel_end(&self, x: f32, y: f32) {
         self.push(&[op::PIX_END, x, y]);
+    }
+
+    /// Re-draw the rectangle `(sx, sy)..(sx + sw, sy + sh)` — in the group's
+    /// local units — of the LAST-closed pixel-art group as a `(sw, sh)` quad
+    /// at `(x, y)` in the current transform (NEAREST, origin snapped like
+    /// [`pixel_end`](Self::pixel_end)). The group's texels persist in their
+    /// scratch texture until the next [`pixel_begin`](Self::pixel_begin), so
+    /// a scene rasterized once can be re-placed many times for the cost of
+    /// one textured quad each (drive.rs's tear bands) instead of a full
+    /// re-record of its content per placement. A no-op if the last group fell
+    /// back to pass-through or a `pixel_begin` has run since it closed.
+    /// NOTE: no in-game caller since the drive went full-shader (see
+    /// [`drive`](Self::drive)) — kept as the generic "rasterize once, place
+    /// many times" primitive (renderer.js implements it; op table synced).
+    pub fn pixel_blit(&self, sx: f32, sy: f32, sw: f32, sh: f32, x: f32, y: f32) {
+        self.push(&[op::PIX_BLIT, sx, sy, sw, sh, x, y]);
+    }
+
+    /// The synthwave DRIVE backdrop (title screen / `?viz` MUSICS preview),
+    /// rendered by a dedicated full-screen fragment shader in renderer.js —
+    /// every pixel of the scene (sky, sun, road, palms, tears, channel
+    /// split) is COMPUTED in one opaque pass, shadertoy-style: no pixel
+    /// groups, no stacked blended layers, so the fill cost on weak GPUs is
+    /// a single shaded write per pixel. Rust stays the source of truth for
+    /// the deterministic glitch schedules (`band_offset_frac`,
+    /// `channel_split_frac`, unit-tested natively) and ships them as
+    /// arguments; the scene geometry constants are mirrored in the shader.
+    /// Drawn as a `(w, h)` quad at the current transform's origin. `dim`
+    /// (0..1) darkens the finished scene toward the menu's near-black inside
+    /// the shader — a free replacement for the full-screen alpha rect the
+    /// title screen used to blend on top.
+    #[allow(clippy::too_many_arguments)]
+    pub fn drive(
+        &self,
+        w: f32,
+        h: f32,
+        t: f32,
+        glitch: f32,
+        split: f32,
+        px: f32,
+        dim: f32,
+        offs: &[f32; 9],
+    ) {
+        self.push(&[
+            op::DRIVE,
+            w,
+            h,
+            t,
+            glitch,
+            split,
+            px,
+            dim,
+            offs[0],
+            offs[1],
+            offs[2],
+            offs[3],
+            offs[4],
+            offs[5],
+            offs[6],
+            offs[7],
+            offs[8],
+        ]);
     }
 
     /// Draw a small 2D-primitive shoggoth icon: a writhing dark mass wearing a

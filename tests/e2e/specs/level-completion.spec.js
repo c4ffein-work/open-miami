@@ -23,9 +23,9 @@ test.describe('Open Miami - Level Completion', () => {
     const texts = await lastFrameTexts(page);
 
     // The in-game HUD, not the title/level-select screen.
-    expect(texts).toEqual(expect.arrayContaining(['Health:', 'Weapon:', 'Rogues:']));
-    expect(Number(hudValue(texts, 'Health:'))).toBeGreaterThan(0);
-    expect(Number(hudValue(texts, 'Rogues:'))).toBeGreaterThan(0);
+    expect(texts).toEqual(expect.arrayContaining(['HEALTH:', 'WEAPON:', 'ROGUES:']));
+    expect(Number(hudValue(texts, 'HEALTH:'))).toBeGreaterThan(0);
+    expect(Number(hudValue(texts, 'ROGUES:'))).toBeGreaterThan(0);
     // Floor 1's objective names its exit.
     expect(texts.some((s) => s.includes('SERVICE LIFT'))).toBe(true);
 
@@ -58,8 +58,8 @@ test.describe('Open Miami - Level Completion', () => {
     expect(after.equals(before)).toBe(false);
     await page.screenshot({ path: 'test-results/03-moved.png' });
     let texts = await lastFrameTexts(page);
-    expect(Number(hudValue(texts, 'Health:'))).toBeGreaterThan(0);
-    expect(hudValue(texts, 'Rogues:')).toBe('0');
+    expect(Number(hudValue(texts, 'HEALTH:'))).toBeGreaterThan(0);
+    expect(hudValue(texts, 'ROGUES:')).toBe('0');
 
     // Through the turnstiles, west along the hall, then north into the open SERVICE LIFT (NW).
     await walkFloor1ToServiceLift(page);
@@ -68,7 +68,7 @@ test.describe('Open Miami - Level Completion', () => {
 
     // The card ends -> floor 2 (COLD STORAGE, FREIGHT LIFT objective) loads.
     texts = await expectFloor2(page);
-    expect(Number(hudValue(texts, 'Rogues:'))).toBeGreaterThan(0);
+    expect(Number(hudValue(texts, 'ROGUES:'))).toBeGreaterThan(0);
     await page.screenshot({ path: 'test-results/05-floor2-loaded.png' });
 
     expect(errors).toEqual([]);

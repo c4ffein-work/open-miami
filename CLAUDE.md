@@ -1,6 +1,16 @@
 ## Development Constraints
 - NEVER add any additional dependency
 
+## Design
+- ALL on-screen text is UPPERCASE — VT323 renders far better in caps and
+  all-caps is the game's look. Enforced STRUCTURALLY: `Graphics::draw_text`
+  ASCII-uppercases every string at the single rendering boundary, so write
+  strings (code literals, level-JSON dialogue / objectives / captions,
+  editor labels) in whatever case reads best at the source — the screen
+  always shows caps, and non-ASCII glyphs (`·`, `→`, …) pass through.
+  Consequently the e2e text-arena probes see uppercase: match `'HEALTH:'`,
+  never `'Health:'`
+
 ## Rendering Architecture
 - The Rust/wasm engine owns the simulation only; **all rendering is WebGL in JS**
 - Each frame, `Graphics` (src/graphics.rs) records a flat f32 command stream
@@ -35,7 +45,15 @@
   rush, 10 warp trails (FEEDBACK: a persistent ping-pong accumulator in
   renderer.js, pulled toward the centre + faded each frame and re-fed the
   scene's bright saturated pixels = radial long-exposure light trails; the
-  accumulator is cleared whenever the previous frame did not use kind 10);
+  accumulator is cleared whenever the previous frame did not use kind 10),
+  11 UI grey (the modal wash), 12 modal static (colour.rg = a centred
+  panel's half extents: inside passes through, outside blurred + buried
+  under `t` coverage of hard 6-px static), 13 TV static (the frame
+  untouched + the same 6-px static grain over every cell at opacity `t`,
+  no wash — the title screen runs it at 0.075 for a faint dead-channel
+  shimmer; the one kind that is NOT a post pass: drawn as a single
+  alpha-blended quad of a pre-rolled noise texture, never routing the
+  frame through the scene FBO);
   the `?viz` EFFECTS tab previews them all. Only the last POSTFX of a
   frame applies
 - Opcodes 15/16 = PIXEL-ART GROUPS: `PIX_BEGIN px w h` … `PIX_END x y`
@@ -101,6 +119,31 @@
   (weapon = fist) get a RELAXED pose variant in robot-core's `posePlan`
   (arms hanging loose w/ splay + elbow bend, easy walk swing); combat poses
   and armed robots are unchanged
+- Opcode 19 = `PIX_BLIT sx sy sw sh x y` (`Graphics::pixel_blit`): re-draw
+  the rect `(sx, sy)..(sx+sw, sy+sh)` — in the group's local units — of the
+  LAST-closed pixel group as a `(sw, sh)` quad at `(x, y)` in the current
+  transform (NEAREST, origin snapped like PIX_END). The group's texels
+  persist until the next PIX_BEGIN, so a scene rasterized once can be
+  re-placed many times for one textured quad each. (No in-game caller right
+  now: drive.rs's tear bands used it until the drive went full-shader)
+- Opcode 20 = `DRIVE w h t glitch split px dim o0..o8` (`Graphics::drive`):
+  the synthwave drive backdrop (title screen, `?viz` MUSICS preview) as one
+  full-shader pass AT ART RESOLUTION — renderer.js's DRIVE_FS computes
+  every art pixel (sky bands, cut-band sun, stars, digital rain, road
+  rows, palms, tear bands, red/cyan channel split, neon debris)
+  shadertoy-style into a tiny `ceil(w/px) x ceil(h/px)` NEAREST target
+  (~84K fragment evaluations whatever the canvas/DPR; the quantization
+  comes free), then draws it as ONE upscaled textured quad — so
+  fill-rate-poor GPUs pay a texture fetch per screen pixel instead of
+  stacked full-screen layers. src/drive.rs stays the
+  source of truth for the deterministic glitch schedules (unit-tested
+  natively) and ships them as the op args; palm slots / debris blocks are
+  placed per frame in renderer.js (same integer hash as Rust's `hash01`)
+  and handed to the shader as uniforms; the scene geometry constants are
+  MIRRORED between drive.rs's tunables and the shader — edit both or
+  neither. The canvas context is also created with `antialias: false`
+  (no MSAA): sprites/text/groups are texture quads, and a multisampled
+  default framebuffer ~4x-es the bandwidth of every full-screen layer
 - The command opcode tables in src/graphics.rs (`mod op`), renderer.js
   (incl. its `OP_ARGS` arity table used by the POSTFX pre-scan) and
   tests/e2e/specs/helpers.js (`OP_ARGS`) must stay in sync

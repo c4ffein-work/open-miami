@@ -51,7 +51,7 @@ function collectErrors(page) {
 
 // Per-opcode argument counts of the frame command stream (must mirror
 // `mod op` in src/graphics.rs and OP_ARGS in renderer.js).
-const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2, 6, 5];
+const OP_ARGS = [4, 8, 9, 7, 9, 9, 8, 0, 0, 2, 1, 8, 2, 6, 5, 3, 2, 6, 5, 6, 16];
 const OP_ROBOT = 11; // colorIdx poseIdx weaponIdx x y angle sizePx time
 const ROBOT_COLOR_PLAYER = 0; // CL4-UD3, coral (src/lib.rs ROBOT_COLOR_CORAL)
 
@@ -187,7 +187,7 @@ async function loadFloor(page, floor) {
   const canvas = page.locator('canvas#glcanvas');
   await canvas.waitFor({ state: 'visible', timeout: 10000 });
   await waitForFrames(page, 10);
-  await waitForFrameTexts(page, (t) => t.includes('Health:') && t.includes('Rogues:'), {
+  await waitForFrameTexts(page, (t) => t.includes('HEALTH:') && t.includes('ROGUES:'), {
     what: 'the in-game HUD',
   });
   await canvas.focus();
@@ -201,7 +201,7 @@ async function loadFloor(page, floor) {
 async function purgeRogues(page) {
   await tap(page, 'i');
   await tap(page, 'k');
-  await waitForFrameTexts(page, (t) => hudValue(t, 'Rogues:') === '0', {
+  await waitForFrameTexts(page, (t) => hudValue(t, 'ROGUES:') === '0', {
     what: 'Rogues: 0 after the debug purge',
   });
 }
@@ -267,7 +267,7 @@ async function walkFloor1ToServiceLift(page) {
 async function expectFloor2(page) {
   const texts = await waitForFrameTexts(
     page,
-    (t) => t.includes('Health:') && t.some((s) => s.includes('FREIGHT LIFT')),
+    (t) => t.includes('HEALTH:') && t.some((s) => s.includes('FREIGHT LIFT')),
     { timeout: 12000, what: 'floor 2 (COLD STORAGE / FREIGHT LIFT objective)' },
   );
   expect(texts.some((s) => s.includes('SERVICE LIFT'))).toBe(false);
