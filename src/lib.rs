@@ -2586,10 +2586,10 @@ mod wasm_entry {
         }
 
         /// Just the modal panel + POSTFX 12, over whatever is already drawn
-        /// (the pause menu draws it over the void; stacked modals each emit
-        /// their POSTFX and only the LAST one applies, so the topmost panel
-        /// wins and everything under it — including a deeper panel — melts
-        /// into the static).
+        /// (the title modals over the level select, the pause menu over the
+        /// frozen world; stacked modals each emit their POSTFX and only the
+        /// LAST one applies, so the topmost panel wins and everything under
+        /// it — including a deeper panel — melts into the static).
         fn draw_modal_chrome(
             &mut self,
             graphics: &Graphics,
@@ -2778,6 +2778,17 @@ mod wasm_entry {
         }
 
         fn update_paused(&mut self, graphics: &Graphics) {
+            // The frozen game world behind the modal — same recipe as the
+            // title's SETTINGS/ABOUT over the live level select: draw the
+            // scene, then let POSTFX 12 blur it and bury it under the static
+            // outside the panel. `dt = 0`: pure re-render, nothing advances.
+            let accent = self
+                .scenario
+                .as_ref()
+                .map(|sc| sc.floor().accent_rgb())
+                .unwrap_or((217, 119, 87));
+            self.render_world(graphics, 0.0, accent);
+
             // The stacked SETTINGS modal over the pause modal: Esc pops one
             // layer at a time (settings -> pause -> game). Both panels draw;
             // only the topmost POSTFX applies, so the pause panel behind
@@ -2859,6 +2870,122 @@ mod wasm_entry {
                     26.0,
                     color,
                 );
+            }
+        }
+
+        /// The WORLD layer of a frame — camera transform, floor tiles, walls,
+        /// props, elevators, corpses, entities, live robot sprites — exactly
+        /// what sits between `camera.apply` and `camera.reset` (wrapped in
+        /// the `?pixel=N` group when active). Pure rendering: no input, no
+        /// simulation, so the pause screen re-draws the frozen world behind
+        /// its modal with `dt = 0` (only the kill-flash decay reads `dt`).
+        fn render_world(&mut self, graphics: &Graphics, dt: f32, accent: (u8, u8, u8)) {
+            // EXPERIMENT `?pixel=N`: the whole world layer (everything between
+            // camera.apply and camera.reset) is rasterized at N-px art
+            // resolution and nearest-upscaled; the HUD stays crisp. Note
+            // the robots / boss are already pixelated tiles, so inside the
+            // group they get quantized twice (tile px, then the group px).
+            if self.pixel_world >= 2 {
+                graphics.pixel_begin(self.pixel_world as f32, graphics.width(), graphics.height());
+            }
+
+            // Apply camera transform for world rendering
+            self.camera.apply(graphics);
+
+            // Render level (only the tiles visible in the camera viewport)
+            let (view_min, view_max) = self
+                .camera
+                .visible_bounds(graphics.width(), graphics.height());
+            // View culling for the expensive sprites (live 3D robots / guns /
+            // the boss) and the placed props: anything whose footprint lies
+            // fully outside these inflated bounds skips its commands.
+            let cull = crate::camera::ViewCull::new(view_min, view_max);
+            // Kill flash: the floor strobes red / blue / red / blue for a beat.
+            let tint = if self.kill_flash > 0.0 {
+                self.kill_flash = (self.kill_flash - dt).max(0.0);
+                let phase = ((KILL_FLASH_SECS - self.kill_flash) / KILL_FLASH_SECS
+                    * KILL_FLASH_STROBES as f32) as u32;
+                let fade = self.kill_flash / KILL_FLASH_SECS; // 1 -> 0
+                Some(if phase.is_multiple_of(2) {
+                    Color::new(0.85, 0.08, 0.16, 0.55 * fade)
+                } else {
+                    Color::new(0.10, 0.25, 0.95, 0.55 * fade)
+                })
+            } else {
+                None
+            };
+            self.level.render(graphics, view_min, view_max, tint);
+
+            // Render walls from the world
+            render_walls(&self.world, graphics, self.show_infos);
+
+            // Placed props: floor furniture over the tiles / walls, under the
+            // actors (decoration only, no collision).
+            crate::floor_props::render_floor_props(
+                graphics,
+                floor_def(self.selected_level).props,
+                self.last_time as f32 / 1000.0,
+                &cull,
+            );
+
+            // Elevators (recessed door frames; exits light up when open) and,
+            // in debug mode, the scenario trigger zones.
+            render_elevators(
+                &self.world,
+                graphics,
+                accent,
+                self.last_time as f32 / 1000.0,
+            );
+            if self.show_infos {
+                render_zones_debug(&self.world, graphics);
+            }
+
+            // Downed / dead bots first: the ground weapons (in
+            // render_entities below) draw OVER the corpses so they stay easy
+            // to spot, while everyone still standing draws over the guns.
+            draw_robot_entities(
+                &self.world,
+                graphics,
+                self.last_time as f32 / 1000.0,
+                true,
+                &cull,
+            );
+
+            // Render all entities except the player/rogue bots themselves
+            // (bullets, pickups, boss, debug overlays...).
+            render_entities(
+                &self.world,
+                graphics,
+                self.show_infos,
+                false,
+                self.last_time as f32 / 1000.0,
+                &cull,
+            );
+
+            // The upright player and rogues are the live 3D robot sprites,
+            // drawn while the camera transform (incl. zoom) is still applied
+            // so world-space positions and sizes land correctly.
+            draw_robot_entities(
+                &self.world,
+                graphics,
+                self.last_time as f32 / 1000.0,
+                false,
+                &cull,
+            );
+
+            // A pixelated arrow slowly floating over the active tutorial
+            // gate's target, so "swing the bar" always has an obvious victim.
+            if let Some(anchor) = self.scenario.as_ref().and_then(|sc| sc.gate_anchor()) {
+                let t = self.last_time as f32 / 1000.0;
+                // Bob in whole 2-px steps: floaty but still pixel-crisp.
+                let bob = ((t * 2.2).sin() * 3.0).floor() * 2.0;
+                draw_pixel_arrow(graphics, anchor.x, anchor.y - 58.0 + bob, accent);
+            }
+
+            // Reset camera for UI rendering
+            self.camera.reset(graphics);
+            if self.pixel_world >= 2 {
+                graphics.pixel_end(0.0, 0.0);
             }
         }
 
@@ -3093,113 +3220,7 @@ mod wasm_entry {
             // returns (floor restart, extraction) still close it.
             let _record_span = perf::span("record");
 
-            // EXPERIMENT `?pixel=N`: the whole world layer (everything between
-            // camera.apply and camera.reset) is rasterized at N-px art
-            // resolution and nearest-upscaled; the HUD below stays crisp. Note
-            // the robots / boss are already pixelated tiles, so inside the
-            // group they get quantized twice (tile px, then the group px).
-            if self.pixel_world >= 2 {
-                graphics.pixel_begin(self.pixel_world as f32, graphics.width(), graphics.height());
-            }
-
-            // Apply camera transform for world rendering
-            self.camera.apply(graphics);
-
-            // Render level (only the tiles visible in the camera viewport)
-            let (view_min, view_max) = self
-                .camera
-                .visible_bounds(graphics.width(), graphics.height());
-            // View culling for the expensive sprites (live 3D robots / guns /
-            // the boss) and the placed props: anything whose footprint lies
-            // fully outside these inflated bounds skips its commands.
-            let cull = crate::camera::ViewCull::new(view_min, view_max);
-            // Kill flash: the floor strobes red / blue / red / blue for a beat.
-            let tint = if self.kill_flash > 0.0 {
-                self.kill_flash = (self.kill_flash - dt).max(0.0);
-                let phase = ((KILL_FLASH_SECS - self.kill_flash) / KILL_FLASH_SECS
-                    * KILL_FLASH_STROBES as f32) as u32;
-                let fade = self.kill_flash / KILL_FLASH_SECS; // 1 -> 0
-                Some(if phase.is_multiple_of(2) {
-                    Color::new(0.85, 0.08, 0.16, 0.55 * fade)
-                } else {
-                    Color::new(0.10, 0.25, 0.95, 0.55 * fade)
-                })
-            } else {
-                None
-            };
-            self.level.render(graphics, view_min, view_max, tint);
-
-            // Render walls from the world
-            render_walls(&self.world, graphics, self.show_infos);
-
-            // Placed props: floor furniture over the tiles / walls, under the
-            // actors (decoration only, no collision).
-            crate::floor_props::render_floor_props(
-                graphics,
-                floor_def(self.selected_level).props,
-                self.last_time as f32 / 1000.0,
-                &cull,
-            );
-
-            // Elevators (recessed door frames; exits light up when open) and,
-            // in debug mode, the scenario trigger zones.
-            render_elevators(
-                &self.world,
-                graphics,
-                accent,
-                self.last_time as f32 / 1000.0,
-            );
-            if self.show_infos {
-                render_zones_debug(&self.world, graphics);
-            }
-
-            // Downed / dead bots first: the ground weapons (in
-            // render_entities below) draw OVER the corpses so they stay easy
-            // to spot, while everyone still standing draws over the guns.
-            draw_robot_entities(
-                &self.world,
-                graphics,
-                self.last_time as f32 / 1000.0,
-                true,
-                &cull,
-            );
-
-            // Render all entities except the player/rogue bots themselves
-            // (bullets, pickups, boss, debug overlays...).
-            render_entities(
-                &self.world,
-                graphics,
-                self.show_infos,
-                false,
-                self.last_time as f32 / 1000.0,
-                &cull,
-            );
-
-            // The upright player and rogues are the live 3D robot sprites,
-            // drawn while the camera transform (incl. zoom) is still applied
-            // so world-space positions and sizes land correctly.
-            draw_robot_entities(
-                &self.world,
-                graphics,
-                self.last_time as f32 / 1000.0,
-                false,
-                &cull,
-            );
-
-            // A pixelated arrow slowly floating over the active tutorial
-            // gate's target, so "swing the bar" always has an obvious victim.
-            if let Some(anchor) = self.scenario.as_ref().and_then(|sc| sc.gate_anchor()) {
-                let t = self.last_time as f32 / 1000.0;
-                // Bob in whole 2-px steps: floaty but still pixel-crisp.
-                let bob = ((t * 2.2).sin() * 3.0).floor() * 2.0;
-                draw_pixel_arrow(graphics, anchor.x, anchor.y - 58.0 + bob, accent);
-            }
-
-            // Reset camera for UI rendering
-            self.camera.reset(graphics);
-            if self.pixel_world >= 2 {
-                graphics.pixel_end(0.0, 0.0);
-            }
+            self.render_world(graphics, dt, accent);
 
             // Get game state for UI
             let health = get_player_health(&self.world);
