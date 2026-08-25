@@ -100,6 +100,10 @@ mod wasm_entry {
     /// pathologically slow machine), the game starts anyway — every sound
     /// falls back to live synthesis until its bake lands.
     const PRECOMPUTE_CAP_MS: f64 = 6000.0;
+    /// The faint TV-static shimmer (POSTFX kind 13) over the title screen
+    /// and every in-game frame — the modals' static at a twelfth of its
+    /// coverage.
+    const TV_STATIC_T: f32 = 0.9 / 12.0;
 
     #[wasm_bindgen]
     extern "C" {
@@ -2565,10 +2569,9 @@ mod wasm_entry {
                 Color::GRAY,
             );
 
-            // A faint TV-static shimmer over the whole title screen — the
-            // SETTINGS/ABOUT modals' static at a twelfth of its coverage.
+            // A faint TV-static shimmer over the whole title screen.
             // (Last POSTFX wins, so an open modal's kind 12 replaces it.)
-            graphics.postfx(13, 0.9 / 12.0, Color::WHITE);
+            graphics.postfx(13, TV_STATIC_T, Color::WHITE);
         }
 
         /// The shared SETTINGS / ABOUT modal chrome over the live title
@@ -3483,6 +3486,12 @@ mod wasm_entry {
                     );
                 }
             }
+
+            // The title screen's faint TV-static shimmer, over every in-game
+            // frame (world + HUD alike — POSTFX is frame-level). Emitted
+            // BEFORE the outro's blur-out below: last POSTFX wins, so the
+            // dissolve replaces the static during the exfil fade.
+            graphics.postfx(13, TV_STATIC_T, Color::WHITE);
 
             // Extraction card done -> ride to the next floor (13's car jams
             // into 13½ and its boss intro; the boss floor's car goes home:
