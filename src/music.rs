@@ -2166,6 +2166,77 @@ pub fn song_for_floor(level: usize) -> SongSpec {
 
 // --- reading the format ------------------------------------------------------
 
+/// The name of a known mode, for the tracker's info line (`"CUSTOM"` for
+/// any other set of offsets).
+pub fn scale_name(scale: Scale) -> &'static str {
+    match scale {
+        s if s == MINOR => "MINOR",
+        s if s == DORIAN => "DORIAN",
+        s if s == HARMONIC_MINOR => "HARMONIC MINOR",
+        s if s == PHRYGIAN => "PHRYGIAN",
+        s if s == PHRYGIAN_DOMINANT => "PHRYGIAN DOMINANT",
+        s if s == LOCRIAN => "LOCRIAN",
+        _ => "CUSTOM",
+    }
+}
+
+/// The nearest note name + octave of a frequency (`55.0` → `"A1"`,
+/// `73.42` → `"D2"`), scientific pitch, A4 = 440 Hz.
+pub fn note_name(hz: f64) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    if hz <= 0.0 || !hz.is_finite() {
+        return "?".to_string();
+    }
+    // Semitones above C0 (16.352 Hz).
+    let n = (12.0 * (hz / 16.351_6).log2()).round() as i64;
+    let name = NAMES[n.rem_euclid(12) as usize];
+    format!("{}{}", name, n.div_euclid(12))
+}
+
+/// One-line summary of a voice for the tracker (`"SAW ×5 ±12C · BLOOM ·
+/// HALL 45%"`): shape and stack, then which features are on.
+pub fn voice_summary(v: &Voice) -> String {
+    let wave = match v.wave {
+        Wave::Sine => "SIN",
+        Wave::Triangle => "TRI",
+        Wave::Square => "SQR",
+        Wave::Sawtooth => "SAW",
+    };
+    let mut parts = Vec::new();
+    let n = v.oscillators();
+    if n > 1 {
+        parts.push(format!("{wave} ×{n} ±{:.0}C", v.detune));
+    } else {
+        parts.push(wave.to_string());
+    }
+    if let Some(f) = v.filter {
+        if f.attack > 0.0 {
+            parts.push("BLOOM".to_string());
+        }
+        if f.decay > 0.0 || f.attack == 0.0 {
+            parts.push(format!("WOW Q{:.0}", f.q));
+        }
+    }
+    if let Some(vb) = v.vibrato {
+        parts.push(format!("VIB {:.0}C", vb.depth));
+    }
+    if let Some(e) = v.env {
+        parts.push(format!("GATE {:.1}", e.gate));
+    }
+    if v.drive > 0.0 {
+        parts.push(format!("DRV {:.0}%", v.drive * 100.0));
+    }
+    if v.echo > 0.0 {
+        parts.push(format!("ECHO {:.0}%", v.echo * 100.0));
+    }
+    if v.reverb > 0.0 {
+        parts.push(format!("HALL {:.0}%", v.reverb * 100.0));
+    }
+    parts.join(" · ")
+}
+
 /// Resolve a scale-degree (root = 0, +1 = next scale note up, +scale.len() = an
 /// octave up, negatives drop below root) to a frequency in Hz, in-key.
 pub fn degree_freq(root: f64, scale: Scale, degree: i32) -> f64 {
@@ -2707,6 +2778,32 @@ mod tests {
         assert!((swing_delay(1.0, 1, 0.3) - 0.1).abs() < 1e-9);
         assert!((swing_delay(0.5, 3, 0.3) - 0.05).abs() < 1e-9);
         assert!((swing_delay(7.0, 1, 0.3) - 0.1).abs() < 1e-9, "clamped");
+    }
+
+    #[test]
+    fn info_line_helpers() {
+        assert_eq!(scale_name(MINOR), "MINOR");
+        assert_eq!(scale_name(LOCRIAN), "LOCRIAN");
+        assert_eq!(scale_name(&[0, 5]), "CUSTOM");
+        assert_eq!(note_name(55.0), "A1");
+        assert_eq!(note_name(73.42), "D2");
+        assert_eq!(note_name(440.0), "A4");
+        assert_eq!(note_name(32.70), "C1");
+        assert_eq!(note_name(0.0), "?");
+        assert_eq!(voice_summary(&Voice::mono(Wave::Sine)), "SIN");
+        let v = Voice::stack(Wave::Sawtooth, 0.0, 12.0, 0.9, 5)
+            .with_filter(500.0, 2000.0, 1.0, 0.0, 1.1)
+            .with_reverb(0.45);
+        assert_eq!(voice_summary(&v), "SAW ×5 ±12C · BLOOM · HALL 45%");
+        let w = Voice::mono(Wave::Square)
+            .with_filter(500.0, 2000.0, 0.0, 0.1, 3.0)
+            .with_vibrato(5.0, 10.0, 0.2)
+            .with_drive(0.5)
+            .with_echo(0.3);
+        assert_eq!(
+            voice_summary(&w),
+            "SQR · WOW Q3 · VIB 10C · DRV 50% · ECHO 30%"
+        );
     }
 
     #[test]

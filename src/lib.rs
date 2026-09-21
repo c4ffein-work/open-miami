@@ -2074,6 +2074,21 @@ mod wasm_entry {
             if viz_button(graphics, mouse, 40.0, y, 158.0, 40.0, "STOP", false) && click {
                 self.audio.stop_music();
             }
+            // The song's global settings, next to STOP.
+            {
+                let song = self.audio.current_song();
+                let info = format!(
+                    "{} · {} {} · {:.0} BPM · SWING {:.0}% · DUCK {:.0}% · ECHO {:.1} STEPS",
+                    song.name,
+                    crate::music::note_name(song.root),
+                    crate::music::scale_name(song.scale),
+                    song.bpm,
+                    song.swing * 100.0,
+                    song.sidechain.depth * 100.0,
+                    song.echo.steps,
+                );
+                graphics.draw_text(&info, Vec2::new(216.0, y + 26.0), 16.0, Color::GRAY);
+            }
 
             // --- section miniatures (the arrangement mini-map) ---------------
             y += 54.0;
@@ -2279,11 +2294,25 @@ mod wasm_entry {
                 self.audio.seek(s.min(steps - 1));
             }
 
+            // --- the song's instruments, one line per melodic lane ----------
+            let mut sy = grid_bottom + 20.0;
+            graphics.draw_text("VOICES", Vec2::new(40.0, sy), 16.0, coral);
+            {
+                let song = self.audio.current_song();
+                for (i, &lane) in crate::music::MELODIC.iter().enumerate() {
+                    let ly = sy + 16.0 + i as f32 * 16.0;
+                    let col = chan_col[lane.min(chan_col.len() - 1)];
+                    graphics.draw_text(names[lane], Vec2::new(40.0, ly), 14.0, col);
+                    let summary = crate::music::voice_summary(&song.voices[lane]);
+                    graphics.draw_text(&summary, Vec2::new(118.0, ly), 14.0, Color::GRAY);
+                }
+                sy += 16.0 * (crate::music::MELODIC.len() as f32 + 1.0) + 6.0;
+            }
+
             // --- SFX: the full per-weapon taxonomy ---------------------------
             // Row 1: attack (the weapon firing/swinging).
             // Row 2: hit (that weapon's impact on a metal bot).
             // Row 3: the rest of the one-shot game sounds.
-            let mut sy = grid_bottom + 18.0;
             graphics.draw_text("SFX", Vec2::new(40.0, sy), 16.0, coral);
             sy += 12.0;
             let bw_s = 158.0f32;
