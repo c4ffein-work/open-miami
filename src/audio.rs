@@ -54,7 +54,7 @@
 
 use crate::music::Drum::{Clap, Crash, Hat, Kick, OpenHat, Rim, Silent, Snare, Tom};
 use crate::music::{
-    cell_at, chord_at, degree_freq, drum_at, duck_level, music_keys, note_at, section_len,
+    cell_at, degree_freq, drum_at, duck_level, music_keys, note_at, note_key, section_len,
     swing_delay, vel_at, Cell as GridCell, Drum, Filter, MusicKey, Section, SongSpec, Vibrato,
     Voice, Wave, BASS, DRUMS, KEYS, LEAD, MAX_VEL, MELODIC, NUM_CHANNELS, NUM_VOICES, PAD, PERC,
     SONGS,
@@ -824,6 +824,9 @@ struct Tone {
     /// Start and end pitch (a glide when they differ).
     f0: f64,
     f1: f64,
+    /// Seconds the `f0 → f1` glide takes; `0` = it spans the whole note
+    /// (the SFX dive / sweep behaviour).
+    glide: f64,
     /// Absolute start time.
     start: f64,
     /// Seconds to peak.
@@ -836,6 +839,19 @@ struct Tone {
     peak: f64,
     wave: OscillatorType,
     vibrato: Option<Vibrato>,
+}
+
+/// One melodic-lane note as handed to [`AudioEngine::lane_tone`]: the
+/// partial's pitch (and the pitch it glides in from), its envelope times
+/// and its level.
+struct LaneNote {
+    f: f64,
+    from: Option<f64>,
+    start: f64,
+    attack: f64,
+    hold: f64,
+    dur: f64,
+    peak: f64,
 }
 
 /// The offline render target while a pre-render is being *built*: the voice
@@ -3185,12 +3201,19 @@ impl AudioEngine {
             None => return,
         };
         // Higher intensity => lower/tighter peak, for a darker, closed sound.
-        let peak_hz = (5200.0 / self.song.intensity.max(0.4)).clamp(1400.0, 6000.0) as f32;
-        let low_hz = 420.0f32;
+        let peak_hz = (5200.0 / self.song.intensity.max(0.4)).clamp(1400.0, 6000.0);
+        // The song's sweep depth scales how far below the peak the filter
+        // closes at the bar lines (1.0 = all the way to 420 Hz, 0 = stays).
+        let depth = self.song.sweep.clamp(0.0, 1.0);
+        let low_hz = peak_hz * (420.0 / peak_hz).powf(depth);
         let f = filt.frequency();
-        let _ = f.set_value_at_time(low_hz, start);
-        let _ = f.exponential_ramp_to_value_at_time(peak_hz, start + bar_dur * 0.5);
-        let _ = f.exponential_ramp_to_value_at_time(low_hz, start + bar_dur);
+        if depth <= 0.0 {
+            let _ = f.set_value_at_time(peak_hz as f32, start);
+            return;
+        }
+        let _ = f.set_value_at_time(low_hz as f32, start);
+        let _ = f.exponential_ramp_to_value_at_time(peak_hz as f32, start + bar_dur * 0.5);
+        let _ = f.exponential_ramp_to_value_at_time(low_hz as f32, start + bar_dur);
     }
 
     /// Schedule one step of the current section (all channels) at time `t`.
@@ -3207,12 +3230,7 @@ impl AudioEngine {
                 continue;
             }
             if let Some(n) = note_at(sec.lane(lane), step) {
-                let key = MusicKey::Note {
-                    lane,
-                    degree: n.degree,
-                    len: n.len,
-                    chord: chord_at(lane, sec.chord_lane(lane), step),
-                };
+                let key = note_key(&self.song, sec, lane, step, &n);
                 self.music_note(key, t, vel_at(sec.vel_lane(lane), step));
             }
         }
@@ -3373,6 +3391,7 @@ impl AudioEngine {
                 degree,
                 len,
                 chord,
+                from,
             } => {
                 let (gate, level, attack) = self.voice_shape(lane);
                 let voice = s
@@ -3387,9 +3406,26 @@ impl AudioEngine {
                 // (the pad's level is calibrated for its default triad).
                 let partials = chord.degrees();
                 let split = level / (partials.len().max(1) as f64).sqrt();
-                for &interval in partials {
+                for (i, &interval) in partials.iter().enumerate() {
                     let f = degree_freq(s.root, s.scale, degree + interval);
-                    self.lane_tone(lane, &voice, f, t, attack, hold, dur, gain * split);
+                    // A glide starts every partial from the previous note's
+                    // matching partial.
+                    let from_f = from
+                        .filter(|_| voice.glide > 0.0)
+                        .map(|d| degree_freq(s.root, s.scale, d + interval));
+                    let note = LaneNote {
+                        f,
+                        from: from_f,
+                        start: t,
+                        attack,
+                        hold,
+                        dur,
+                        peak: gain * split,
+                    };
+                    self.lane_tone(lane, &voice, &note);
+                    if i == 0 && voice.sub > 0.0 {
+                        self.sub_tone(lane, &voice, &note);
+                    }
                 }
             }
             MusicKey::Drum(d) => self.drum(d, t, gain),
@@ -3781,21 +3817,28 @@ impl AudioEngine {
     /// `dur`-long pluck. Live: into the lane's panner; baking: into the
     /// offline sink (mono, or the stereo pair).
     #[allow(clippy::too_many_arguments)]
-    fn lane_tone(
-        &self,
-        lane: usize,
-        voice: &Voice,
-        f: f64,
-        start: f64,
-        attack: f64,
-        hold: f64,
-        dur: f64,
-        peak: f64,
-    ) {
+    fn lane_tone(&self, lane: usize, voice: &Voice, note: &LaneNote) {
         let out = match self.lane_out(lane) {
             Some(o) => o,
             None => return,
         };
+        let LaneNote {
+            f,
+            from,
+            start,
+            attack,
+            hold,
+            dur,
+            peak,
+        } = *note;
+        if voice.wave == Wave::Noise {
+            let filtered = voice
+                .filter
+                .and_then(|flt| self.note_filter(&out, start, &flt));
+            let dst = filtered.as_ref().unwrap_or(&out);
+            self.noise_env_out(dst, start, attack, hold, dur, peak);
+            return;
+        }
         let wave = Self::osc_type(voice.wave);
         let n = voice.oscillators();
         // A stack sums to about one note's loudness (0.78/√n per voice:
@@ -3812,7 +3855,8 @@ impl AudioEngine {
             } else {
                 0.0
             };
-            let f_i = f * 2f64.powf(frac * voice.detune / 1200.0);
+            let spread = 2f64.powf(frac * voice.detune / 1200.0);
+            let f_i = f * spread;
             let target = if n > 1 && voice.width > 0.0 {
                 self.side_panner(&out, frac * voice.width)
             } else {
@@ -3826,8 +3870,9 @@ impl AudioEngine {
             self.tone_env(
                 dst,
                 &Tone {
-                    f0: f_i,
+                    f0: from.map_or(f_i, |ff| ff * spread),
                     f1: f_i,
+                    glide: voice.glide,
                     start,
                     attack,
                     hold,
@@ -3838,6 +3883,68 @@ impl AudioEngine {
                 },
             );
         }
+    }
+
+    /// The voice's sine sub-oscillator an octave under `note` (which glides
+    /// with it), straight into the lane — no stack, no filter, no vibrato.
+    fn sub_tone(&self, lane: usize, voice: &Voice, note: &LaneNote) {
+        let out = match self.lane_out(lane) {
+            Some(o) => o,
+            None => return,
+        };
+        self.tone_env(
+            &out,
+            &Tone {
+                f0: note.from.unwrap_or(note.f) * 0.5,
+                f1: note.f * 0.5,
+                glide: voice.glide,
+                start: note.start,
+                attack: note.attack,
+                hold: note.hold,
+                dur: note.dur,
+                peak: note.peak * voice.sub.clamp(0.0, 1.0),
+                wave: OscillatorType::Sine,
+                vibrato: None,
+            },
+        );
+    }
+
+    /// A noise "note": the shared noise buffer under the same
+    /// attack / hold / decay envelope a tone gets, into `out`.
+    fn noise_env_out(
+        &self,
+        out: &web_sys::AudioNode,
+        start: f64,
+        attack: f64,
+        hold: f64,
+        dur: f64,
+        peak: f64,
+    ) {
+        let (ctx, buf) = match (self.bctx(), &self.noise) {
+            (Some(c), Some(b)) => (c, b),
+            _ => return,
+        };
+        let (src, gain) = match (ctx.create_buffer_source(), ctx.create_gain()) {
+            (Ok(s), Ok(g)) => (s, g),
+            _ => return,
+        };
+        src.set_buffer(Some(buf));
+        src.set_loop(true);
+        let total = hold + dur;
+        let g = gain.gain();
+        let peak = peak.max(0.0002) as f32;
+        let _ = g.set_value_at_time(0.0001, start);
+        let _ = g.exponential_ramp_to_value_at_time(peak, start + attack.max(0.001));
+        if hold > 0.0 {
+            let _ = g.set_value_at_time(peak, start + attack + hold);
+        }
+        let _ = g.exponential_ramp_to_value_at_time(0.0001, start + total);
+        let _ = src.connect_with_audio_node(&gain);
+        let _ = gain.connect_with_audio_node(out);
+        let sched: &web_sys::AudioScheduledSourceNode = src.as_ref();
+        let offset = self.rand() * (NOISE_SECONDS - 0.05);
+        let _ = src.start_with_when_and_grain_offset(start, offset);
+        let _ = sched.stop_with_when(start + total + 0.02);
     }
 
     /// A per-note lowpass with its [`Filter`] envelope automated from
@@ -3884,13 +3991,15 @@ impl AudioEngine {
         Some(AsRef::<web_sys::AudioNode>::as_ref(&p).clone())
     }
 
-    /// Map a song's [`Wave`] to the Web Audio oscillator type.
+    /// Map a song's [`Wave`] to the Web Audio oscillator type (`Noise` never
+    /// reaches an oscillator — [`Self::lane_tone`] routes it to the noise
+    /// buffer first).
     fn osc_type(wave: Wave) -> OscillatorType {
         match wave {
             Wave::Sine => OscillatorType::Sine,
             Wave::Triangle => OscillatorType::Triangle,
             Wave::Square => OscillatorType::Square,
-            Wave::Sawtooth => OscillatorType::Sawtooth,
+            Wave::Sawtooth | Wave::Noise => OscillatorType::Sawtooth,
         }
     }
 
@@ -3914,6 +4023,7 @@ impl AudioEngine {
             &Tone {
                 f0,
                 f1,
+                glide: 0.0,
                 start,
                 attack,
                 hold: 0.0,
@@ -3942,6 +4052,7 @@ impl AudioEngine {
         let Tone {
             f0,
             f1,
+            glide,
             start,
             attack,
             hold,
@@ -3955,7 +4066,8 @@ impl AudioEngine {
         let freq = osc.frequency();
         let _ = freq.set_value_at_time(f0 as f32, start);
         if (f1 - f0).abs() > 0.01 {
-            let _ = freq.exponential_ramp_to_value_at_time(f1.max(1.0) as f32, start + total);
+            let span = if glide > 0.0 { glide.min(total) } else { total };
+            let _ = freq.exponential_ramp_to_value_at_time(f1.max(1.0) as f32, start + span);
         }
         let g = gain.gain();
         let peak = peak.max(0.0002) as f32;
@@ -3976,7 +4088,7 @@ impl AudioEngine {
             if let (Ok(lfo), Ok(amount)) = (ctx.create_oscillator(), ctx.create_gain()) {
                 lfo.set_type(OscillatorType::Sine);
                 let _ = lfo.frequency().set_value_at_time(v.rate as f32, start);
-                let hz = f0 * (2f64.powf(v.depth / 1200.0) - 1.0);
+                let hz = f1 * (2f64.powf(v.depth / 1200.0) - 1.0);
                 let a = amount.gain();
                 let _ = a.set_value_at_time(0.0, start);
                 let _ = a.linear_ramp_to_value_at_time(hz as f32, start + v.delay.max(0.001));

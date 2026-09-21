@@ -93,6 +93,10 @@ pub enum Wave {
     Triangle,
     Square,
     Sawtooth,
+    /// White noise instead of a pitched oscillator: the note's degree is
+    /// ignored, its envelope and the voice's [`Filter`] shape the sound —
+    /// a riser (long tie, slow filter attack), a snare-ish hit, wind.
+    Noise,
 }
 
 /// How a lane note is voiced: which scale degrees sound, relative to the
@@ -223,6 +227,14 @@ pub struct Voice {
     pub echo: f64,
     /// Send level into the music hall reverb, `0.0` (dry) … `1.0`.
     pub reverb: f64,
+    /// A sine SUB-oscillator one octave below the note's lowest partial, at
+    /// this level relative to the note (`0.0` = none). Centred, unfiltered,
+    /// undetuned: the weight under a bass.
+    pub sub: f64,
+    /// Portamento time in seconds: a note that starts exactly where the
+    /// lane's previous note ends (legato — no rest between) GLIDES into
+    /// its pitch from the previous one over this long. `0.0` = no glide.
+    pub glide: f64,
 }
 
 impl Voice {
@@ -240,6 +252,8 @@ impl Voice {
             vibrato: None,
             echo: 0.0,
             reverb: 0.0,
+            sub: 0.0,
+            glide: 0.0,
         }
     }
 
@@ -326,10 +340,20 @@ impl Voice {
         Self { reverb, ..self }
     }
 
+    /// With a sine sub-oscillator an octave down at `sub` of the note.
+    pub const fn with_sub(self, sub: f64) -> Self {
+        Self { sub, ..self }
+    }
+
+    /// With legato portamento over `glide` seconds (see [`Voice::glide`]).
+    pub const fn with_glide(self, glide: f64) -> Self {
+        Self { glide, ..self }
+    }
+
     /// How many oscillators a note of this voice actually runs: the stack
     /// only exists with a detune to spread it over.
     pub fn oscillators(&self) -> usize {
-        if self.detune > 0.0 {
+        if self.detune > 0.0 && self.wave != Wave::Noise {
             (self.unison.clamp(1, 7)) as usize
         } else {
             1
@@ -609,6 +633,11 @@ pub struct SongSpec {
     pub sidechain: Sidechain,
     /// The shared echo line the voices' `echo` sends feed.
     pub echo: Echo,
+    /// Depth of the bus lowpass's once-per-bar sweep, `1.0` (the classic
+    /// synthwave wah, closing to 420 Hz at the bar lines) … `0.0` (the bus
+    /// filter stays open — for songs whose voices carry their own filter
+    /// motion).
+    pub sweep: f64,
 }
 
 /// A shared PERC ride for the driving songs' refrains: closed hats on the
@@ -752,6 +781,7 @@ const INSERT_COIN: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::OFF,
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -884,6 +914,7 @@ const NEON_LOUNGE: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.25, 0.8),
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -1020,6 +1051,7 @@ const CHROME_VEINS: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.4, 0.8),
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -1156,6 +1188,7 @@ const DESCENT: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.5, 0.7),
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -1291,6 +1324,7 @@ const BLOOD_RUSH: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.5, 0.6),
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -1394,10 +1428,11 @@ const DEEP_STATIC: SongSpec = SongSpec {
     bpm: 144.0,
     steps_per_beat: 4,
     voices: [
-        // bass: a relentless saw sub, tight and heavily driven
+        // bass: a relentless saw, tight and heavily driven, a sine sub under it
         Voice::mono(Wave::Sawtooth)
             .with_filter(180.0, 1200.0, 0.0, 0.07, 5.0)
-            .with_drive(0.55),
+            .with_drive(0.55)
+            .with_sub(0.4),
         // lead: a three-saw stack with a screaming resonant wow
         Voice::stack(Wave::Sawtooth, 0.2, 10.0, 0.5, 3)
             .with_filter(1000.0, 5000.0, 0.0, 0.12, 3.0)
@@ -1428,6 +1463,7 @@ const DEEP_STATIC: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.55, 0.6),
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -1534,8 +1570,10 @@ const STATIC_PRAYER: SongSpec = SongSpec {
     voices: [
         // bass: a slow, dull saw lurch
         Voice::mono(Wave::Sawtooth).with_filter(150.0, 600.0, 0.0, 0.3, 1.5),
-        // lead: a detuned, wide triangle wail with a slow deep vibrato
+        // lead: a detuned, wide triangle wail with a slow deep vibrato,
+        // sliding into each touching note
         Voice::wide(Wave::Triangle, 0.2, 10.0, 0.6)
+            .with_glide(0.15)
             .with_vibrato(4.5, 20.0, 0.5)
             .with_echo(0.4)
             .with_reverb(0.5),
@@ -1563,6 +1601,7 @@ const STATIC_PRAYER: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.2, 1.2),
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -1670,10 +1709,11 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
     bpm: 100.0,
     steps_per_beat: 4,
     voices: [
-        // bass: a doubled saw, slow resonant bite, crushed
+        // bass: a doubled saw, slow resonant bite, crushed, a sub beneath
         Voice::wide(Wave::Sawtooth, 0.0, 6.0, 0.3)
             .with_filter(160.0, 900.0, 0.0, 0.2, 3.0)
-            .with_drive(0.6),
+            .with_drive(0.6)
+            .with_sub(0.35),
         // lead: three high squares, huge vibrato, driven, echoing in the hall
         Voice::stack(Wave::Square, 0.2, 12.0, 0.6, 3)
             .with_filter(900.0, 4500.0, 0.0, 0.25, 2.5)
@@ -1706,6 +1746,7 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.5, 0.9),
     echo: Echo::DOTTED,
+    sweep: 1.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -1890,6 +1931,15 @@ const SODIUM_BREAK: Section = Section {
     lead_vel: &[6],
     pad: SODIUM_PAD,
     pad_chord: SODIUM_PAD_CHORDS,
+    // The riser: silent for two bars, then one 32-step noise swell.
+    keys: &[
+        REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
+        REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
+        REST, REST, 0, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD,
+        HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD,
+        HOLD, HOLD, HOLD, HOLD,
+    ],
+    keys_vel: &[7],
     drums: &[
         Kick, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
         Silent, Silent, Hat, Silent,
@@ -1905,8 +1955,10 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
     bpm: 96.0,
     steps_per_beat: 4,
     voices: [
-        // bass: a centred saw sub with a fast resonant pluck on every hit
-        Voice::mono(Wave::Sawtooth).with_filter(230.0, 1100.0, 0.0, 0.12, 3.0),
+        // bass: a centred saw with a fast resonant pluck and a sine sub under it
+        Voice::mono(Wave::Sawtooth)
+            .with_filter(230.0, 1100.0, 0.0, 0.12, 3.0)
+            .with_sub(0.5),
         // lead: a doubled square, a little right, late vibrato, a soft wow,
         // dotted-eighth echoes trailing into the hall
         Voice::wide(Wave::Square, 0.25, 6.0, 0.3)
@@ -1921,7 +1973,12 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
             .with_reverb(0.45),
         // arp: a triangle answering from the left, echoing to the right
         Voice::panned(Wave::Triangle, -0.35).with_echo(0.5),
-        Voice::mono(Wave::Square), // keys: unused here
+        // keys: the noise RISER out of the break — a filter opening over
+        // five seconds under a slow swell, deep in the hall
+        Voice::mono(Wave::Noise)
+            .with_env(2.5, 1.0)
+            .with_filter(300.0, 7000.0, 4.8, 0.0, 1.8)
+            .with_reverb(0.4),
     ],
     sections: &[
         SODIUM_INTRO,
@@ -1937,6 +1994,7 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.55, 0.9),
     echo: Echo::new(3.0, 0.42, 2800.0),
+    sweep: 0.35,
 };
 
 // ---------------------------------------------------------------------------
@@ -2093,13 +2151,16 @@ const BLOOD_ENGINE: SongSpec = SongSpec {
     bpm: 126.0,
     steps_per_beat: 4,
     voices: [
-        // bass: a driven saw with a fast resonant snap on every sixteenth
+        // bass: a driven saw with a fast resonant snap and a sub under it
         Voice::mono(Wave::Sawtooth)
             .with_filter(200.0, 1500.0, 0.0, 0.07, 4.5)
-            .with_drive(0.55),
-        // lead: three squares, wide vibrato, a resonant wow, drive, echo
+            .with_drive(0.55)
+            .with_sub(0.4),
+        // lead: three squares, wide vibrato, a resonant wow, drive, echo,
+        // sliding between the tied phrase notes
         Voice::stack(Wave::Square, 0.2, 9.0, 0.5, 3)
             .with_filter(1300.0, 6000.0, 0.0, 0.16, 2.8)
+            .with_glide(0.06)
             .with_vibrato(6.0, 18.0, 0.2)
             .with_echo(0.3)
             .with_reverb(0.2)
@@ -2131,6 +2192,7 @@ const BLOOD_ENGINE: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.45, 0.7),
     echo: Echo::new(3.0, 0.3, 2400.0),
+    sweep: 0.5,
 };
 
 /// All songs, in ascending darkness (intro first). Index into this with
@@ -2203,6 +2265,7 @@ pub fn voice_summary(v: &Voice) -> String {
         Wave::Triangle => "TRI",
         Wave::Square => "SQR",
         Wave::Sawtooth => "SAW",
+        Wave::Noise => "NOISE",
     };
     let mut parts = Vec::new();
     let n = v.oscillators();
@@ -2210,6 +2273,12 @@ pub fn voice_summary(v: &Voice) -> String {
         parts.push(format!("{wave} ×{n} ±{:.0}C", v.detune));
     } else {
         parts.push(wave.to_string());
+    }
+    if v.sub > 0.0 {
+        parts.push(format!("SUB {:.0}%", v.sub * 100.0));
+    }
+    if v.glide > 0.0 {
+        parts.push(format!("GLIDE {:.0}MS", v.glide * 1000.0));
     }
     if let Some(f) = v.filter {
         if f.attack > 0.0 {
@@ -2257,6 +2326,11 @@ pub struct NoteOn {
     pub degree: i32,
     /// Length in steps: 1 + the `HOLD`s tied onto it.
     pub len: u16,
+    /// The degree of the lane's previous note when it runs right into this
+    /// one (its tail ends where this starts, no rest between) and differs —
+    /// what a legato glide comes from. `None` after a rest, at the loop's
+    /// first note of an otherwise empty lane, or for a repeated pitch.
+    pub from: Option<i32>,
 }
 
 /// Read a melodic lane at `step` (patterns loop): `Some` only where a note
@@ -2277,9 +2351,25 @@ pub fn note_at(pattern: &[i32], step: usize) -> Option<NoteOn> {
     while len < n && pattern[(step + len) % n] == HOLD {
         len += 1;
     }
+    // Legato: walk back over the previous note's HOLDs to its start; a
+    // REST anywhere on the way (or nothing but HOLDs) means no glide.
+    let mut from = None;
+    for back in 1..n {
+        match pattern[(step + n - back) % n] {
+            HOLD => continue,
+            REST => break,
+            d => {
+                if d != degree {
+                    from = Some(d);
+                }
+                break;
+            }
+        }
+    }
     Some(NoteOn {
         degree,
         len: len.min(u16::MAX as usize) as u16,
+        from,
     })
 }
 
@@ -2367,12 +2457,14 @@ pub fn cell_at(sec: &Section, channel: usize, step: usize) -> Cell {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MusicKey {
     /// A melodic lane ([`MELODIC`]) note at this scale degree, this many
-    /// steps long (1 = untied), voiced as `chord`.
+    /// steps long (1 = untied), voiced as `chord`, gliding in from `from`
+    /// (only ever `Some` on a lane whose voice has a `glide`).
     Note {
         lane: usize,
         degree: i32,
         len: u16,
         chord: Chord,
+        from: Option<i32>,
     },
     /// One kit piece (never `Silent`) — shared by both percussion lanes.
     Drum(Drum),
@@ -2405,20 +2497,26 @@ pub fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
             let pattern = sec.lane(lane);
             for step in 0..pattern.len() {
                 if let Some(n) = note_at(pattern, step) {
-                    add(
-                        &mut keys,
-                        MusicKey::Note {
-                            lane,
-                            degree: n.degree,
-                            len: n.len,
-                            chord: chord_at(lane, sec.chord_lane(lane), step),
-                        },
-                    );
+                    add(&mut keys, note_key(song, sec, lane, step, &n));
                 }
             }
         }
     }
     keys
+}
+
+/// The bake key of the note `n` starting at `step` of `lane` in `sec`: its
+/// voicing from the chord lane, its glide origin only if the lane's voice
+/// glides (so a non-gliding lane never multiplies its keys by context).
+pub fn note_key(song: &SongSpec, sec: &Section, lane: usize, step: usize, n: &NoteOn) -> MusicKey {
+    let glides = song.voices.get(lane).is_some_and(|v| v.glide > 0.0);
+    MusicKey::Note {
+        lane,
+        degree: n.degree,
+        len: n.len,
+        chord: chord_at(lane, sec.chord_lane(lane), step),
+        from: if glides { n.from } else { None },
+    }
 }
 
 #[cfg(test)]
@@ -2438,23 +2536,66 @@ mod tests {
 
     #[test]
     fn ties_extend_the_note_they_follow() {
+        let on = |degree, len, from| Some(NoteOn { degree, len, from });
         let lane = [0, HOLD, HOLD, HOLD, 3, REST, HOLD, 5];
-        assert_eq!(note_at(&lane, 0), Some(NoteOn { degree: 0, len: 4 }));
+        // The lane loops, so the 0 runs straight on from the 5 at its end.
+        assert_eq!(note_at(&lane, 0), on(0, 4, Some(5)));
         assert_eq!(note_at(&lane, 1), None, "a HOLD is not a note start");
-        assert_eq!(note_at(&lane, 4), Some(NoteOn { degree: 3, len: 1 }));
+        // 3 starts right where the held 0 ends: legato from 0.
+        assert_eq!(note_at(&lane, 4), on(3, 1, Some(0)));
         assert_eq!(note_at(&lane, 5), None);
         assert_eq!(note_at(&lane, 6), None, "a HOLD after a REST is silent");
         // Counting wraps around the lane but stops at the next note start
         // (step 0 here), so the last note is one step long.
-        assert_eq!(note_at(&lane, 7), Some(NoteOn { degree: 5, len: 1 }));
-        // Wrapping tie: a note at the end sustains into the lane's repeat.
+        assert_eq!(note_at(&lane, 7), on(5, 1, None));
+        // Wrapping tie: a note at the end sustains into the lane's repeat —
+        // and it runs straight on from the 2 before it (legato).
         let wrap = [HOLD, HOLD, 2, 4];
-        assert_eq!(note_at(&wrap, 3), Some(NoteOn { degree: 4, len: 3 }));
+        assert_eq!(note_at(&wrap, 3), on(4, 3, Some(2)));
         // Steps beyond the lane length loop.
         assert_eq!(note_at(&wrap, 7), note_at(&wrap, 3));
         assert_eq!(note_at(&[], 0), None);
         // An all-HOLD lane never sounds (and never loops forever counting).
         assert_eq!(note_at(&[HOLD, HOLD], 0), None);
+    }
+
+    #[test]
+    fn legato_origin_needs_touching_different_notes() {
+        let touching = [0, 3, 3, REST, 5, HOLD, 7];
+        assert_eq!(note_at(&touching, 1).and_then(|n| n.from), Some(0));
+        assert_eq!(
+            note_at(&touching, 2).and_then(|n| n.from),
+            None,
+            "same pitch"
+        );
+        assert_eq!(
+            note_at(&touching, 4).and_then(|n| n.from),
+            None,
+            "after a rest"
+        );
+        assert_eq!(
+            note_at(&touching, 6).and_then(|n| n.from),
+            Some(5),
+            "after a tie"
+        );
+        // The origin only enters the bake key on a gliding voice.
+        const SEC: Section = Section {
+            lead: &[0, 3, 0, 3],
+            ..Section::EMPTY
+        };
+        let plain = SongSpec {
+            sections: &[SEC],
+            ..SONGS[0]
+        };
+        assert_eq!(music_keys(&plain).len(), 2);
+        let mut voices = SONGS[0].voices;
+        voices[LEAD] = voices[LEAD].with_glide(0.1);
+        let gliding = SongSpec { voices, ..plain };
+        // 0←3 and 3←0 (each is reached from the other around the loop).
+        assert_eq!(music_keys(&gliding).len(), 2);
+        assert!(music_keys(&gliding)
+            .iter()
+            .all(|k| matches!(k, MusicKey::Note { from: Some(_), .. })));
     }
 
     #[test]
@@ -2634,6 +2775,7 @@ mod tests {
                 "{}: echo fb",
                 song.name
             );
+            assert!((0.0..=1.0).contains(&song.sweep), "{}: sweep", song.name);
             for v in song.voices {
                 assert!((-1.0..=1.0).contains(&v.pan), "{}: pan", song.name);
                 assert!((0.0..=1.0).contains(&v.width), "{}: width", song.name);
@@ -2642,6 +2784,8 @@ mod tests {
                 assert!((0.0..=1.0).contains(&v.drive), "{}: drive", song.name);
                 assert!((0.0..=1.0).contains(&v.echo), "{}: echo", song.name);
                 assert!((0.0..=1.0).contains(&v.reverb), "{}: reverb", song.name);
+                assert!((0.0..=1.0).contains(&v.sub), "{}: sub", song.name);
+                assert!(v.glide >= 0.0, "{}: glide", song.name);
                 if let Some(e) = v.env {
                     assert!(e.attack >= 0.0 && e.gate > 0.0, "{}: env", song.name);
                 }
@@ -2722,12 +2866,7 @@ mod tests {
                     let p = sec.lane(lane);
                     for step in 0..p.len() {
                         if let Some(n) = note_at(p, step) {
-                            let key = MusicKey::Note {
-                                lane,
-                                degree: n.degree,
-                                len: n.len,
-                                chord: chord_at(lane, sec.chord_lane(lane), step),
-                            };
+                            let key = note_key(song, sec, lane, step, &n);
                             assert!(keys.contains(&key), "{}: missing {:?}", song.name, key);
                         }
                     }
@@ -2791,6 +2930,13 @@ mod tests {
         assert_eq!(note_name(32.70), "C1");
         assert_eq!(note_name(0.0), "?");
         assert_eq!(voice_summary(&Voice::mono(Wave::Sine)), "SIN");
+        let b = Voice::mono(Wave::Sawtooth).with_sub(0.5).with_glide(0.08);
+        assert_eq!(voice_summary(&b), "SAW · SUB 50% · GLIDE 80MS");
+        assert_eq!(voice_summary(&Voice::mono(Wave::Noise)), "NOISE");
+        assert_eq!(
+            Voice::stack(Wave::Noise, 0.0, 10.0, 1.0, 5).oscillators(),
+            1
+        );
         let v = Voice::stack(Wave::Sawtooth, 0.0, 12.0, 0.9, 5)
             .with_filter(500.0, 2000.0, 1.0, 0.0, 1.1)
             .with_reverb(0.45);
