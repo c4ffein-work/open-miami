@@ -2599,6 +2599,57 @@ pub fn section_len(sec: &Section) -> usize {
         .max(1)
 }
 
+/// A lane's built-in note shape: `(gate, level, attack)` — the decay tail
+/// in STEPS an untied note rings, its mix level, and its attack in seconds.
+/// (The pad level is per chord: its default triad lands each partial at
+/// 0.78/√3 = 0.45 after the 1/√n split.)
+pub fn lane_shape(lane: usize) -> (f64, f64, f64) {
+    match lane {
+        BASS => (1.9, 1.3, 0.005),
+        LEAD => (0.9, 1.0, 0.005),
+        PAD => (4.0, 0.78, 0.06),
+        KEYS => (1.2, 0.8, 0.005),
+        _ => (0.7, 0.7, 0.005),
+    }
+}
+
+/// The lane's shape with the song voice's [`Env`] override applied.
+pub fn voice_shape(song: &SongSpec, lane: usize) -> (f64, f64, f64) {
+    let (gate, level, attack) = lane_shape(lane);
+    match song.voices.get(lane).and_then(|v| v.env) {
+        Some(e) => (e.gate.max(0.05), level, e.attack.max(0.0)),
+        None => (gate, level, attack),
+    }
+}
+
+/// One sequencer step of `song`, in seconds.
+pub fn step_seconds(song: &SongSpec) -> f64 {
+    60.0 / song.bpm.max(1.0) / f64::from(song.steps_per_beat.max(1))
+}
+
+/// Seconds of signal one baked voice needs: a note's attack + its tied
+/// hold + the lane's decay tail (plus the builders' 30 ms stop margin), or
+/// the longest layer of a kit piece.
+pub fn key_seconds(song: &SongSpec, key: MusicKey) -> f64 {
+    match key {
+        MusicKey::Note { lane, len, .. } => {
+            let (gate, _, attack) = voice_shape(song, lane);
+            attack + step_seconds(song) * (gate + f64::from(len.max(1) - 1)) + 0.03
+        }
+        MusicKey::Drum(d) => match d {
+            Drum::Kick => 0.21,
+            Drum::Hat => 0.06,
+            Drum::Snare => 0.16,
+            Drum::Clap => 0.20,
+            Drum::OpenHat => 0.31,
+            Drum::Tom => 0.31,
+            Drum::Rim => 0.06,
+            Drum::Crash => 1.0,
+            Drum::Silent => 0.03,
+        },
+    }
+}
+
 /// What a tracker cell shows for one channel at one step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cell {
@@ -3140,6 +3191,47 @@ mod tests {
             voice_summary(&w),
             "SQR · WOW Q3 · VIB 10C · DRV 50% · ECHO 30%"
         );
+    }
+
+    #[test]
+    fn bake_lengths_cover_the_note() {
+        let song = SONGS[0]; // 84 bpm, 16ths: a step is ~0.1786 s
+        let sd = step_seconds(&song);
+        assert!((sd - 60.0 / 84.0 / 4.0).abs() < 1e-9);
+        let one = MusicKey::Note {
+            lane: LEAD,
+            degree: 0,
+            len: 1,
+            chord: Chord::Single,
+            from: None,
+        };
+        let held = MusicKey::Note {
+            lane: LEAD,
+            degree: 0,
+            len: 8,
+            chord: Chord::Single,
+            from: None,
+        };
+        // A held note bakes its 7 extra steps on top of the untied length.
+        assert!((key_seconds(&song, held) - key_seconds(&song, one) - 7.0 * sd).abs() < 1e-9);
+        // An env override with a long attack is baked in full.
+        let mut voices = song.voices;
+        voices[KEYS] = Voice::mono(Wave::Noise).with_env(2.5, 1.0);
+        let riser = SongSpec { voices, ..song };
+        let key = MusicKey::Note {
+            lane: KEYS,
+            degree: 0,
+            len: 1,
+            chord: Chord::Single,
+            from: None,
+        };
+        assert!(key_seconds(&riser, key) > 2.5 + sd);
+        assert_eq!(voice_shape(&riser, KEYS).0, 1.0);
+        assert_eq!(voice_shape(&riser, LEAD), lane_shape(LEAD));
+        // Every kit piece is baked at least as long as its layers.
+        for d in Drum::KIT {
+            assert!(key_seconds(&song, MusicKey::Drum(d)) >= 0.05, "{d:?}");
+        }
     }
 
     #[test]

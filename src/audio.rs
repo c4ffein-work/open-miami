@@ -54,10 +54,10 @@
 
 use crate::music::Drum::{Clap, Crash, Hat, Kick, OpenHat, Rim, Silent, Snare, Tom};
 use crate::music::{
-    cell_at, degree_freq, drum_at, duck_level, music_keys, note_at, note_key, section_len,
-    swing_delay, vel_at, Cell as GridCell, Drum, Filter, MusicKey, Section, SongSpec, Vibrato,
-    Voice, Wave, BASS, DRUMS, KEYS, LEAD, MAX_VEL, MELODIC, NUM_CHANNELS, NUM_VOICES, PAD, PERC,
-    SONGS,
+    cell_at, degree_freq, drum_at, duck_level, key_seconds, music_keys, note_at, note_key,
+    section_len, swing_delay, vel_at, voice_shape, Cell as GridCell, Drum, Filter, MusicKey,
+    Section, SongSpec, Vibrato, Voice, Wave, DRUMS, MAX_VEL, MELODIC, NUM_CHANNELS, NUM_VOICES,
+    PERC, SONGS,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -3363,32 +3363,6 @@ impl AudioEngine {
         true
     }
 
-    /// Per-lane note shaping: `(gate, level, attack)` — the fraction of a
-    /// step an untied note rings (its pluck), its mix level, and its attack
-    /// (seconds). A tied note holds at peak for its extra steps and then
-    /// plays the same pluck (see [`Self::lane_tone`]).
-    fn lane_shape(lane: usize) -> (f64, f64, f64) {
-        match lane {
-            BASS => (1.9, 1.3, 0.005),
-            LEAD => (0.9, 1.0, 0.005),
-            // The pad level is per CHORD (its default triad lands each
-            // partial at the historical 0.45 after the 1/√n split).
-            PAD => (4.0, 0.78, 0.06),
-            KEYS => (1.2, 0.8, 0.005),
-            _ => (0.7, 0.7, 0.005),
-        }
-    }
-
-    /// The lane's shape with the voice's [`Env`] override applied:
-    /// `(gate steps, level, attack seconds)`.
-    fn voice_shape(&self, lane: usize) -> (f64, f64, f64) {
-        let (gate, level, attack) = Self::lane_shape(lane);
-        match self.song.voices.get(lane).and_then(|v| v.env) {
-            Some(e) => (e.gate.max(0.05), level, e.attack.max(0.0)),
-            None => (gate, level, attack),
-        }
-    }
-
     /// The LIVE synthesis of one music voice at absolute time `t` and
     /// velocity `vel` — also what the offline pre-render runs (at t = 0 and
     /// full velocity, see [`Self::render_music_slot`]), so a baked note is
@@ -3405,7 +3379,7 @@ impl AudioEngine {
                 chord,
                 from,
             } => {
-                let (gate, level, attack) = self.voice_shape(lane);
+                let (gate, level, attack) = voice_shape(s, lane);
                 let voice = s
                     .voices
                     .get(lane)
@@ -3444,28 +3418,11 @@ impl AudioEngine {
         }
     }
 
-    /// Seconds of dry signal one music voice needs when baked: the note
-    /// duration its live envelope uses (a function of the song's step
-    /// length and the note's tied length — see [`Self::synth_music_note`])
-    /// plus the builders' small stop margin.
+    /// Seconds of dry signal one music voice needs when baked
+    /// ([`crate::music::key_seconds`]: attack + tied hold + the lane's decay
+    /// tail, or the longest layer of a kit piece, plus the stop margin).
     fn music_key_len(&self, key: MusicKey) -> f64 {
-        let sd = self.step_dur();
-        match key {
-            MusicKey::Note { lane, len, .. } => {
-                let (gate, _, attack) = self.voice_shape(lane);
-                attack + sd * (gate + f64::from(len.max(1) - 1)) + 0.03
-            }
-            // The longest layer of each kit piece + the builders' stop margin.
-            MusicKey::Drum(Kick) => 0.21,
-            MusicKey::Drum(Hat) => 0.06,
-            MusicKey::Drum(Snare) => 0.16,
-            MusicKey::Drum(Clap) => 0.20,
-            MusicKey::Drum(OpenHat) => 0.31,
-            MusicKey::Drum(Tom) => 0.31,
-            MusicKey::Drum(Rim) => 0.06,
-            MusicKey::Drum(Crash) => 1.0,
-            MusicKey::Drum(Silent) => 0.03,
-        }
+        key_seconds(&self.song, key)
     }
 
     /// Channels a key bakes to: 2 for a note of a WIDE unison voice (its
