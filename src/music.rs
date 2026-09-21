@@ -46,16 +46,19 @@ pub const HOLD: i32 = i32::MIN + 1;
 pub const MAX_VEL: u8 = 9;
 
 /// Number of sequenced channels (rows in the tracker view).
-pub const NUM_CHANNELS: usize = 5;
+pub const NUM_CHANNELS: usize = 6;
 /// Channel (lane) indices, `0..NUM_CHANNELS`.
 pub const BASS: usize = 0;
 pub const LEAD: usize = 1;
 pub const PAD: usize = 2;
 pub const ARP: usize = 3;
 pub const DRUMS: usize = 4;
+/// The second percussion lane: same kit as `DRUMS`, so a hat can ride over
+/// a kick, a clap can layer a snare, a crash can top a downbeat.
+pub const PERC: usize = 5;
 
 /// Human-readable channel names, indexed 0..[`NUM_CHANNELS`].
-pub const CHANNEL_NAMES: [&str; NUM_CHANNELS] = ["BASS", "LEAD", "PAD", "ARP", "DRUMS"];
+pub const CHANNEL_NAMES: [&str; NUM_CHANNELS] = ["BASS", "LEAD", "PAD", "ARP", "DRUMS", "PERC"];
 
 /// Scale = semitone offsets from the root, one octave's worth. Darker modes
 /// (flat 2nd, tritone) read as more menacing — we escalate them across floors.
@@ -134,19 +137,36 @@ impl Voice {
     }
 }
 
-/// One step of the drum lane. Rendered from synthesized noise/tones only.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// One step of a percussion lane (`drums` / `perc`). Rendered from
+/// synthesized noise/tones only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Drum {
     /// No percussion this step.
     Silent,
-    /// Pitched sine thump + a lick of low noise.
+    /// Pitched sine thump + a lick of low noise. Drives the side-chain.
     Kick,
-    /// Very short high-passed noise tick.
+    /// Very short high-passed noise tick (closed hat).
     Hat,
     /// Noise burst + a short body tone on the backbeat.
     Snare,
+    /// Three tight noise slaps and a short tail — the 808-style hand clap
+    /// that layers a snare or answers it.
+    Clap,
+    /// A longer, sizzling high-passed noise — the open hat on the off-beat.
+    OpenHat,
+    /// A pitched tom: sine dropping an octave with a knock on top.
+    Tom,
+    /// Rimshot / click: a tiny bright ping.
+    Rim,
+    /// A long bright wash — the crash on a downbeat.
+    Crash,
 }
-use Drum::{Hat, Kick, Silent, Snare};
+use Drum::{Clap, Crash, Hat, Kick, OpenHat, Rim, Silent, Snare, Tom};
+
+impl Drum {
+    /// Every sounding drum, in bake order (the four-on-the-floor core first).
+    pub const KIT: [Drum; 8] = [Kick, Hat, Snare, Clap, OpenHat, Tom, Rim, Crash];
+}
 
 /// One block of an arrangement: a self-contained, multi-bar pattern across all
 /// five channels. Songs are built by ordering these (a refrain section can be
@@ -170,12 +190,15 @@ pub struct Section {
     pub arp: &'static [i32],
     /// Percussion lane, one `Drum` per step.
     pub drums: &'static [Drum],
+    /// Second percussion lane (same kit) — for what has to hit together.
+    pub perc: &'static [Drum],
     /// Velocity lanes (`0..=MAX_VEL` per step, looping; empty = all full).
     pub bass_vel: &'static [u8],
     pub lead_vel: &'static [u8],
     pub pad_vel: &'static [u8],
     pub arp_vel: &'static [u8],
     pub drums_vel: &'static [u8],
+    pub perc_vel: &'static [u8],
 }
 
 impl Section {
@@ -187,11 +210,13 @@ impl Section {
         pad: &[],
         arp: &[],
         drums: &[],
+        perc: &[],
         bass_vel: &[],
         lead_vel: &[],
         pad_vel: &[],
         arp_vel: &[],
         drums_vel: &[],
+        perc_vel: &[],
     };
 
     /// The note lane of melodic channel `lane` ([`BASS`] … [`ARP`]); empty
@@ -206,7 +231,17 @@ impl Section {
         }
     }
 
-    /// The velocity lane of channel `lane` (all five).
+    /// The percussion lane of channel `lane` ([`DRUMS`] / [`PERC`]); empty
+    /// for a melodic channel.
+    pub fn drum_lane(&self, lane: usize) -> &'static [Drum] {
+        match lane {
+            DRUMS => self.drums,
+            PERC => self.perc,
+            _ => &[],
+        }
+    }
+
+    /// The velocity lane of channel `lane` (all six).
     pub fn vel_lane(&self, lane: usize) -> &'static [u8] {
         match lane {
             BASS => self.bass_vel,
@@ -214,6 +249,7 @@ impl Section {
             PAD => self.pad_vel,
             ARP => self.arp_vel,
             DRUMS => self.drums_vel,
+            PERC => self.perc_vel,
             _ => &[],
         }
     }
@@ -1293,10 +1329,16 @@ const SODIUM_BASS: &[i32] = &[
 ];
 const SODIUM_PUMP: &[u8] = &[3, 6, 8, 9];
 const SODIUM_DRUMS: &[Drum] = &[
-    Kick, Silent, Hat, Silent, Snare, Silent, Hat, Silent, Kick, Silent, Hat, Silent, Snare,
-    Silent, Hat, Hat,
+    Kick, Silent, Silent, Silent, Snare, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
+    Snare, Silent, Silent, Silent,
 ];
-const SODIUM_DRUMS_VEL: &[u8] = &[9, 0, 6, 0, 9, 0, 6, 0, 9, 0, 6, 0, 9, 0, 6, 4];
+/// Off-beat closed hats riding over the kicks, a clap under each snare, an
+/// open hat pushing into the next bar.
+const SODIUM_PERC: &[Drum] = &[
+    Hat, Silent, Hat, Silent, Clap, Silent, Hat, Silent, Hat, Silent, Hat, Silent, Clap, Silent,
+    OpenHat, Silent,
+];
+const SODIUM_PERC_VEL: &[u8] = &[4, 0, 6, 0, 8, 0, 6, 0, 4, 0, 6, 0, 8, 0, 7, 0];
 
 const SODIUM_INTRO: Section = Section {
     label: "intro",
@@ -1329,7 +1371,8 @@ const SODIUM_VERSE: Section = Section {
     ],
     pad: SODIUM_PAD,
     drums: SODIUM_DRUMS,
-    drums_vel: SODIUM_DRUMS_VEL,
+    perc: SODIUM_PERC,
+    perc_vel: SODIUM_PERC_VEL,
     ..Section::EMPTY
 };
 const SODIUM_REFRAIN: Section = Section {
@@ -1350,7 +1393,8 @@ const SODIUM_REFRAIN: Section = Section {
     ],
     arp_vel: &[9, 5, 7, 5, 8, 5, 7, 6],
     drums: SODIUM_DRUMS,
-    drums_vel: SODIUM_DRUMS_VEL,
+    perc: SODIUM_PERC,
+    perc_vel: SODIUM_PERC_VEL,
     ..Section::EMPTY
 };
 const SODIUM_BREAK: Section = Section {
@@ -1509,6 +1553,7 @@ pub fn section_len(sec: &Section) -> usize {
         .max(sec.pad.len())
         .max(sec.arp.len())
         .max(sec.drums.len())
+        .max(sec.perc.len())
         .max(1)
 }
 
@@ -1525,10 +1570,10 @@ pub enum Cell {
 
 /// Sample the tracker cell of `channel` at `step` within `sec`.
 pub fn cell_at(sec: &Section, channel: usize, step: usize) -> Cell {
-    if channel == DRUMS {
-        return match drum_at(sec.drums, step) {
+    if channel == DRUMS || channel == PERC {
+        return match drum_at(sec.drum_lane(channel), step) {
             Silent => Cell::Off,
-            _ => Cell::On(vel_at(sec.drums_vel, step)),
+            _ => Cell::On(vel_at(sec.vel_lane(channel), step)),
         };
     }
     let lane = sec.lane(channel);
@@ -1557,19 +1602,15 @@ pub enum MusicKey {
     /// A melodic lane ([`BASS`] … [`ARP`]) note at this scale degree, this
     /// many steps long (1 = untied).
     Note { lane: usize, degree: i32, len: u16 },
-    /// Drum lane kick.
-    Kick,
-    /// Drum lane hat.
-    Hat,
-    /// Drum lane snare.
-    Snare,
+    /// One kit piece (never `Silent`) — shared by both percussion lanes.
+    Drum(Drum),
 }
 
 /// Enumerate the exact, finite voice set `song` can ever schedule: the
 /// distinct (degree, length) pairs of each melodic lane across every
-/// section, plus the up-to-three drum voices — in bake-priority order
-/// (drums first — the densest lane — then bass, lead, arp, pad). Typically
-/// 30–50 keys per song.
+/// section, plus the kit pieces its percussion lanes use — in bake-priority
+/// order (drums first — the densest lanes — then bass, lead, arp, pad).
+/// Typically 30–50 keys per song.
 pub fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
     fn add(keys: &mut Vec<MusicKey>, k: MusicKey) {
         if !keys.contains(&k) {
@@ -1577,14 +1618,14 @@ pub fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
         }
     }
     let mut keys = Vec::new();
-    for sec in song.sections {
-        for &d in sec.drums {
-            match d {
-                Silent => {}
-                Kick => add(&mut keys, MusicKey::Kick),
-                Hat => add(&mut keys, MusicKey::Hat),
-                Snare => add(&mut keys, MusicKey::Snare),
-            }
+    // Drums in kit order (kick first), only the pieces the song uses.
+    for drum in Drum::KIT {
+        let used = song
+            .sections
+            .iter()
+            .any(|sec| sec.drums.contains(&drum) || sec.perc.contains(&drum));
+        if used {
+            add(&mut keys, MusicKey::Drum(drum));
         }
     }
     for lane in [BASS, LEAD, ARP, PAD] {
@@ -1667,11 +1708,36 @@ mod tests {
         assert_eq!(cell_at(&sec, BASS, 0), Cell::Off, "empty lane");
         assert_eq!(cell_at(&sec, DRUMS, 0), Cell::On(6));
         assert_eq!(cell_at(&sec, DRUMS, 1), Cell::Off);
+        assert_eq!(cell_at(&sec, PERC, 0), Cell::Off, "empty perc lane");
         let orphan = Section {
             arp: &[HOLD, HOLD],
             ..Section::EMPTY
         };
         assert_eq!(cell_at(&orphan, ARP, 1), Cell::Off);
+    }
+
+    #[test]
+    fn the_kit_lists_every_sounding_drum_once() {
+        assert!(!Drum::KIT.contains(&Silent));
+        for (i, d) in Drum::KIT.iter().enumerate() {
+            assert!(!Drum::KIT[..i].contains(d), "{d:?} twice");
+        }
+        // A song using every piece on either lane enumerates all of them.
+        const SEC: Section = Section {
+            drums: &[Kick, Hat, Snare, Clap],
+            perc: &[OpenHat, Tom, Rim, Crash],
+            ..Section::EMPTY
+        };
+        let song = SongSpec {
+            sections: &[SEC],
+            ..SONGS[0]
+        };
+        let keys = music_keys(&song);
+        for d in Drum::KIT {
+            assert!(keys.contains(&MusicKey::Drum(d)), "{d:?}");
+        }
+        assert_eq!(cell_at(&SEC, PERC, 3), Cell::On(MAX_VEL));
+        assert_eq!(section_len(&SEC), 4);
     }
 
     #[test]
@@ -1778,14 +1844,15 @@ mod tests {
                         }
                     }
                 }
-                for &dr in sec.drums {
-                    let key = match dr {
-                        Silent => continue,
-                        Kick => MusicKey::Kick,
-                        Hat => MusicKey::Hat,
-                        Snare => MusicKey::Snare,
-                    };
-                    assert!(keys.contains(&key));
+                for &dr in sec.drums.iter().chain(sec.perc) {
+                    if dr != Silent {
+                        assert!(
+                            keys.contains(&MusicKey::Drum(dr)),
+                            "{}: {:?}",
+                            song.name,
+                            dr
+                        );
+                    }
                 }
             }
             let count = |f: fn(&MusicKey) -> bool| keys.iter().filter(|k| f(k)).count();
@@ -1793,7 +1860,7 @@ mod tests {
                 "{:14} {:2} voices (drums {} bass {:2} lead {:2} arp {:2} pad {:2})",
                 song.name,
                 keys.len(),
-                count(|k| !matches!(k, MusicKey::Note { .. })),
+                count(|k| matches!(k, MusicKey::Drum(_))),
                 count(|k| matches!(k, MusicKey::Note { lane: BASS, .. })),
                 count(|k| matches!(k, MusicKey::Note { lane: LEAD, .. })),
                 count(|k| matches!(k, MusicKey::Note { lane: ARP, .. })),

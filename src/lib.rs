@@ -2175,6 +2175,7 @@ mod wasm_entry {
                 Color::from_rgba(150, 90, 210, 255), // pad
                 Color::from_rgba(224, 80, 170, 255), // arp
                 Color::from_rgba(230, 200, 60, 255), // drums
+                Color::from_rgba(240, 150, 50, 255), // perc
             ];
             let rh = 26.0f32;
             let cw = gw / steps as f32;

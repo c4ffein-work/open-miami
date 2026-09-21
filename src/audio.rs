@@ -52,11 +52,11 @@
 //! fallible Web Audio call — every `Result` is swallowed so the game runs fine
 //! even when audio is unavailable or blocked by the browser.
 
-use crate::music::Drum::{Hat, Kick, Silent, Snare};
+use crate::music::Drum::{Clap, Crash, Hat, Kick, OpenHat, Rim, Silent, Snare, Tom};
 use crate::music::{
     cell_at, degree_freq, drum_at, duck_level, music_keys, note_at, section_len, swing_delay,
     vel_at, Cell as GridCell, Drum, MusicKey, Section, SongSpec, Voice, Wave, ARP, BASS, DRUMS,
-    LEAD, MAX_VEL, NUM_CHANNELS, PAD, SONGS,
+    LEAD, MAX_VEL, NUM_CHANNELS, PAD, PERC, SONGS,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -3098,19 +3098,21 @@ impl AudioEngine {
                 self.music_note(key, t, vel_at(sec.vel_lane(lane), step));
             }
         }
-        if self.channel_audible(DRUMS) {
-            let vel = vel_at(sec.drums_vel, step);
-            match drum_at(sec.drums, step) {
-                Silent => {}
-                Kick => {
-                    self.music_note(MusicKey::Kick, t, vel);
-                    if vel > 0 {
-                        self.duck(t);
-                    }
-                }
-                Hat => self.music_note(MusicKey::Hat, t, vel),
-                Snare => self.music_note(MusicKey::Snare, t, vel),
+        let mut kicked = false;
+        for lane in [DRUMS, PERC] {
+            if !self.channel_audible(lane) {
+                continue;
             }
+            let vel = vel_at(sec.vel_lane(lane), step);
+            let drum = drum_at(sec.drum_lane(lane), step);
+            if drum == Silent || vel == 0 {
+                continue;
+            }
+            self.music_note(MusicKey::Drum(drum), t, vel);
+            kicked |= drum == Kick;
+        }
+        if kicked {
+            self.duck(t);
         }
     }
 
@@ -3252,9 +3254,7 @@ impl AudioEngine {
                     self.lane_tone(lane, &voice, f, t, attack, hold, dur, gain * level);
                 }
             }
-            MusicKey::Kick => self.drum(Kick, t, gain),
-            MusicKey::Hat => self.drum(Hat, t, gain),
-            MusicKey::Snare => self.drum(Snare, t, gain),
+            MusicKey::Drum(d) => self.drum(d, t, gain),
         }
     }
 
@@ -3269,9 +3269,16 @@ impl AudioEngine {
                 let (gate, _, _) = Self::lane_shape(lane);
                 sd * (gate + f64::from(len.max(1) - 1)) + 0.03
             }
-            MusicKey::Kick => 0.21, // 0.18 s tone + stop margin (noise is 0.05)
-            MusicKey::Hat => 0.06,  // 0.03 s noise tick + margin
-            MusicKey::Snare => 0.16, // 0.13 s noise + margin (tone is 0.10)
+            // The longest layer of each kit piece + the builders' stop margin.
+            MusicKey::Drum(Kick) => 0.21,
+            MusicKey::Drum(Hat) => 0.06,
+            MusicKey::Drum(Snare) => 0.16,
+            MusicKey::Drum(Clap) => 0.20,
+            MusicKey::Drum(OpenHat) => 0.31,
+            MusicKey::Drum(Tom) => 0.31,
+            MusicKey::Drum(Rim) => 0.06,
+            MusicKey::Drum(Crash) => 1.0,
+            MusicKey::Drum(Silent) => 0.03,
         }
     }
 
@@ -3328,6 +3335,78 @@ impl AudioEngine {
                     1400.0,
                 );
                 self.music_tone(220.0, 170.0, t, 0.10, gain * 0.5, OscillatorType::Triangle);
+            }
+            Clap => {
+                // Three slaps 11 ms apart (the hands never land together)
+                // through a mid bandpass, then a softer 120 ms tail.
+                for (i, level) in [1.0, 0.8, 0.7].iter().enumerate() {
+                    self.music_noise(
+                        t + i as f64 * 0.011,
+                        0.022,
+                        gain * 0.8 * level,
+                        BiquadFilterType::Bandpass,
+                        1300.0,
+                        1100.0,
+                    );
+                }
+                self.music_noise(
+                    t + 0.03,
+                    0.14,
+                    gain * 0.45,
+                    BiquadFilterType::Bandpass,
+                    1200.0,
+                    900.0,
+                );
+            }
+            OpenHat => {
+                self.music_noise(
+                    t,
+                    0.28,
+                    gain * 0.45,
+                    BiquadFilterType::Highpass,
+                    7500.0,
+                    6000.0,
+                );
+            }
+            Tom => {
+                self.music_tone(210.0, 95.0, t, 0.28, gain * 1.2, OscillatorType::Sine);
+                self.music_noise(
+                    t,
+                    0.02,
+                    gain * 0.3,
+                    BiquadFilterType::Lowpass,
+                    1200.0,
+                    300.0,
+                );
+            }
+            Rim => {
+                self.music_tone(1700.0, 1500.0, t, 0.018, gain * 0.5, OscillatorType::Square);
+                self.music_noise(
+                    t,
+                    0.012,
+                    gain * 0.35,
+                    BiquadFilterType::Bandpass,
+                    3200.0,
+                    3200.0,
+                );
+            }
+            Crash => {
+                self.music_noise(
+                    t,
+                    0.95,
+                    gain * 0.5,
+                    BiquadFilterType::Highpass,
+                    5200.0,
+                    3500.0,
+                );
+                self.music_noise(
+                    t,
+                    0.25,
+                    gain * 0.35,
+                    BiquadFilterType::Bandpass,
+                    8000.0,
+                    6000.0,
+                );
             }
         }
     }
