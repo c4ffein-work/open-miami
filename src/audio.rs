@@ -54,9 +54,9 @@
 
 use crate::music::Drum::{Hat, Kick, Silent, Snare};
 use crate::music::{
-    cell_at, degree_freq, drum_at, music_keys, note_at, section_len, vel_at, Cell as GridCell,
-    Drum, MusicKey, Section, SongSpec, Voice, Wave, ARP, BASS, DRUMS, LEAD, MAX_VEL, NUM_CHANNELS,
-    PAD, SONGS,
+    cell_at, degree_freq, drum_at, duck_level, music_keys, note_at, section_len, swing_delay,
+    vel_at, Cell as GridCell, Drum, MusicKey, Section, SongSpec, Voice, Wave, ARP, BASS, DRUMS,
+    LEAD, MAX_VEL, NUM_CHANNELS, PAD, SONGS,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -854,6 +854,14 @@ pub struct AudioEngine {
     /// when the nodes couldn't be built: lanes then connect to the bus
     /// directly (mono, as before).
     music_pan: Vec<StereoPannerNode>,
+    /// The side-chain ducker the lane panners sum into (then the bus): its
+    /// gain is automated down on every kick per the song's [`Sidechain`].
+    /// `None` = the panners feed the bus directly (no pumping).
+    music_duck: Option<GainNode>,
+    /// Audio-clock time the last kick's duck bottomed out (its release
+    /// curve's origin) — lets the next kick start from the true current gain
+    /// instead of jumping. `f64::NEG_INFINITY` before any kick.
+    last_duck: Cell<f64>,
     music_playing: bool,
     /// Absolute audio-clock time of the next music step to schedule.
     next_note_time: f64,
@@ -899,8 +907,13 @@ impl AudioEngine {
             .as_ref()
             .map(Self::make_music_bus)
             .unwrap_or((None, None));
-        let music_pan = match (&ctx, &music_bus) {
-            (Some(c), Some(bus)) => Self::make_lane_panners(c, bus),
+        let music_duck = match (&ctx, &music_bus) {
+            (Some(c), Some(bus)) => Self::make_ducker(c, bus),
+            _ => None,
+        };
+        let music_pan = match (&ctx, &music_duck, &music_bus) {
+            (Some(c), Some(duck), _) => Self::make_lane_panners(c, duck),
+            (Some(c), None, Some(bus)) => Self::make_lane_panners(c, bus),
             _ => Vec::new(),
         };
         let engine = Self {
@@ -912,6 +925,8 @@ impl AudioEngine {
             music_bus,
             music_filter,
             music_pan,
+            music_duck,
+            last_duck: Cell::new(f64::NEG_INFINITY),
             music_playing: false,
             next_note_time: 0.0,
             section: 0,
@@ -3027,13 +3042,14 @@ impl AudioEngine {
         while self.next_note_time < now + LOOKAHEAD {
             let sec_len = self.loop_len();
             let step = self.step;
+            // The grid time; the swung time is what the notes fire at.
             let t = self.next_note_time;
             // At the top of each bar, arm the synthwave filter sweep for it.
             // `bar_steps` is always >= 4, so this is safe.
             if step.is_multiple_of(bar_steps) {
                 self.schedule_filter_sweep(t, step_dur * bar_steps as f64);
             }
-            self.schedule_step(step, t);
+            self.schedule_step(step, t + swing_delay(self.song.swing, step, step_dur));
             self.next_note_time += step_dur;
             self.step += 1;
             if self.step >= sec_len {
@@ -3086,11 +3102,39 @@ impl AudioEngine {
             let vel = vel_at(sec.drums_vel, step);
             match drum_at(sec.drums, step) {
                 Silent => {}
-                Kick => self.music_note(MusicKey::Kick, t, vel),
+                Kick => {
+                    self.music_note(MusicKey::Kick, t, vel);
+                    if vel > 0 {
+                        self.duck(t);
+                    }
+                }
                 Hat => self.music_note(MusicKey::Hat, t, vel),
                 Snare => self.music_note(MusicKey::Snare, t, vel),
             }
         }
+    }
+
+    /// Side-chain: a kick at `t` pulls the melodic lanes down to
+    /// `1 - depth` over 4 ms and releases them exponentially (time constant
+    /// a third of the song's release, so they are ~95 % back by its end).
+    /// The curve is picked up from wherever the previous kick's release
+    /// currently is (computed, not read — `AudioParam.value` is not
+    /// sample-accurate at a future time), so overlapping kicks never jump.
+    fn duck(&self, t: f64) {
+        let sc = self.song.sidechain;
+        let g = match &self.music_duck {
+            Some(d) if sc.active() => d.gain(),
+            _ => return,
+        };
+        let depth = sc.depth.clamp(0.0, 1.0);
+        let beat = self.step_dur() * f64::from(self.song.steps_per_beat.max(1));
+        let tau = (sc.release_beats.max(0.05) * beat / 3.0).max(0.01);
+        let now_level = duck_level(depth, tau, t - self.last_duck.get());
+        let bottom = t + 0.004;
+        let _ = g.set_value_at_time(now_level as f32, t);
+        let _ = g.linear_ramp_to_value_at_time((1.0 - depth) as f32, bottom);
+        let _ = g.set_target_at_time(1.0, bottom, tau);
+        self.last_duck.set(bottom);
     }
 
     /// Play one music voice at absolute time `t` and velocity `vel`
@@ -3826,8 +3870,18 @@ impl AudioEngine {
         (Some(gain), Some(filt))
     }
 
-    /// One `StereoPannerNode` per melodic lane, each into the music bus.
-    /// All four or none: a partial set would silently mis-route a lane.
+    /// The side-chain ducker: a unity gain between the lane panners and the
+    /// music bus (see [`Self::duck`]).
+    fn make_ducker(ctx: &AudioContext, bus: &GainNode) -> Option<GainNode> {
+        let duck = ctx.create_gain().ok()?;
+        let _ = duck.gain().set_value_at_time(1.0, 0.0);
+        duck.connect_with_audio_node(bus).ok()?;
+        Some(duck)
+    }
+
+    /// One `StereoPannerNode` per melodic lane, each into `bus` (the ducker,
+    /// or the music bus itself when the ducker couldn't be built). All four
+    /// or none: a partial set would silently mis-route a lane.
     fn make_lane_panners(ctx: &AudioContext, bus: &GainNode) -> Vec<StereoPannerNode> {
         let mut panners = Vec::with_capacity(4);
         for _ in [BASS, LEAD, PAD, ARP] {

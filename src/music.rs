@@ -219,6 +219,60 @@ impl Section {
     }
 }
 
+/// The music bus's SIDE-CHAIN ducker: every kick pulls the melodic lanes
+/// down by `depth` in ~4 ms and lets them swell back with an exponential
+/// release — the pumping that glues a synthwave mix to its four-on-the-floor.
+/// The drums themselves are never ducked.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Sidechain {
+    /// How far the lanes drop on a kick, `0.0` (off) … `1.0` (to silence).
+    pub depth: f64,
+    /// Recovery time in BEATS (tempo-synced): the lanes are ~95 % back this
+    /// long after the kick. `1.0` = a full beat of pump.
+    pub release_beats: f64,
+}
+
+impl Sidechain {
+    /// No ducking.
+    pub const OFF: Sidechain = Sidechain {
+        depth: 0.0,
+        release_beats: 1.0,
+    };
+
+    /// A ducker of `depth` recovering over `release_beats`.
+    pub const fn new(depth: f64, release_beats: f64) -> Self {
+        Self {
+            depth,
+            release_beats,
+        }
+    }
+
+    /// Whether the ducker does anything.
+    pub fn active(&self) -> bool {
+        self.depth > 0.0
+    }
+}
+
+/// The ducker's gain `dt` seconds into its exponential recovery (time
+/// constant `tau`), having dropped to `1 - depth` at `dt = 0`.
+pub fn duck_level(depth: f64, tau: f64, dt: f64) -> f64 {
+    if tau <= 0.0 {
+        return 1.0;
+    }
+    (1.0 - depth * (-dt.max(0.0) / tau).exp()).clamp(0.0, 1.0)
+}
+
+/// How late step `step` fires under `swing` (0 = straight … 1 = full
+/// triplet shuffle): every odd sixteenth is delayed by up to a third of a
+/// step, the even ones stay on the grid.
+pub fn swing_delay(swing: f64, step: usize, step_dur: f64) -> f64 {
+    if step % 2 == 1 {
+        swing.clamp(0.0, 1.0) * step_dur / 3.0
+    } else {
+        0.0
+    }
+}
+
 /// A whole song as copyable data. Author one, drop it in `SONGS`, done.
 ///
 /// The key/tempo/voices live here; the *notes* live in the ordered `sections`.
@@ -242,6 +296,11 @@ pub struct SongSpec {
     pub sections: &'static [Section],
     /// Overall punch/loudness feel (~0.5 lounge .. ~1.2 boss).
     pub intensity: f64,
+    /// Shuffle, `0.0` (straight sixteenths) … `1.0` (full triplet swing):
+    /// see [`swing_delay`].
+    pub swing: f64,
+    /// The kick-driven ducker on the melodic lanes ([`Sidechain::OFF`] = none).
+    pub sidechain: Sidechain,
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +420,8 @@ const INSERT_COIN: SongSpec = SongSpec {
         INSERT_REFRAIN,
     ],
     intensity: 0.5,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -480,6 +541,8 @@ const NEON_LOUNGE: SongSpec = SongSpec {
         NEON_REFRAIN,
     ],
     intensity: 0.55,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -599,6 +662,8 @@ const CHROME_VEINS: SongSpec = SongSpec {
         CHROME_REFRAIN,
     ],
     intensity: 0.72,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -717,6 +782,8 @@ const DESCENT: SongSpec = SongSpec {
         DESCENT_REFRAIN,
     ],
     intensity: 0.85,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -834,6 +901,8 @@ const BLOOD_RUSH: SongSpec = SongSpec {
         BLOOD_REFRAIN,
     ],
     intensity: 0.95,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -951,6 +1020,8 @@ const DEEP_STATIC: SongSpec = SongSpec {
         DEEP_REFRAIN,
     ],
     intensity: 1.0,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -1071,6 +1142,8 @@ const STATIC_PRAYER: SongSpec = SongSpec {
         PRAYER_REFRAIN,
     ],
     intensity: 0.8,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -1192,6 +1265,8 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
         MASK_REFRAIN,
     ],
     intensity: 1.15,
+    swing: 0.0,
+    sidechain: Sidechain::OFF,
 };
 
 // ---------------------------------------------------------------------------
@@ -1327,6 +1402,8 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
         SODIUM_REFRAIN,
     ],
     intensity: 0.8,
+    swing: 0.0,
+    sidechain: Sidechain::new(0.55, 0.9),
 };
 
 /// All songs, in ascending darkness (intro first). Index into this with
@@ -1619,6 +1696,17 @@ mod tests {
             assert!(song.bpm > 0.0 && song.steps_per_beat > 0, "{}", song.name);
             assert!(!song.scale.is_empty(), "{}", song.name);
             assert!(song.root > 0.0, "{}", song.name);
+            assert!((0.0..=1.0).contains(&song.swing), "{}: swing", song.name);
+            assert!(
+                (0.0..=1.0).contains(&song.sidechain.depth),
+                "{}: duck",
+                song.name
+            );
+            assert!(
+                song.sidechain.release_beats > 0.0,
+                "{}: duck release",
+                song.name
+            );
             for v in song.voices {
                 assert!((-1.0..=1.0).contains(&v.pan), "{}: pan", song.name);
                 assert!((0.0..=1.0).contains(&v.width), "{}: width", song.name);
@@ -1712,6 +1800,28 @@ mod tests {
                 count(|k| matches!(k, MusicKey::Note { lane: PAD, .. })),
             );
         }
+    }
+
+    #[test]
+    fn duck_level_recovers_exponentially() {
+        assert!((duck_level(0.6, 0.2, 0.0) - 0.4).abs() < 1e-9);
+        let mid = duck_level(0.6, 0.2, 0.2);
+        assert!(mid > 0.4 && mid < 1.0);
+        assert!(duck_level(0.6, 0.2, 5.0) > 0.999);
+        assert_eq!(duck_level(0.6, 0.0, 0.1), 1.0, "no time constant = no duck");
+        assert!(
+            (duck_level(0.6, 0.2, -1.0) - 0.4).abs() < 1e-9,
+            "before = at"
+        );
+    }
+
+    #[test]
+    fn swing_delays_only_the_off_sixteenths() {
+        assert_eq!(swing_delay(0.0, 1, 0.1), 0.0);
+        assert_eq!(swing_delay(1.0, 0, 0.1), 0.0);
+        assert!((swing_delay(1.0, 1, 0.3) - 0.1).abs() < 1e-9);
+        assert!((swing_delay(0.5, 3, 0.3) - 0.05).abs() < 1e-9);
+        assert!((swing_delay(7.0, 1, 0.3) - 0.1).abs() < 1e-9, "clamped");
     }
 
     #[test]
