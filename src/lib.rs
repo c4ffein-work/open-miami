@@ -1,5 +1,6 @@
 // Core modules
 pub mod math;
+pub mod music;
 
 // WASM-only modules for browser integration
 #[cfg(target_arch = "wasm32")]
@@ -53,7 +54,7 @@ mod wasm_entry {
     use wasm_bindgen::JsCast;
 
     // Import game modules
-    use crate::audio::{song_for_floor, AudioEngine, SONGS};
+    use crate::audio::AudioEngine;
     use crate::camera::Camera;
     use crate::ecs::{System, World};
     use crate::ending::{self, Ending, Outro, EXTRACT_CARD_SECS};
@@ -65,6 +66,7 @@ mod wasm_entry {
         floor_def, floor_title, level_index_for_floor_id, BOSS_LEVEL, LEVEL_COUNT,
     };
     use crate::math::{Color, Vec2};
+    use crate::music::{song_for_floor, Cell as GridCell, SONGS};
     use crate::props::{
         draw_prop_ex, family_range, largest_family, prop_family, prop_layers, prop_modes, prop_px,
         settings_json, snap_size, PixelMode, PropDrawOpts, MAX_LAYERS, MAX_PX, PROP_COUNT,
@@ -1114,7 +1116,7 @@ mod wasm_entry {
         fps_cap: u32,
         /// When the last non-skipped frame ran (ms), for the cap.
         last_frame_ms: f64,
-        /// Which SETTINGS row is highlighted (0 = SOUND, 1 = FPS CAP).
+        /// Which SETTINGS row is highlighted (0 = SOUND, 1 = MUSIC, 2 = FPS CAP).
         settings_row: usize,
         level: Level,
         camera: Camera,
@@ -1226,9 +1228,13 @@ mod wasm_entry {
                 show_infos: false,
                 audio: {
                     let audio = AudioEngine::new();
-                    // The SETTINGS sound toggle persists in localStorage.
+                    // The SETTINGS sound toggle + music level persist in
+                    // localStorage.
                     if get_setting("sound").as_deref() == Some("off") {
                         audio.set_enabled(false);
+                    }
+                    if let Some(pct) = get_setting("music").and_then(|v| v.parse::<u32>().ok()) {
+                        audio.set_music_level(f64::from(pct.min(100)) / 100.0);
                     }
                     audio
                 },
@@ -2042,9 +2048,11 @@ mod wasm_entry {
         /// MUSICS tab: a step-sequencer *tracker* for the live audio engine. A
         /// SECTIONS strip of clickable miniatures (one per arrangement section,
         /// shaded by note density, current section highlighted) sits above the
-        /// PATTERN grid of the currently-playing section (five channels; filled
-        /// cells are notes; playhead column; click a column to seek; M/S mute/
-        /// solo per row). Song-select buttons above; per-weapon SFX below.
+        /// PATTERN grid of the currently-playing section (seven channels; filled
+        /// cells are notes shaded by velocity, half-height bars are ties;
+        /// playhead column; click a column to seek; M/S mute/solo per row).
+        /// Song-select buttons + the song's settings line above; the lanes'
+        /// instrument summaries and the per-weapon SFX below.
         fn draw_viz_musics(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
             let coral = Color::from_rgba(217, 119, 87, 255);
             graphics.draw_text(
@@ -2057,7 +2065,7 @@ mod wasm_entry {
             // --- song select -----------------------------------------------
             graphics.draw_text("SONGS", Vec2::new(40.0, 108.0), 16.0, coral);
             let cur_name = self.audio.current_song().name;
-            let songs = crate::audio::SONGS;
+            let songs = SONGS;
             for (i, song) in songs.iter().enumerate() {
                 let x = 40.0 + (i % 4) as f32 * 168.0;
                 let y = 118.0 + (i / 4) as f32 * 46.0;
@@ -2071,6 +2079,23 @@ mod wasm_entry {
             let mut y = 118.0 + song_rows * 46.0 + 4.0;
             if viz_button(graphics, mouse, 40.0, y, 158.0, 40.0, "STOP", false) && click {
                 self.audio.stop_music();
+            }
+            // The song's global settings, next to STOP.
+            {
+                let song = self.audio.current_song();
+                let info = format!(
+                    "{} · {} {} · {:.0} BPM · SWING {:.0}% · DUCK {:.0}% · ECHO {:.1} STEPS · SWEEP {:.0}% · HUMAN {:.0} MS",
+                    song.name,
+                    crate::music::note_name(song.root),
+                    crate::music::scale_name(song.scale),
+                    song.bpm,
+                    song.swing * 100.0,
+                    song.sidechain.depth * 100.0,
+                    song.echo.steps,
+                    song.sweep * 100.0,
+                    song.humanize * 1000.0,
+                );
+                graphics.draw_text(&info, Vec2::new(216.0, y + 26.0), 16.0, Color::GRAY);
             }
 
             // --- section miniatures (the arrangement mini-map) ---------------
@@ -2103,24 +2128,34 @@ mod wasm_entry {
                 // Miniature pattern: the section's cells squeezed into the card.
                 let s_len = self.audio.section_pattern_len(sec).max(1);
                 let cw_m = (mw - 6.0) / s_len as f32;
-                let rh_m = (mh - 6.0) / crate::audio::NUM_CHANNELS as f32;
-                for r in 0..crate::audio::NUM_CHANNELS {
+                let rh_m = (mh - 6.0) / crate::music::NUM_CHANNELS as f32;
+                for r in 0..crate::music::NUM_CHANNELS {
                     for s in 0..s_len {
-                        if self.audio.section_cell(sec, r, s) {
-                            graphics.draw_rectangle(
-                                Vec2::new(
-                                    mx + 3.0 + s as f32 * cw_m,
-                                    strip_top + 3.0 + r as f32 * rh_m,
-                                ),
-                                cw_m.max(1.0),
-                                rh_m.max(1.0),
-                                if is_cur {
-                                    Color::new(1.0, 0.75, 0.6, 0.95)
-                                } else {
-                                    Color::new(0.62, 0.5, 0.72, 0.9)
-                                },
-                            );
-                        }
+                        // Ties draw as a thinner continuation of the note.
+                        let (on, tie) = match self.audio.section_cell(sec, r, s) {
+                            GridCell::Off => continue,
+                            GridCell::On(_) => (true, false),
+                            GridCell::Hold => (false, true),
+                        };
+                        let h = if on {
+                            rh_m.max(1.0)
+                        } else {
+                            (rh_m * 0.5).max(1.0)
+                        };
+                        let c = if is_cur {
+                            Color::new(1.0, 0.75, 0.6, if tie { 0.6 } else { 0.95 })
+                        } else {
+                            Color::new(0.62, 0.5, 0.72, if tie { 0.55 } else { 0.9 })
+                        };
+                        graphics.draw_rectangle(
+                            Vec2::new(
+                                mx + 3.0 + s as f32 * cw_m,
+                                strip_top + 3.0 + r as f32 * rh_m + (rh_m.max(1.0) - h) * 0.5,
+                            ),
+                            cw_m.max(1.0),
+                            h,
+                            c,
+                        );
                     }
                 }
                 let border = if is_cur {
@@ -2155,16 +2190,18 @@ mod wasm_entry {
             let steps = self.audio.pattern_len().max(1);
             let cur_step = self.audio.current_step();
             let playing = self.audio.is_playing();
-            let rows = crate::audio::NUM_CHANNELS;
-            let names = crate::audio::CHANNEL_NAMES;
+            let rows = crate::music::NUM_CHANNELS;
+            let names = crate::music::CHANNEL_NAMES;
             let chan_col = [
                 Color::from_rgba(217, 119, 87, 255), // bass
                 Color::from_rgba(80, 200, 240, 255), // lead
                 Color::from_rgba(150, 90, 210, 255), // pad
                 Color::from_rgba(224, 80, 170, 255), // arp
+                Color::from_rgba(90, 220, 160, 255), // keys
                 Color::from_rgba(230, 200, 60, 255), // drums
+                Color::from_rgba(240, 150, 50, 255), // perc
             ];
-            let rh = 26.0f32;
+            let rh = 22.0f32;
             let cw = gw / steps as f32;
 
             // Playhead column highlight (drawn behind the cells).
@@ -2215,13 +2252,27 @@ mod wasm_entry {
                         Color::new(0.10, 0.09, 0.13, 1.0)
                     };
                     graphics.draw_rectangle(Vec2::new(cx + 1.0, ry + 2.0), cw - 2.0, rh - 4.0, bg);
-                    if self.audio.channel_active(r, s) {
-                        let c = if muted {
-                            Color::new(col.r * 0.4, col.g * 0.4, col.b * 0.4, 1.0)
-                        } else {
-                            col
-                        };
-                        let inset = if playing && s == cur_step { 2.0 } else { 4.0 };
+                    // A note fills the cell (brightness = velocity); a tie
+                    // continues it as a half-height bar joined to the note.
+                    let (vel, tie) = match self.audio.channel_cell(r, s) {
+                        GridCell::Off => continue,
+                        GridCell::On(v) => (v, false),
+                        GridCell::Hold => (crate::music::MAX_VEL, true),
+                    };
+                    let dim = if muted { 0.4 } else { 1.0 };
+                    let lum = dim * (0.45 + 0.55 * vel as f32 / crate::music::MAX_VEL as f32);
+                    let c = Color::new(col.r * lum, col.g * lum, col.b * lum, 1.0);
+                    let inset = if playing && s == cur_step { 2.0 } else { 4.0 };
+                    if tie {
+                        // From the previous cell's note edge to this cell's.
+                        let h = (rh - inset * 2.0) * 0.5;
+                        graphics.draw_rectangle(
+                            Vec2::new(cx - inset, ry + inset + h * 0.5),
+                            cw.max(2.0),
+                            h,
+                            c,
+                        );
+                    } else {
                         graphics.draw_rectangle(
                             Vec2::new(cx + inset, ry + inset),
                             (cw - inset * 2.0).max(2.0),
@@ -2251,11 +2302,25 @@ mod wasm_entry {
                 self.audio.seek(s.min(steps - 1));
             }
 
+            // --- the song's instruments, one line per melodic lane ----------
+            let mut sy = grid_bottom + 20.0;
+            graphics.draw_text("VOICES", Vec2::new(40.0, sy), 16.0, coral);
+            {
+                let song = self.audio.current_song();
+                for (i, &lane) in crate::music::MELODIC.iter().enumerate() {
+                    let ly = sy + 16.0 + i as f32 * 16.0;
+                    let col = chan_col[lane.min(chan_col.len() - 1)];
+                    graphics.draw_text(names[lane], Vec2::new(40.0, ly), 14.0, col);
+                    let summary = crate::music::voice_summary(&song.voices[lane]);
+                    graphics.draw_text(&summary, Vec2::new(118.0, ly), 14.0, Color::GRAY);
+                }
+                sy += 16.0 * (crate::music::MELODIC.len() as f32 + 1.0) + 6.0;
+            }
+
             // --- SFX: the full per-weapon taxonomy ---------------------------
             // Row 1: attack (the weapon firing/swinging).
             // Row 2: hit (that weapon's impact on a metal bot).
             // Row 3: the rest of the one-shot game sounds.
-            let mut sy = grid_bottom + 18.0;
             graphics.draw_text("SFX", Vec2::new(40.0, sy), 16.0, coral);
             sy += 12.0;
             let bw_s = 158.0f32;
@@ -2629,19 +2694,20 @@ mod wasm_entry {
             Vec2::new(mx, my)
         }
 
-        /// The SETTINGS modal body — two rows (SOUND, FPS CAP), Up/Down to
-        /// highlight, Enter/Space or a click on a row to act. Shared by the
-        /// main menu and the pause menu's stacked settings.
+        /// The SETTINGS modal body — three rows (SOUND, MUSIC, FPS CAP),
+        /// Up/Down to highlight, Enter/Space or a click on a row to act.
+        /// Shared by the main menu and the pause menu's stacked settings.
         fn settings_modal_body(&mut self, graphics: &Graphics, p: Vec2, mw: f32) {
             const ROW_H: f32 = 46.0;
+            const ROWS: usize = 3;
             let rows_y = p.y + 118.0;
-            if input::is_key_pressed("ArrowDown")
-                || input::is_key_pressed("s")
-                || input::is_key_pressed("ArrowUp")
+            if input::is_key_pressed("ArrowDown") || input::is_key_pressed("s") {
+                self.settings_row = (self.settings_row + 1) % ROWS;
+            } else if input::is_key_pressed("ArrowUp")
                 || input::is_key_pressed("w")
                 || input::is_key_pressed("z")
             {
-                self.settings_row = 1 - self.settings_row;
+                self.settings_row = (self.settings_row + ROWS - 1) % ROWS;
             }
             let mut act: Option<usize> = None;
             if input::is_key_pressed("Enter") || input::is_key_pressed(" ") {
@@ -2649,7 +2715,7 @@ mod wasm_entry {
             } else if input::is_mouse_button_pressed(input::mouse_buttons::LEFT) {
                 let m = input::mouse_position();
                 if m.x >= p.x && m.x <= p.x + mw {
-                    for i in 0..2usize {
+                    for i in 0..ROWS {
                         let ry = rows_y + i as f32 * ROW_H;
                         if m.y >= ry - 8.0 && m.y <= ry + 32.0 {
                             self.settings_row = i;
@@ -2665,6 +2731,17 @@ mod wasm_entry {
                     set_setting("sound", if now { "on" } else { "off" });
                 }
                 Some(1) => {
+                    // 100 -> 75 -> 50 -> 25 -> 0 -> 100 ... (percent).
+                    let pct = (self.audio.music_level() * 100.0).round() as u32;
+                    let next = if pct == 0 {
+                        100
+                    } else {
+                        pct.saturating_sub(25)
+                    };
+                    self.audio.set_music_level(f64::from(next) / 100.0);
+                    set_setting("music", &next.to_string());
+                }
+                Some(2) => {
                     // 30 -> 60 -> 120 -> UNCAPPED -> 30 ...
                     self.fps_cap = match self.fps_cap {
                         30 => 60,
@@ -2687,8 +2764,12 @@ mod wasm_entry {
             } else {
                 format!("{}", self.fps_cap)
             };
-            let rows: [(&str, String); 2] =
-                [("SOUND", sound_label.to_string()), ("FPS CAP", cap_label)];
+            let music_label = format!("{:.0}%", self.audio.music_level() * 100.0);
+            let rows: [(&str, String); 3] = [
+                ("SOUND", sound_label.to_string()),
+                ("MUSIC", music_label),
+                ("FPS CAP", cap_label),
+            ];
             for (i, (name, value)) in rows.iter().enumerate() {
                 let ry = rows_y + i as f32 * ROW_H;
                 let color = if self.settings_row == i {
@@ -2706,7 +2787,7 @@ mod wasm_entry {
             }
             graphics.draw_text(
                 "ENTER / SPACE / CLICK — CHANGE",
-                Vec2::new(p.x + 28.0, rows_y + 2.0 * ROW_H + 10.0),
+                Vec2::new(p.x + 28.0, rows_y + ROWS as f32 * ROW_H + 10.0),
                 15.0,
                 Color::new(1.0, 1.0, 1.0, 0.6),
             );
@@ -2718,7 +2799,7 @@ mod wasm_entry {
                 return;
             }
             self.draw_level_select(graphics);
-            let p = self.draw_modal_chrome(graphics, "SETTINGS", 564.0, 312.0, "ESC — BACK");
+            let p = self.draw_modal_chrome(graphics, "SETTINGS", 564.0, 358.0, "ESC — BACK");
             self.settings_modal_body(graphics, p, 564.0);
         }
 
@@ -2800,7 +2881,7 @@ mod wasm_entry {
                 }
                 let pp = self.draw_modal_chrome(graphics, "PAUSED", 420.0, 340.0, "");
                 self.draw_pause_rows(graphics, pp, false);
-                let p = self.draw_modal_chrome(graphics, "SETTINGS", 564.0, 312.0, "ESC — BACK");
+                let p = self.draw_modal_chrome(graphics, "SETTINGS", 564.0, 358.0, "ESC — BACK");
                 self.settings_modal_body(graphics, p, 564.0);
                 return;
             }
