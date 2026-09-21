@@ -36,7 +36,10 @@
 //! / `BakedMusic`), and `schedule_step` then fires one buffer source per note
 //! into the same live music bus — the per-bar lowpass sweep is untouched.
 //! Per-note VELOCITY is a playback gain (a `GainNode` only on the notes
-//! that need one), so it never multiplies the bake set. The bake queue is
+//! that need one), so it never multiplies the bake set. A note whose buffer
+//! has not landed yet plays a LIGHT live sketch (one plain oscillator per
+//! partial — `AudioEngine::sketch`), never the full instrument, so the
+//! fallback's cost is bounded whatever the voice. The bake queue is
 //! prioritized: combat SFX first, then the current song's voices, then the
 //! rare SFX; a song switch re-enumerates and bakes in the background while
 //! unbaked notes fall back to live synthesis.
@@ -2186,7 +2189,7 @@ impl AudioEngine {
             ctx: AsRef::<BaseAudioContext>::as_ref(&off).clone(),
             sink,
         });
-        self.synth_music_note(key, 0.0, MAX_VEL);
+        self.synth_music_note(key, 0.0, MAX_VEL, true);
         *self.render.borrow_mut() = None;
         let promise = match off.start_rendering() {
             Ok(p) => p,
@@ -3298,7 +3301,7 @@ impl AudioEngine {
         if self.play_music_baked(key, t, vel) {
             return;
         }
-        self.synth_music_note(key, t, vel);
+        self.synth_music_note(key, t, vel, false);
     }
 
     /// Linear amplitude of a velocity: `MAX_VEL` = 1.0.
@@ -3363,11 +3366,16 @@ impl AudioEngine {
         true
     }
 
-    /// The LIVE synthesis of one music voice at absolute time `t` and
-    /// velocity `vel` — also what the offline pre-render runs (at t = 0 and
-    /// full velocity, see [`Self::render_music_slot`]), so a baked note is
-    /// the identical signal, just rendered ahead of time.
-    fn synth_music_note(&self, key: MusicKey, t: f64, vel: u8) {
+    /// The synthesis of one music voice at absolute time `t` and velocity
+    /// `vel`. `full` is what the offline pre-render runs (at t = 0 and full
+    /// velocity, see [`Self::render_music_slot`]): the whole instrument —
+    /// unison stack, per-oscillator filter envelopes, vibrato, sub. The
+    /// LIVE fallback for a not-yet-baked note runs it `!full`: the same
+    /// pitches, chord, envelope and pan through ONE plain oscillator per
+    /// partial, so a stall can never scale with how rich a voice is (a
+    /// full seven-saw seventh chord is ~110 nodes; the sketch is 8). The
+    /// baked buffer replaces the sketch the moment it lands.
+    fn synth_music_note(&self, key: MusicKey, t: f64, vel: u8, full: bool) {
         let s = &self.song;
         let step_dur = self.step_dur();
         let gain = MUSIC_GAIN * s.intensity * Self::vel_gain(vel);
@@ -3385,6 +3393,7 @@ impl AudioEngine {
                     .get(lane)
                     .copied()
                     .unwrap_or(Voice::mono(Wave::Sine));
+                let voice = if full { voice } else { Self::sketch(&voice) };
                 let hold = step_dur * f64::from(len.max(1) - 1);
                 let dur = step_dur * gate;
                 // Every partial of the voicing at 1/√n of the level, so a
@@ -3415,6 +3424,21 @@ impl AudioEngine {
                 }
             }
             MusicKey::Drum(d) => self.drum(d, t, gain),
+        }
+    }
+
+    /// The cheap live stand-in for `voice` (see [`Self::synth_music_note`]):
+    /// one oscillator, no filter envelope, no vibrato, no sub; wave, pan,
+    /// envelope override, glide and the lane sends are kept.
+    fn sketch(voice: &Voice) -> Voice {
+        Voice {
+            detune: 0.0,
+            width: 0.0,
+            unison: 1,
+            filter: None,
+            vibrato: None,
+            sub: 0.0,
+            ..*voice
         }
     }
 
