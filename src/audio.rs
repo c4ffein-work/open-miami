@@ -3452,8 +3452,8 @@ impl AudioEngine {
         let sd = self.step_dur();
         match key {
             MusicKey::Note { lane, len, .. } => {
-                let (gate, _, _) = self.voice_shape(lane);
-                sd * (gate + f64::from(len.max(1) - 1)) + 0.03
+                let (gate, _, attack) = self.voice_shape(lane);
+                attack + sd * (gate + f64::from(len.max(1) - 1)) + 0.03
             }
             // The longest layer of each kit piece + the builders' stop margin.
             MusicKey::Drum(Kick) => 0.21,
@@ -3942,7 +3942,8 @@ impl AudioEngine {
         };
         src.set_buffer(Some(buf));
         src.set_loop(true);
-        let total = hold + dur;
+        // Attack, then the hold, then the decay: the whole note.
+        let total = attack.max(0.0) + hold + dur;
         let g = gain.gain();
         let peak = peak.max(0.0002) as f32;
         let _ = g.set_value_at_time(0.0001, start);
@@ -4073,7 +4074,8 @@ impl AudioEngine {
             wave,
             vibrato,
         } = *tone;
-        let total = hold + dur;
+        // Attack, then the hold, then the decay: the whole note.
+        let total = attack.max(0.0) + hold + dur;
         osc.set_type(wave);
         let freq = osc.frequency();
         let _ = freq.set_value_at_time(f0 as f32, start);
