@@ -173,7 +173,7 @@ Future improvements planned:
 - [ ] Multiple levels/rooms
 - [ ] Wall collision
 - [ ] Particle effects and blood splatter
-- [ ] Sound effects and music
+- [x] Sound effects and music (procedural, no audio files — see `docs/MUSIC_FORMAT.md`)
 - [ ] Weapon pickup system
 - [ ] Score tracking
 - [ ] Better graphics and animations
