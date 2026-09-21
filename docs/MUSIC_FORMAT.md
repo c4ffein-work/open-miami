@@ -169,7 +169,9 @@ belongs to the tower, to `song_for_floor`.
   exact pitch (stereo for a wide voice), and then fired as one
   `AudioBufferSourceNode` per note. Velocity is a play-time `GainNode` only
   on notes below full; the glide origin enters the key only on gliding
-  voices. Unbaked notes fall back to live synthesis; the queue is combat
+  voices. A note whose buffer has not landed yet plays a light live SKETCH
+  (one plain oscillator per partial — never the full stack / filter /
+  vibrato, so a stall can't scale with the voice); the queue is combat
   SFX → the current song → rare SFX, and the loading screen waits for it.
 * **The bus.** Per melodic lane: panner → drive shaper → (echo / hall
   sends) → side-chain ducker → music bus → lowpass (swept per bar by

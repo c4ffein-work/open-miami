@@ -785,7 +785,8 @@ struct MusicSlot {
 /// the async completion callbacks via `Rc`.
 struct BakedMusic {
     /// The finite voice set of the current song, in bake-priority order
-    /// (drums first — the densest lane — then bass, lead, arp, pad).
+    /// (drums first — the densest lanes — then the melodic lanes per
+    /// [`MELODIC`]).
     slots: RefCell<Vec<MusicSlot>>,
     /// Next slot index to kick.
     next: Cell<usize>,

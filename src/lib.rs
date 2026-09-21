@@ -2044,9 +2044,11 @@ mod wasm_entry {
         /// MUSICS tab: a step-sequencer *tracker* for the live audio engine. A
         /// SECTIONS strip of clickable miniatures (one per arrangement section,
         /// shaded by note density, current section highlighted) sits above the
-        /// PATTERN grid of the currently-playing section (five channels; filled
-        /// cells are notes; playhead column; click a column to seek; M/S mute/
-        /// solo per row). Song-select buttons above; per-weapon SFX below.
+        /// PATTERN grid of the currently-playing section (seven channels; filled
+        /// cells are notes shaded by velocity, half-height bars are ties;
+        /// playhead column; click a column to seek; M/S mute/solo per row).
+        /// Song-select buttons + the song's settings line above; the lanes'
+        /// instrument summaries and the per-weapon SFX below.
         fn draw_viz_musics(&mut self, graphics: &Graphics, mouse: Vec2, click: bool) {
             let coral = Color::from_rgba(217, 119, 87, 255);
             graphics.draw_text(

@@ -399,7 +399,7 @@ impl Drum {
 }
 
 /// One block of an arrangement: a self-contained, multi-bar pattern across all
-/// five channels. Songs are built by ordering these (a refrain section can be
+/// seven channels. Songs are built by ordering these (a refrain section can be
 /// listed several times so the hook comes back). A section's playable length is
 /// the length of its longest lane; shorter lanes loop within it.
 ///
