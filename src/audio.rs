@@ -54,9 +54,9 @@
 
 use crate::music::Drum::{Clap, Crash, Hat, Kick, OpenHat, Rim, Silent, Snare, Tom};
 use crate::music::{
-    cell_at, degree_freq, drum_at, duck_level, music_keys, note_at, section_len, swing_delay,
-    vel_at, Cell as GridCell, Drum, MusicKey, Section, SongSpec, Voice, Wave, ARP, BASS, DRUMS,
-    LEAD, MAX_VEL, NUM_CHANNELS, PAD, PERC, SONGS,
+    cell_at, chord_at, degree_freq, drum_at, duck_level, music_keys, note_at, section_len,
+    swing_delay, vel_at, Cell as GridCell, Drum, MusicKey, Section, SongSpec, Voice, Wave, ARP,
+    BASS, DRUMS, LEAD, MAX_VEL, NUM_CHANNELS, PAD, PERC, SONGS,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -3094,6 +3094,7 @@ impl AudioEngine {
                     lane,
                     degree: n.degree,
                     len: n.len,
+                    chord: chord_at(lane, sec.chord_lane(lane), step),
                 };
                 self.music_note(key, t, vel_at(sec.vel_lane(lane), step));
             }
@@ -3223,7 +3224,9 @@ impl AudioEngine {
         match lane {
             BASS => (1.9, 1.3, 0.005),
             LEAD => (0.9, 1.0, 0.005),
-            PAD => (4.0, 0.45, 0.06),
+            // The pad level is per CHORD (its default triad lands each
+            // partial at the historical 0.45 after the 1/√n split).
+            PAD => (4.0, 0.78, 0.06),
             _ => (0.7, 0.7, 0.005),
         }
     }
@@ -3237,7 +3240,12 @@ impl AudioEngine {
         let step_dur = self.step_dur();
         let gain = MUSIC_GAIN * s.intensity * Self::vel_gain(vel);
         match key {
-            MusicKey::Note { lane, degree, len } => {
+            MusicKey::Note {
+                lane,
+                degree,
+                len,
+                chord,
+            } => {
                 let (gate, level, attack) = Self::lane_shape(lane);
                 let voice = s
                     .voices
@@ -3246,12 +3254,14 @@ impl AudioEngine {
                     .unwrap_or(Voice::mono(Wave::Sine));
                 let hold = step_dur * f64::from(len.max(1) - 1);
                 let dur = step_dur * gate;
-                // The pad blooms into a triad (root + third + fifth) for a
-                // chord bed; the other lanes are one pitch.
-                let intervals: &[i32] = if lane == PAD { &[0, 2, 4] } else { &[0] };
-                for &interval in intervals {
+                // Every partial of the voicing at 1/√n of the level, so a
+                // chord is about as loud as a single note of the lane
+                // (the pad's level is calibrated for its default triad).
+                let partials = chord.degrees();
+                let split = level / (partials.len().max(1) as f64).sqrt();
+                for &interval in partials {
                     let f = degree_freq(s.root, s.scale, degree + interval);
-                    self.lane_tone(lane, &voice, f, t, attack, hold, dur, gain * level);
+                    self.lane_tone(lane, &voice, f, t, attack, hold, dur, gain * split);
                 }
             }
             MusicKey::Drum(d) => self.drum(d, t, gain),

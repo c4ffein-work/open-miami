@@ -87,6 +87,66 @@ pub enum Wave {
     Sawtooth,
 }
 
+/// How a lane note is voiced: which scale degrees sound, relative to the
+/// written one. In-key by construction — a `Triad` on the 5th degree of a
+/// minor scale is whatever chord the scale spells there — so voicings move
+/// with the key like the notes do. The pad's default is `Triad`, every
+/// other lane's is `Single`; a `*_chord` lane changes it per step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Chord {
+    /// Just the written degree.
+    Single,
+    /// Root + the octave above — the thick unison lead / bass.
+    Octave,
+    /// Root, fifth, octave: the power chord (no third; heavy).
+    Power,
+    /// Root, third, fifth in root position — the default chord bed.
+    Triad,
+    /// Root, second, fifth: suspended, open, unresolved.
+    Sus2,
+    /// Root, fourth, fifth: suspended, leaning to resolve.
+    Sus4,
+    /// Root, third, fifth, seventh: the lush four-note chord.
+    Seventh,
+    /// Root, third, fifth + the ninth on top: wide and dreamy.
+    Add9,
+    /// First inversion: third, fifth, root-up-an-octave (smoother voice
+    /// leading between neighbouring chords).
+    Inv1,
+    /// Second inversion: fifth, root, third all up — bright and floating.
+    Inv2,
+    /// Root, fifth, tenth (the third an octave up): the wide-open voicing.
+    Open,
+}
+
+impl Chord {
+    /// The scale-degree offsets that sound, lowest first.
+    pub const fn degrees(self) -> &'static [i32] {
+        match self {
+            Chord::Single => &[0],
+            Chord::Octave => &[0, 7],
+            Chord::Power => &[0, 4, 7],
+            Chord::Triad => &[0, 2, 4],
+            Chord::Sus2 => &[0, 1, 4],
+            Chord::Sus4 => &[0, 3, 4],
+            Chord::Seventh => &[0, 2, 4, 6],
+            Chord::Add9 => &[0, 2, 4, 8],
+            Chord::Inv1 => &[2, 4, 7],
+            Chord::Inv2 => &[4, 7, 9],
+            Chord::Open => &[0, 4, 9],
+        }
+    }
+
+    /// The voicing a lane uses where its chord lane is empty.
+    pub const fn default_for(lane: usize) -> Chord {
+        if lane == PAD {
+            Chord::Triad
+        } else {
+            Chord::Single
+        }
+    }
+}
+
 /// One melodic instrument of a song: what a lane's notes are synthesized
 /// with. Cheap on purpose — a voice is baked once per pitch it plays.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -199,6 +259,12 @@ pub struct Section {
     pub arp_vel: &'static [u8],
     pub drums_vel: &'static [u8],
     pub perc_vel: &'static [u8],
+    /// Chord (voicing) lanes: one [`Chord`] per step, looping; empty = the
+    /// lane's default ([`Chord::default_for`]). Read where a note STARTS.
+    pub bass_chord: &'static [Chord],
+    pub lead_chord: &'static [Chord],
+    pub pad_chord: &'static [Chord],
+    pub arp_chord: &'static [Chord],
 }
 
 impl Section {
@@ -217,6 +283,10 @@ impl Section {
         arp_vel: &[],
         drums_vel: &[],
         perc_vel: &[],
+        bass_chord: &[],
+        lead_chord: &[],
+        pad_chord: &[],
+        arp_chord: &[],
     };
 
     /// The note lane of melodic channel `lane` ([`BASS`] … [`ARP`]); empty
@@ -227,6 +297,17 @@ impl Section {
             LEAD => self.lead,
             PAD => self.pad,
             ARP => self.arp,
+            _ => &[],
+        }
+    }
+
+    /// The chord lane of melodic channel `lane`; empty for the drums.
+    pub fn chord_lane(&self, lane: usize) -> &'static [Chord] {
+        match lane {
+            BASS => self.bass_chord,
+            LEAD => self.lead_chord,
+            PAD => self.pad_chord,
+            ARP => self.arp_chord,
             _ => &[],
         }
     }
@@ -1343,6 +1424,7 @@ const SODIUM_PERC_VEL: &[u8] = &[4, 0, 6, 0, 8, 0, 6, 0, 4, 0, 6, 0, 8, 0, 7, 0]
 const SODIUM_INTRO: Section = Section {
     label: "intro",
     pad: SODIUM_PAD,
+    pad_chord: SODIUM_PAD_CHORDS,
     arp: &[
         REST, REST, REST, REST, 14, REST, 16, REST, REST, REST, REST, REST, 18, REST, 16, REST,
     ],
@@ -1354,6 +1436,74 @@ const SODIUM_INTRO: Section = Section {
     drums_vel: &[0, 0, 5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0, 5, 3],
     ..Section::EMPTY
 };
+/// One voicing per bar under [`SODIUM_PAD`]: i7 – VI – III(add9) – VII.
+const SODIUM_PAD_CHORDS: &[Chord] = &[
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Seventh,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Add9,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+    Chord::Triad,
+];
+
 const SODIUM_VERSE: Section = Section {
     label: "verse",
     bass: SODIUM_BASS,
@@ -1370,6 +1520,7 @@ const SODIUM_VERSE: Section = Section {
         9, 9, 9, 9,
     ],
     pad: SODIUM_PAD,
+    pad_chord: SODIUM_PAD_CHORDS,
     drums: SODIUM_DRUMS,
     perc: SODIUM_PERC,
     perc_vel: SODIUM_PERC_VEL,
@@ -1386,6 +1537,7 @@ const SODIUM_REFRAIN: Section = Section {
         HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, 11, HOLD, HOLD, HOLD, REST, REST, REST, REST,
     ],
     pad: SODIUM_PAD,
+    pad_chord: SODIUM_PAD_CHORDS,
     arp: &[
         14, 16, 18, 16, 14, 16, 18, 21, 14, 16, 18, 16, 21, 18, 16, 14, 12, 14, 16, 14, 12, 14, 16,
         19, 12, 14, 16, 14, 19, 16, 14, 12, 16, 18, 20, 18, 16, 18, 20, 23, 16, 18, 20, 18, 23, 20,
@@ -1415,6 +1567,7 @@ const SODIUM_BREAK: Section = Section {
     ],
     lead_vel: &[6],
     pad: SODIUM_PAD,
+    pad_chord: SODIUM_PAD_CHORDS,
     drums: &[
         Kick, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
         Silent, Silent, Hat, Silent,
@@ -1535,6 +1688,15 @@ pub fn vel_at(vels: &[u8], step: usize) -> u8 {
     vels[step % vels.len()].min(MAX_VEL)
 }
 
+/// Read a chord lane at `step` (loops): the lane's default voicing for an
+/// empty lane.
+pub fn chord_at(lane: usize, chords: &[Chord], step: usize) -> Chord {
+    if chords.is_empty() {
+        return Chord::default_for(lane);
+    }
+    chords[step % chords.len()]
+}
+
 /// Read the drum lane at `step` (loops). Empty lane == `Silent`.
 pub fn drum_at(pattern: &[Drum], step: usize) -> Drum {
     if pattern.is_empty() {
@@ -1600,8 +1762,13 @@ pub fn cell_at(sec: &Section, channel: usize, step: usize) -> Cell {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MusicKey {
     /// A melodic lane ([`BASS`] … [`ARP`]) note at this scale degree, this
-    /// many steps long (1 = untied).
-    Note { lane: usize, degree: i32, len: u16 },
+    /// many steps long (1 = untied), voiced as `chord`.
+    Note {
+        lane: usize,
+        degree: i32,
+        len: u16,
+        chord: Chord,
+    },
     /// One kit piece (never `Silent`) — shared by both percussion lanes.
     Drum(Drum),
 }
@@ -1639,6 +1806,7 @@ pub fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
                             lane,
                             degree: n.degree,
                             len: n.len,
+                            chord: chord_at(lane, sec.chord_lane(lane), step),
                         },
                     );
                 }
@@ -1714,6 +1882,58 @@ mod tests {
             ..Section::EMPTY
         };
         assert_eq!(cell_at(&orphan, ARP, 1), Cell::Off);
+    }
+
+    #[test]
+    fn chords_default_per_lane_and_stay_in_key() {
+        assert_eq!(chord_at(PAD, &[], 5), Chord::Triad);
+        assert_eq!(chord_at(LEAD, &[], 5), Chord::Single);
+        assert_eq!(
+            chord_at(LEAD, &[Chord::Power, Chord::Octave], 3),
+            Chord::Octave
+        );
+        // Every voicing starts at or above the written note's octave and is
+        // spelled lowest-first (the synth relies on the order for levels).
+        let mut n = 0;
+        for c in [
+            Chord::Single,
+            Chord::Octave,
+            Chord::Power,
+            Chord::Triad,
+            Chord::Sus2,
+            Chord::Sus4,
+            Chord::Seventh,
+            Chord::Add9,
+            Chord::Inv1,
+            Chord::Inv2,
+            Chord::Open,
+        ] {
+            let d = c.degrees();
+            assert!(!d.is_empty());
+            assert!(d.windows(2).all(|w| w[0] < w[1]), "{c:?} not ascending");
+            assert!(d[0] >= 0, "{c:?} below the root");
+            n += 1;
+        }
+        assert_eq!(n, 11);
+        // A Triad in A minor on the root is A C E (0, 3, 7 semitones).
+        let f: Vec<f64> = Chord::Triad
+            .degrees()
+            .iter()
+            .map(|&d| degree_freq(55.0, MINOR, d))
+            .collect();
+        assert!((f[1] / f[0] - 2f64.powf(3.0 / 12.0)).abs() < 1e-9);
+        assert!((f[2] / f[0] - 2f64.powf(7.0 / 12.0)).abs() < 1e-9);
+        // A chord lane changes the bake key.
+        const SEC: Section = Section {
+            lead: &[0, 0],
+            lead_chord: &[Chord::Single, Chord::Power],
+            ..Section::EMPTY
+        };
+        let keys = music_keys(&SongSpec {
+            sections: &[SEC],
+            ..SONGS[0]
+        });
+        assert_eq!(keys.len(), 2);
     }
 
     #[test]
@@ -1839,6 +2059,7 @@ mod tests {
                                 lane,
                                 degree: n.degree,
                                 len: n.len,
+                                chord: chord_at(lane, sec.chord_lane(lane), step),
                             };
                             assert!(keys.contains(&key), "{}: missing {:?}", song.name, key);
                         }
