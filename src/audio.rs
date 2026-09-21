@@ -3231,7 +3231,8 @@ impl AudioEngine {
             }
             if let Some(n) = note_at(sec.lane(lane), step) {
                 let key = note_key(&self.song, sec, lane, step, &n);
-                self.music_note(key, t, vel_at(sec.vel_lane(lane), step));
+                let at = t + self.humanize();
+                self.music_note(key, at, vel_at(sec.vel_lane(lane), step));
             }
         }
         let mut kicked = false;
@@ -3244,12 +3245,23 @@ impl AudioEngine {
             if drum == Silent || vel == 0 {
                 continue;
             }
-            self.music_note(MusicKey::Drum(drum), t, vel);
+            // Kicks stay on the grid (they ARE the grid); the rest breathe.
+            let at = if drum == Kick { t } else { t + self.humanize() };
+            self.music_note(MusicKey::Drum(drum), at, vel);
             kicked |= drum == Kick;
         }
         if kicked {
             self.duck(t);
         }
+    }
+
+    /// A fresh timing offset in `±humanize` seconds for one note.
+    fn humanize(&self) -> f64 {
+        let h = self.song.humanize.clamp(0.0, 0.02);
+        if h <= 0.0 {
+            return 0.0;
+        }
+        (self.rand() * 2.0 - 1.0) * h
     }
 
     /// Side-chain: a kick at `t` pulls the melodic lanes down to
@@ -4284,7 +4296,28 @@ impl AudioEngine {
         let _ = filt.q().set_value_at_time(3.0, 0.0);
         let _ = gain.gain().set_value_at_time(1.0, 0.0);
         let _ = gain.connect_with_audio_node(&filt);
-        let _ = filt.connect_with_audio_node(&ctx.destination());
+        // A safety limiter on the way out: stacked unison chords, drive and
+        // the echo / hall returns can sum well past a single voice, and
+        // this catches the peaks (well under threshold it is a wire).
+        match ctx.create_dynamics_compressor() {
+            Ok(lim) => {
+                let _ = lim.threshold().set_value_at_time(-12.0, 0.0);
+                let _ = lim.knee().set_value_at_time(4.0, 0.0);
+                let _ = lim.ratio().set_value_at_time(8.0, 0.0);
+                let _ = lim.attack().set_value_at_time(0.003, 0.0);
+                let _ = lim.release().set_value_at_time(0.15, 0.0);
+                if filt.connect_with_audio_node(&lim).is_ok()
+                    && lim.connect_with_audio_node(&ctx.destination()).is_ok()
+                {
+                    return (Some(gain), Some(filt));
+                }
+                let _ = filt.disconnect();
+                let _ = filt.connect_with_audio_node(&ctx.destination());
+            }
+            Err(_) => {
+                let _ = filt.connect_with_audio_node(&ctx.destination());
+            }
+        }
         (Some(gain), Some(filt))
     }
 

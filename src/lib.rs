@@ -2078,7 +2078,7 @@ mod wasm_entry {
             {
                 let song = self.audio.current_song();
                 let info = format!(
-                    "{} · {} {} · {:.0} BPM · SWING {:.0}% · DUCK {:.0}% · ECHO {:.1} STEPS",
+                    "{} · {} {} · {:.0} BPM · SWING {:.0}% · DUCK {:.0}% · ECHO {:.1} STEPS · SWEEP {:.0}% · HUMAN {:.0} MS",
                     song.name,
                     crate::music::note_name(song.root),
                     crate::music::scale_name(song.scale),
@@ -2086,6 +2086,8 @@ mod wasm_entry {
                     song.swing * 100.0,
                     song.sidechain.depth * 100.0,
                     song.echo.steps,
+                    song.sweep * 100.0,
+                    song.humanize * 1000.0,
                 );
                 graphics.draw_text(&info, Vec2::new(216.0, y + 26.0), 16.0, Color::GRAY);
             }

@@ -633,6 +633,10 @@ pub struct SongSpec {
     pub sidechain: Sidechain,
     /// The shared echo line the voices' `echo` sends feed.
     pub echo: Echo,
+    /// Timing HUMANIZE: every note except the kicks lands up to this many
+    /// seconds early or late (uniform; clamped to 20 ms). `0.0` = machine
+    /// tight; 3–6 ms loosens a groove without smearing it.
+    pub humanize: f64,
     /// Depth of the bus lowpass's once-per-bar sweep, `1.0` (the classic
     /// synthwave wah, closing to 420 Hz at the bar lines) … `0.0` (the bus
     /// filter stays open — for songs whose voices carry their own filter
@@ -781,6 +785,7 @@ const INSERT_COIN: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::OFF,
     echo: Echo::DOTTED,
+    humanize: 0.006,
     sweep: 1.0,
 };
 
@@ -914,6 +919,7 @@ const NEON_LOUNGE: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.25, 0.8),
     echo: Echo::DOTTED,
+    humanize: 0.005,
     sweep: 1.0,
 };
 
@@ -1051,6 +1057,7 @@ const CHROME_VEINS: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.4, 0.8),
     echo: Echo::DOTTED,
+    humanize: 0.0,
     sweep: 1.0,
 };
 
@@ -1188,6 +1195,7 @@ const DESCENT: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.5, 0.7),
     echo: Echo::DOTTED,
+    humanize: 0.0,
     sweep: 1.0,
 };
 
@@ -1324,6 +1332,7 @@ const BLOOD_RUSH: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.5, 0.6),
     echo: Echo::DOTTED,
+    humanize: 0.0,
     sweep: 1.0,
 };
 
@@ -1463,6 +1472,7 @@ const DEEP_STATIC: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.55, 0.6),
     echo: Echo::DOTTED,
+    humanize: 0.0,
     sweep: 1.0,
 };
 
@@ -1601,6 +1611,7 @@ const STATIC_PRAYER: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.2, 1.2),
     echo: Echo::DOTTED,
+    humanize: 0.0,
     sweep: 1.0,
 };
 
@@ -1746,6 +1757,7 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.5, 0.9),
     echo: Echo::DOTTED,
+    humanize: 0.0,
     sweep: 1.0,
 };
 
@@ -1994,6 +2006,7 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.55, 0.9),
     echo: Echo::new(3.0, 0.42, 2800.0),
+    humanize: 0.004,
     sweep: 0.35,
 };
 
@@ -2192,6 +2205,7 @@ const BLOOD_ENGINE: SongSpec = SongSpec {
     swing: 0.0,
     sidechain: Sidechain::new(0.45, 0.7),
     echo: Echo::new(3.0, 0.3, 2400.0),
+    humanize: 0.003,
     sweep: 0.5,
 };
 
@@ -2776,6 +2790,11 @@ mod tests {
                 song.name
             );
             assert!((0.0..=1.0).contains(&song.sweep), "{}: sweep", song.name);
+            assert!(
+                (0.0..=0.02).contains(&song.humanize),
+                "{}: humanize",
+                song.name
+            );
             for v in song.voices {
                 assert!((-1.0..=1.0).contains(&v.pan), "{}: pan", song.name);
                 assert!((0.0..=1.0).contains(&v.width), "{}: width", song.name);
