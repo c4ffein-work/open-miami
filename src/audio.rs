@@ -55,8 +55,9 @@
 use crate::music::Drum::{Clap, Crash, Hat, Kick, OpenHat, Rim, Silent, Snare, Tom};
 use crate::music::{
     cell_at, chord_at, degree_freq, drum_at, duck_level, music_keys, note_at, section_len,
-    swing_delay, vel_at, Cell as GridCell, Drum, MusicKey, Section, SongSpec, Voice, Wave, ARP,
-    BASS, DRUMS, LEAD, MAX_VEL, NUM_CHANNELS, PAD, PERC, SONGS,
+    swing_delay, vel_at, Cell as GridCell, Drum, Filter, MusicKey, Section, SongSpec, Vibrato,
+    Voice, Wave, BASS, DRUMS, KEYS, LEAD, MAX_VEL, MELODIC, NUM_CHANNELS, NUM_VOICES, PAD, PERC,
+    SONGS,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -65,7 +66,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
     AudioBuffer, AudioContext, AudioDestinationNode, BaseAudioContext, BiquadFilterNode,
     BiquadFilterType, GainNode, OfflineAudioContext, OscillatorType, OverSampleType,
-    StereoPannerNode,
+    StereoPannerNode, WaveShaperNode,
 };
 
 /// Look-ahead window (seconds) for the music scheduler: we queue notes this far
@@ -787,6 +788,25 @@ struct BakedMusic {
     pending: RefCell<Vec<RenderCallback>>,
 }
 
+/// One enveloped oscillator note for [`AudioEngine::tone_env`].
+struct Tone {
+    /// Start and end pitch (a glide when they differ).
+    f0: f64,
+    f1: f64,
+    /// Absolute start time.
+    start: f64,
+    /// Seconds to peak.
+    attack: f64,
+    /// Seconds held at peak after the attack (the tied steps).
+    hold: f64,
+    /// Seconds of exponential decay after the hold.
+    dur: f64,
+    /// Peak amplitude.
+    peak: f64,
+    wave: OscillatorType,
+    vibrato: Option<Vibrato>,
+}
+
 /// The offline render target while a pre-render is being *built*: the voice
 /// builders create their nodes in `ctx` and the voice front-end feeds `sink`
 /// (the offline destination) instead of the live bus.
@@ -854,6 +874,11 @@ pub struct AudioEngine {
     /// when the nodes couldn't be built: lanes then connect to the bus
     /// directly (mono, as before).
     music_pan: Vec<StereoPannerNode>,
+    /// One soft-clip `WaveShaperNode` per melodic lane between its panner
+    /// and the ducker, curve set from the song's [`Voice::drive`] (a `None`
+    /// curve = bypass). Empty when they couldn't be built (panners then
+    /// feed the ducker directly).
+    music_drive: Vec<WaveShaperNode>,
     /// The side-chain ducker the lane panners sum into (then the bus): its
     /// gain is automated down on every kick per the song's [`Sidechain`].
     /// `None` = the panners feed the bus directly (no pumping).
@@ -911,9 +936,13 @@ impl AudioEngine {
             (Some(c), Some(bus)) => Self::make_ducker(c, bus),
             _ => None,
         };
-        let music_pan = match (&ctx, &music_duck, &music_bus) {
-            (Some(c), Some(duck), _) => Self::make_lane_panners(c, duck),
-            (Some(c), None, Some(bus)) => Self::make_lane_panners(c, bus),
+        let lanes_into: Option<&GainNode> = music_duck.as_ref().or(music_bus.as_ref());
+        let music_drive = match (&ctx, lanes_into) {
+            (Some(c), Some(into)) => Self::make_lane_drives(c, into),
+            _ => Vec::new(),
+        };
+        let music_pan = match (&ctx, lanes_into) {
+            (Some(c), Some(into)) => Self::make_lane_panners(c, into, &music_drive),
             _ => Vec::new(),
         };
         let engine = Self {
@@ -925,6 +954,7 @@ impl AudioEngine {
             music_bus,
             music_filter,
             music_pan,
+            music_drive,
             music_duck,
             last_duck: Cell::new(f64::NEG_INFINITY),
             music_playing: false,
@@ -2789,12 +2819,39 @@ impl AudioEngine {
         }
     }
 
-    /// Position each lane's panner from the current song's voices.
+    /// Position each lane's panner and set each lane's drive curve from the
+    /// current song's voices.
     fn apply_pans(&self) {
         for (lane, panner) in self.music_pan.iter().enumerate() {
             let pan = self.song.voices.get(lane).map_or(0.0, |v| v.pan);
             panner.pan().set_value(pan.clamp(-1.0, 1.0) as f32);
         }
+        for (lane, shaper) in self.music_drive.iter().enumerate() {
+            let drive = self.song.voices.get(lane).map_or(0.0, |v| v.drive);
+            if drive > 0.0 {
+                let mut curve = Self::drive_curve(drive, 2048);
+                shaper.set_curve_opt_f32_slice(Some(curve.as_mut_slice()));
+            } else {
+                shaper.set_curve_opt_f32_slice(None);
+            }
+        }
+    }
+
+    /// The lane drive transfer curve over an input of ±1: `y = r ·
+    /// tanh(k x) / tanh(k r)` with `k = 2 + 40·drive` and `r` = 0.15 (a
+    /// loud lane peak) — peaks that reach `r` come out at `r`, everything
+    /// under it is lifted and squashed toward it. Music signals are small
+    /// (`MUSIC_GAIN`), which is why the knee is scaled to `r`, not to 1.
+    fn drive_curve(drive: f64, n: usize) -> Vec<f32> {
+        let k = 2.0 + 40.0 * drive.clamp(0.0, 1.0);
+        let r = 0.15f64;
+        let norm = r / (k * r).tanh();
+        (0..n)
+            .map(|i| {
+                let x = i as f64 / (n - 1) as f64 * 2.0 - 1.0;
+                ((k * x).tanh() * norm) as f32
+            })
+            .collect()
     }
 
     /// Select a song by index into [`SONGS`] (clamped) and start playing it.
@@ -3085,7 +3142,7 @@ impl AudioEngine {
             Some(s) => s,
             None => return,
         };
-        for lane in [BASS, LEAD, PAD, ARP] {
+        for lane in MELODIC {
             if !self.channel_audible(lane) {
                 continue;
             }
@@ -3227,7 +3284,18 @@ impl AudioEngine {
             // The pad level is per CHORD (its default triad lands each
             // partial at the historical 0.45 after the 1/√n split).
             PAD => (4.0, 0.78, 0.06),
+            KEYS => (1.2, 0.8, 0.005),
             _ => (0.7, 0.7, 0.005),
+        }
+    }
+
+    /// The lane's shape with the voice's [`Env`] override applied:
+    /// `(gate steps, level, attack seconds)`.
+    fn voice_shape(&self, lane: usize) -> (f64, f64, f64) {
+        let (gate, level, attack) = Self::lane_shape(lane);
+        match self.song.voices.get(lane).and_then(|v| v.env) {
+            Some(e) => (e.gate.max(0.05), level, e.attack.max(0.0)),
+            None => (gate, level, attack),
         }
     }
 
@@ -3246,7 +3314,7 @@ impl AudioEngine {
                 len,
                 chord,
             } => {
-                let (gate, level, attack) = Self::lane_shape(lane);
+                let (gate, level, attack) = self.voice_shape(lane);
                 let voice = s
                     .voices
                     .get(lane)
@@ -3276,7 +3344,7 @@ impl AudioEngine {
         let sd = self.step_dur();
         match key {
             MusicKey::Note { lane, len, .. } => {
-                let (gate, _, _) = Self::lane_shape(lane);
+                let (gate, _, _) = self.voice_shape(lane);
                 sd * (gate + f64::from(len.max(1) - 1)) + 0.03
             }
             // The longest layer of each kit piece + the builders' stop margin.
@@ -3297,7 +3365,7 @@ impl AudioEngine {
     fn music_key_channels(&self, key: MusicKey) -> u32 {
         match key {
             MusicKey::Note { lane, .. } => match self.song.voices.get(lane) {
-                Some(v) if v.detune > 0.0 && v.width > 0.0 => 2,
+                Some(v) if v.is_wide() => 2,
                 _ => 1,
             },
             _ => 1,
@@ -3669,21 +3737,80 @@ impl AudioEngine {
             None => return,
         };
         let wave = Self::osc_type(voice.wave);
-        if voice.detune <= 0.0 {
-            self.tone_env(&out, f, f, start, attack, hold, dur, peak, wave);
-            return;
-        }
-        let ratio = 2f64.powf(voice.detune / 1200.0);
-        let level = peak * 0.55;
-        for (f_i, side) in [(f / ratio, -1.0), (f * ratio, 1.0)] {
-            let target = if voice.width > 0.0 {
-                self.side_panner(&out, side * voice.width)
+        let n = voice.oscillators();
+        // A stack sums to about one note's loudness (0.78/√n per voice:
+        // 0.55 each for the classic pair).
+        let level = if n > 1 {
+            peak * 0.78 / (n as f64).sqrt()
+        } else {
+            peak
+        };
+        for i in 0..n {
+            // Spread position −1 … +1 across the stack (0 for a single).
+            let frac = if n > 1 {
+                -1.0 + 2.0 * i as f64 / (n - 1) as f64
+            } else {
+                0.0
+            };
+            let f_i = f * 2f64.powf(frac * voice.detune / 1200.0);
+            let target = if n > 1 && voice.width > 0.0 {
+                self.side_panner(&out, frac * voice.width)
             } else {
                 None
             };
             let dst = target.as_ref().unwrap_or(&out);
-            self.tone_env(dst, f_i, f_i, start, attack, hold, dur, level, wave);
+            let filtered = voice
+                .filter
+                .and_then(|flt| self.note_filter(dst, start, &flt));
+            let dst = filtered.as_ref().unwrap_or(dst);
+            self.tone_env(
+                dst,
+                &Tone {
+                    f0: f_i,
+                    f1: f_i,
+                    start,
+                    attack,
+                    hold,
+                    dur,
+                    peak: level,
+                    wave,
+                    vibrato: voice.vibrato,
+                },
+            );
         }
+    }
+
+    /// A per-note lowpass with its [`Filter`] envelope automated from
+    /// `start`, connected into `out`; `None` when it can't be built (the
+    /// note then plays unfiltered).
+    fn note_filter(
+        &self,
+        out: &web_sys::AudioNode,
+        start: f64,
+        flt: &Filter,
+    ) -> Option<web_sys::AudioNode> {
+        let ctx = self.bctx()?;
+        let node = ctx.create_biquad_filter().ok()?;
+        node.set_type(BiquadFilterType::Lowpass);
+        let _ = node
+            .q()
+            .set_value_at_time(flt.q.clamp(0.1, 30.0) as f32, start);
+        let lo = flt.cutoff.clamp(20.0, 18000.0) as f32;
+        let hi = flt.peak.clamp(20.0, 18000.0).max(f64::from(lo)) as f32;
+        let f = node.frequency();
+        let opened = if flt.attack > 0.0 {
+            let _ = f.set_value_at_time(lo, start);
+            let _ = f.exponential_ramp_to_value_at_time(hi, start + flt.attack);
+            start + flt.attack
+        } else {
+            let _ = f.set_value_at_time(hi, start);
+            start
+        };
+        if flt.decay > 0.0 {
+            let _ = f.exponential_ramp_to_value_at_time(lo, opened + flt.decay);
+        }
+        node.connect_with_audio_node(out).ok()?;
+        Some(AsRef::<web_sys::AudioNode>::as_ref(&node).clone())
     }
 
     /// A throwaway `StereoPannerNode` at `pan` into `out` (for the two
@@ -3722,26 +3849,28 @@ impl AudioEngine {
         attack: f64,
         wave: OscillatorType,
     ) {
-        self.tone_env(out, f0, f1, start, attack, 0.0, dur, peak, wave);
+        self.tone_env(
+            out,
+            &Tone {
+                f0,
+                f1,
+                start,
+                attack,
+                hold: 0.0,
+                dur,
+                peak,
+                wave,
+                vibrato: None,
+            },
+        );
     }
 
     /// The general enveloped oscillator: rises to `peak` over `attack`,
     /// SUSTAINS there for `hold` seconds, then decays (exponentially) to
     /// near-silence over `dur` — with `hold == 0` this is the plain pluck of
-    /// [`Self::tone_out`]. A pitch glide `f0 → f1` spans the whole note.
-    #[allow(clippy::too_many_arguments)]
-    fn tone_env(
-        &self,
-        out: &web_sys::AudioNode,
-        f0: f64,
-        f1: f64,
-        start: f64,
-        attack: f64,
-        hold: f64,
-        dur: f64,
-        peak: f64,
-        wave: OscillatorType,
-    ) {
+    /// [`Self::tone_out`]. A pitch glide `f0 → f1` spans the whole note;
+    /// a [`Vibrato`] adds an LFO on the pitch, fading in after its delay.
+    fn tone_env(&self, out: &web_sys::AudioNode, tone: &Tone) {
         let ctx = match self.bctx() {
             Some(c) => c,
             None => return,
@@ -3750,6 +3879,17 @@ impl AudioEngine {
             (Ok(o), Ok(g)) => (o, g),
             _ => return,
         };
+        let Tone {
+            f0,
+            f1,
+            start,
+            attack,
+            hold,
+            dur,
+            peak,
+            wave,
+            vibrato,
+        } = *tone;
         let total = hold + dur;
         osc.set_type(wave);
         let freq = osc.frequency();
@@ -3770,6 +3910,23 @@ impl AudioEngine {
         let sched: &web_sys::AudioScheduledSourceNode = osc.as_ref();
         let _ = sched.start_with_when(start);
         let _ = sched.stop_with_when(start + total + 0.02);
+        if let Some(v) = vibrato.filter(|v| v.depth > 0.0 && v.rate > 0.0) {
+            // LFO → depth gain → the oscillator's frequency param. Depth in
+            // cents converts to Hz around the note's pitch.
+            if let (Ok(lfo), Ok(amount)) = (ctx.create_oscillator(), ctx.create_gain()) {
+                lfo.set_type(OscillatorType::Sine);
+                let _ = lfo.frequency().set_value_at_time(v.rate as f32, start);
+                let hz = f0 * (2f64.powf(v.depth / 1200.0) - 1.0);
+                let a = amount.gain();
+                let _ = a.set_value_at_time(0.0, start);
+                let _ = a.linear_ramp_to_value_at_time(hz as f32, start + v.delay.max(0.001));
+                let _ = lfo.connect_with_audio_node(&amount);
+                let _ = amount.connect_with_audio_param(&freq);
+                let ls: &web_sys::AudioScheduledSourceNode = lfo.as_ref();
+                let _ = ls.start_with_when(start);
+                let _ = ls.stop_with_when(start + total + 0.02);
+            }
+        }
     }
 
     /// SFX noise burst — into the SFX bus.
@@ -3968,17 +4125,45 @@ impl AudioEngine {
         Some(duck)
     }
 
-    /// One `StereoPannerNode` per melodic lane, each into `bus` (the ducker,
-    /// or the music bus itself when the ducker couldn't be built). All four
-    /// or none: a partial set would silently mis-route a lane.
-    fn make_lane_panners(ctx: &AudioContext, bus: &GainNode) -> Vec<StereoPannerNode> {
-        let mut panners = Vec::with_capacity(4);
-        for _ in [BASS, LEAD, PAD, ARP] {
+    /// One soft-clip `WaveShaperNode` per melodic lane, each into `into`
+    /// (the ducker, or the music bus). Curves are set per song by
+    /// [`Self::apply_pans`]; all or none.
+    fn make_lane_drives(ctx: &AudioContext, into: &GainNode) -> Vec<WaveShaperNode> {
+        let mut shapers = Vec::with_capacity(NUM_VOICES);
+        for _ in MELODIC {
+            let w = match ctx.create_wave_shaper() {
+                Ok(w) => w,
+                Err(_) => return Vec::new(),
+            };
+            w.set_oversample(OverSampleType::N2x);
+            if w.connect_with_audio_node(into).is_err() {
+                return Vec::new();
+            }
+            shapers.push(w);
+        }
+        shapers
+    }
+
+    /// One `StereoPannerNode` per melodic lane, each into its lane's drive
+    /// shaper (or straight into `into` — the ducker, or the music bus
+    /// itself — when the shapers couldn't be built). All or none: a
+    /// partial set would silently mis-route a lane.
+    fn make_lane_panners(
+        ctx: &AudioContext,
+        into: &GainNode,
+        drives: &[WaveShaperNode],
+    ) -> Vec<StereoPannerNode> {
+        let mut panners = Vec::with_capacity(NUM_VOICES);
+        for lane in 0..NUM_VOICES {
             let p = match ctx.create_stereo_panner() {
                 Ok(p) => p,
                 Err(_) => return Vec::new(),
             };
-            if p.connect_with_audio_node(bus).is_err() {
+            let ok = match drives.get(lane) {
+                Some(d) => p.connect_with_audio_node(d).is_ok(),
+                None => p.connect_with_audio_node(into).is_ok(),
+            };
+            if !ok {
                 return Vec::new();
             }
             panners.push(p);

@@ -2174,10 +2174,11 @@ mod wasm_entry {
                 Color::from_rgba(80, 200, 240, 255), // lead
                 Color::from_rgba(150, 90, 210, 255), // pad
                 Color::from_rgba(224, 80, 170, 255), // arp
+                Color::from_rgba(90, 220, 160, 255), // keys
                 Color::from_rgba(230, 200, 60, 255), // drums
                 Color::from_rgba(240, 150, 50, 255), // perc
             ];
-            let rh = 26.0f32;
+            let rh = 22.0f32;
             let cw = gw / steps as f32;
 
             // Playhead column highlight (drawn behind the cells).

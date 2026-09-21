@@ -46,19 +46,27 @@ pub const HOLD: i32 = i32::MIN + 1;
 pub const MAX_VEL: u8 = 9;
 
 /// Number of sequenced channels (rows in the tracker view).
-pub const NUM_CHANNELS: usize = 6;
+pub const NUM_CHANNELS: usize = 7;
 /// Channel (lane) indices, `0..NUM_CHANNELS`.
 pub const BASS: usize = 0;
 pub const LEAD: usize = 1;
 pub const PAD: usize = 2;
 pub const ARP: usize = 3;
-pub const DRUMS: usize = 4;
+/// The fifth melodic lane: chord stabs, a second lead, a counter-line —
+/// whatever the four classic lanes leave no room for.
+pub const KEYS: usize = 4;
+pub const DRUMS: usize = 5;
 /// The second percussion lane: same kit as `DRUMS`, so a hat can ride over
 /// a kick, a clap can layer a snare, a crash can top a downbeat.
-pub const PERC: usize = 5;
+pub const PERC: usize = 6;
+/// The melodic lanes, in bake-priority order (densest / most exposed first).
+pub const MELODIC: [usize; 5] = [BASS, LEAD, ARP, KEYS, PAD];
+/// How many melodic lanes there are (= `SongSpec::voices.len()`).
+pub const NUM_VOICES: usize = MELODIC.len();
 
 /// Human-readable channel names, indexed 0..[`NUM_CHANNELS`].
-pub const CHANNEL_NAMES: [&str; NUM_CHANNELS] = ["BASS", "LEAD", "PAD", "ARP", "DRUMS", "PERC"];
+pub const CHANNEL_NAMES: [&str; NUM_CHANNELS] =
+    ["BASS", "LEAD", "PAD", "ARP", "KEYS", "DRUMS", "PERC"];
 
 /// Scale = semitone offsets from the root, one octave's worth. Darker modes
 /// (flat 2nd, tritone) read as more menacing — we escalate them across floors.
@@ -147,22 +155,70 @@ impl Chord {
     }
 }
 
+/// A voice's amplitude envelope, overriding the lane's built-in shape:
+/// `attack` seconds up to peak, then (after the tied steps, held at peak)
+/// an exponential decay to silence over `gate` STEPS. The lane defaults
+/// are bass 1.9 / lead 0.9 / pad 4.0 / arp 0.7 / keys 1.2 steps of tail.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Env {
+    pub attack: f64,
+    pub gate: f64,
+}
+
+/// A per-note LOWPASS filter envelope — the "wow" of a synth stab and the
+/// slow bloom of a pad both live here. The cutoff starts at `cutoff`, opens
+/// to `peak` over `attack` seconds (instantly when `attack == 0`), then
+/// falls back to `cutoff` over `decay` seconds (stays open when `decay ==
+/// 0`). `q` is the resonance (0.7 flat … 8 screaming).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Filter {
+    pub cutoff: f64,
+    pub peak: f64,
+    pub attack: f64,
+    pub decay: f64,
+    pub q: f64,
+}
+
+/// Pitch vibrato: a sine LFO at `rate` Hz, `depth` cents peak, fading in
+/// over `delay` seconds after the note starts (the singer's late vibrato).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Vibrato {
+    pub rate: f64,
+    pub depth: f64,
+    pub delay: f64,
+}
+
 /// One melodic instrument of a song: what a lane's notes are synthesized
-/// with. Cheap on purpose — a voice is baked once per pitch it plays.
+/// with. Cheap on purpose — a voice is baked once per pitch it plays. Build
+/// one with [`Voice::mono`] / [`Voice::panned`] / [`Voice::wide`] /
+/// [`Voice::stack`] and refine it with the `with_*` builders.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Voice {
     /// Oscillator shape.
     pub wave: Wave,
     /// Stereo position of the lane, `-1.0` (hard left) … `1.0` (hard right).
     pub pan: f64,
-    /// Unison detune in cents: `> 0` doubles the oscillator into a pair at
-    /// `±detune` (the fat / supersaw-ish thickness of synthwave pads and
-    /// leads); `0` = a single oscillator.
+    /// Unison detune in cents: with `unison >= 2` the oscillators spread
+    /// evenly over `±detune` (the fat / supersaw thickness of synthwave
+    /// pads and leads); `0` = every oscillator at pitch (a single one).
     pub detune: f64,
-    /// Stereo WIDTH of the unison pair, `0.0` (both at the lane's pan) …
+    /// Stereo WIDTH of the unison stack, `0.0` (all at the lane's pan) …
     /// `1.0` (spread hard left / right around it). Only with `detune > 0`;
     /// a wide voice bakes to a stereo buffer.
     pub width: f64,
+    /// Oscillators per note, `1` … `7`. Two is the classic pair; five to
+    /// seven is the supersaw.
+    pub unison: u8,
+    /// Lane-level soft-clip drive, `0.0` (clean) … `1.0` (crushed): a
+    /// tanh waveshaper on the lane's summed output (chords intermodulate
+    /// through it) that also lifts its quiet parts — density, grit, edge.
+    pub drive: f64,
+    /// Amplitude envelope override (`None` = the lane's built-in shape).
+    pub env: Option<Env>,
+    /// Per-note lowpass filter envelope (`None` = unfiltered).
+    pub filter: Option<Filter>,
+    /// Pitch vibrato (`None` = none).
+    pub vibrato: Option<Vibrato>,
 }
 
 impl Voice {
@@ -173,27 +229,101 @@ impl Voice {
             pan: 0.0,
             detune: 0.0,
             width: 0.0,
+            unison: 1,
+            drive: 0.0,
+            env: None,
+            filter: None,
+            vibrato: None,
         }
     }
 
     /// A single oscillator placed at `pan`.
     pub const fn panned(wave: Wave, pan: f64) -> Self {
         Self {
-            wave,
             pan,
-            detune: 0.0,
-            width: 0.0,
+            ..Self::mono(wave)
         }
     }
 
     /// A detuned unison pair (`detune` cents) at `pan`, spread by `width`.
     pub const fn wide(wave: Wave, pan: f64, detune: f64, width: f64) -> Self {
         Self {
-            wave,
             pan,
             detune,
             width,
+            unison: 2,
+            ..Self::mono(wave)
         }
+    }
+
+    /// A unison STACK of `unison` oscillators spread over `±detune` cents
+    /// and `±width` around `pan` — the supersaw.
+    pub const fn stack(wave: Wave, pan: f64, detune: f64, width: f64, unison: u8) -> Self {
+        Self {
+            pan,
+            detune,
+            width,
+            unison,
+            ..Self::mono(wave)
+        }
+    }
+
+    /// With an amplitude envelope override.
+    pub const fn with_env(self, attack: f64, gate: f64) -> Self {
+        Self {
+            env: Some(Env { attack, gate }),
+            ..self
+        }
+    }
+
+    /// With a per-note lowpass filter envelope (see [`Filter`]).
+    pub const fn with_filter(
+        self,
+        cutoff: f64,
+        peak: f64,
+        attack: f64,
+        decay: f64,
+        q: f64,
+    ) -> Self {
+        Self {
+            filter: Some(Filter {
+                cutoff,
+                peak,
+                attack,
+                decay,
+                q,
+            }),
+            ..self
+        }
+    }
+
+    /// With pitch vibrato (see [`Vibrato`]).
+    pub const fn with_vibrato(self, rate: f64, depth: f64, delay: f64) -> Self {
+        Self {
+            vibrato: Some(Vibrato { rate, depth, delay }),
+            ..self
+        }
+    }
+
+    /// With lane drive (see [`Voice::drive`]).
+    pub const fn with_drive(self, drive: f64) -> Self {
+        Self { drive, ..self }
+    }
+
+    /// How many oscillators a note of this voice actually runs: the stack
+    /// only exists with a detune to spread it over.
+    pub fn oscillators(&self) -> usize {
+        if self.detune > 0.0 {
+            (self.unison.clamp(1, 7)) as usize
+        } else {
+            1
+        }
+    }
+
+    /// Whether a note of this voice is a stereo image of its own (a spread
+    /// stack), as opposed to a point the lane's panner places.
+    pub fn is_wide(&self) -> bool {
+        self.oscillators() > 1 && self.width > 0.0
     }
 }
 
@@ -248,6 +378,8 @@ pub struct Section {
     pub pad: &'static [i32],
     /// Arp lane — a faster, higher counter-melody.
     pub arp: &'static [i32],
+    /// Keys lane — stabs, a second lead, a counter-line.
+    pub keys: &'static [i32],
     /// Percussion lane, one `Drum` per step.
     pub drums: &'static [Drum],
     /// Second percussion lane (same kit) — for what has to hit together.
@@ -257,6 +389,7 @@ pub struct Section {
     pub lead_vel: &'static [u8],
     pub pad_vel: &'static [u8],
     pub arp_vel: &'static [u8],
+    pub keys_vel: &'static [u8],
     pub drums_vel: &'static [u8],
     pub perc_vel: &'static [u8],
     /// Chord (voicing) lanes: one [`Chord`] per step, looping; empty = the
@@ -265,6 +398,7 @@ pub struct Section {
     pub lead_chord: &'static [Chord],
     pub pad_chord: &'static [Chord],
     pub arp_chord: &'static [Chord],
+    pub keys_chord: &'static [Chord],
 }
 
 impl Section {
@@ -275,18 +409,21 @@ impl Section {
         lead: &[],
         pad: &[],
         arp: &[],
+        keys: &[],
         drums: &[],
         perc: &[],
         bass_vel: &[],
         lead_vel: &[],
         pad_vel: &[],
         arp_vel: &[],
+        keys_vel: &[],
         drums_vel: &[],
         perc_vel: &[],
         bass_chord: &[],
         lead_chord: &[],
         pad_chord: &[],
         arp_chord: &[],
+        keys_chord: &[],
     };
 
     /// The note lane of melodic channel `lane` ([`BASS`] … [`ARP`]); empty
@@ -297,6 +434,7 @@ impl Section {
             LEAD => self.lead,
             PAD => self.pad,
             ARP => self.arp,
+            KEYS => self.keys,
             _ => &[],
         }
     }
@@ -308,6 +446,7 @@ impl Section {
             LEAD => self.lead_chord,
             PAD => self.pad_chord,
             ARP => self.arp_chord,
+            KEYS => self.keys_chord,
             _ => &[],
         }
     }
@@ -329,6 +468,7 @@ impl Section {
             LEAD => self.lead_vel,
             PAD => self.pad_vel,
             ARP => self.arp_vel,
+            KEYS => self.keys_vel,
             DRUMS => self.drums_vel,
             PERC => self.perc_vel,
             _ => &[],
@@ -405,9 +545,9 @@ pub struct SongSpec {
     pub bpm: f64,
     /// Sequencer resolution: steps per beat (`4` = sixteenth notes).
     pub steps_per_beat: u32,
-    /// The four melodic instruments, indexed by lane ([`BASS`], [`LEAD`],
-    /// [`PAD`], [`ARP`]): oscillator shape, stereo position, unison detune.
-    pub voices: [Voice; 4],
+    /// The five melodic instruments, indexed by lane ([`BASS`], [`LEAD`],
+    /// [`PAD`], [`ARP`], [`KEYS`]).
+    pub voices: [Voice; NUM_VOICES],
     /// The arrangement: an ordered list of sections played back to back, then
     /// looped as a whole. This is what makes a song long and developing.
     pub sections: &'static [Section],
@@ -525,6 +665,7 @@ const INSERT_COIN: SongSpec = SongSpec {
         Voice::panned(Wave::Sine, 0.2),             // lead
         Voice::wide(Wave::Triangle, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Sine, -0.3),            // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         INSERT_INTRO,
@@ -646,6 +787,7 @@ const NEON_LOUNGE: SongSpec = SongSpec {
         Voice::panned(Wave::Triangle, 0.2),         // lead
         Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Triangle, -0.3),        // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         NEON_INTRO,
@@ -767,6 +909,7 @@ const CHROME_VEINS: SongSpec = SongSpec {
         Voice::panned(Wave::Sawtooth, 0.2),         // lead
         Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Square, -0.3),          // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         CHROME_INTRO,
@@ -887,6 +1030,7 @@ const DESCENT: SongSpec = SongSpec {
         Voice::panned(Wave::Sawtooth, 0.2),         // lead
         Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Square, -0.3),          // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         DESCENT_INTRO,
@@ -1006,6 +1150,7 @@ const BLOOD_RUSH: SongSpec = SongSpec {
         Voice::panned(Wave::Square, 0.2),           // lead
         Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Sawtooth, -0.3),        // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         BLOOD_INTRO,
@@ -1125,6 +1270,7 @@ const DEEP_STATIC: SongSpec = SongSpec {
         Voice::panned(Wave::Sawtooth, 0.2),         // lead
         Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Square, -0.3),          // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         DEEP_INTRO,
@@ -1247,6 +1393,7 @@ const STATIC_PRAYER: SongSpec = SongSpec {
         Voice::panned(Wave::Triangle, 0.2),         // lead
         Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Triangle, -0.3),        // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         PRAYER_INTRO,
@@ -1370,6 +1517,7 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
         Voice::panned(Wave::Square, 0.2),           // lead
         Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
         Voice::panned(Wave::Square, -0.3),          // arp
+        Voice::mono(Wave::Square),                  // keys
     ],
     sections: &[
         MASK_INTRO,
@@ -1583,10 +1731,17 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
     bpm: 96.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                  // bass: a centred sub
-        Voice::wide(Wave::Square, 0.25, 6.0, 0.3),    // lead: a little right, gently doubled
-        Voice::wide(Wave::Sawtooth, 0.0, 14.0, 0.85), // pad: the wide detuned saw bed
-        Voice::panned(Wave::Triangle, -0.35),         // arp: answering from the left
+        // bass: a centred saw sub with a fast resonant pluck on every hit
+        Voice::mono(Wave::Sawtooth).with_filter(230.0, 1100.0, 0.0, 0.12, 3.0),
+        // lead: a doubled square, a little right, late vibrato, a soft wow
+        Voice::wide(Wave::Square, 0.25, 6.0, 0.3)
+            .with_vibrato(5.5, 12.0, 0.25)
+            .with_filter(1800.0, 5200.0, 0.0, 0.18, 1.6),
+        // pad: a five-saw supersaw that blooms open over a second
+        Voice::stack(Wave::Sawtooth, 0.0, 12.0, 0.85, 5).with_filter(700.0, 2600.0, 1.1, 0.0, 1.1),
+        // arp: a triangle answering from the left
+        Voice::panned(Wave::Triangle, -0.35),
+        Voice::mono(Wave::Square), // keys: unused here
     ],
     sections: &[
         SODIUM_INTRO,
@@ -1714,6 +1869,7 @@ pub fn section_len(sec: &Section) -> usize {
         .max(sec.lead.len())
         .max(sec.pad.len())
         .max(sec.arp.len())
+        .max(sec.keys.len())
         .max(sec.drums.len())
         .max(sec.perc.len())
         .max(1)
@@ -1761,8 +1917,8 @@ pub fn cell_at(sec: &Section, channel: usize, step: usize) -> Cell {
 /// playback gain); pitch AND length are (the envelope is baked in).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MusicKey {
-    /// A melodic lane ([`BASS`] … [`ARP`]) note at this scale degree, this
-    /// many steps long (1 = untied), voiced as `chord`.
+    /// A melodic lane ([`MELODIC`]) note at this scale degree, this many
+    /// steps long (1 = untied), voiced as `chord`.
     Note {
         lane: usize,
         degree: i32,
@@ -1774,10 +1930,10 @@ pub enum MusicKey {
 }
 
 /// Enumerate the exact, finite voice set `song` can ever schedule: the
-/// distinct (degree, length) pairs of each melodic lane across every
-/// section, plus the kit pieces its percussion lanes use — in bake-priority
-/// order (drums first — the densest lanes — then bass, lead, arp, pad).
-/// Typically 30–50 keys per song.
+/// distinct (degree, length, voicing) triples of each melodic lane across
+/// every section, plus the kit pieces its percussion lanes use — in
+/// bake-priority order (drums first — the densest lanes — then the melodic
+/// lanes per [`MELODIC`]). Typically 30–50 keys per song.
 pub fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
     fn add(keys: &mut Vec<MusicKey>, k: MusicKey) {
         if !keys.contains(&k) {
@@ -1795,7 +1951,7 @@ pub fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
             add(&mut keys, MusicKey::Drum(drum));
         }
     }
-    for lane in [BASS, LEAD, ARP, PAD] {
+    for lane in MELODIC {
         for sec in song.sections {
             let pattern = sec.lane(lane);
             for step in 0..pattern.len() {
@@ -1882,6 +2038,29 @@ mod tests {
             ..Section::EMPTY
         };
         assert_eq!(cell_at(&orphan, ARP, 1), Cell::Off);
+    }
+
+    #[test]
+    fn voice_builders_compose() {
+        let v = Voice::stack(Wave::Sawtooth, 0.1, 10.0, 0.5, 5)
+            .with_filter(500.0, 2000.0, 0.0, 0.2, 2.0)
+            .with_vibrato(5.0, 10.0, 0.3)
+            .with_env(0.01, 2.0)
+            .with_drive(0.4);
+        assert_eq!(v.oscillators(), 5);
+        assert!(v.is_wide());
+        assert_eq!(v.filter.map(|f| f.peak), Some(2000.0));
+        assert_eq!(v.vibrato.map(|vb| vb.rate), Some(5.0));
+        assert_eq!(v.env.map(|e| e.gate), Some(2.0));
+        assert_eq!(v.drive, 0.4);
+        assert_eq!(v.pan, 0.1);
+        // No detune = no stack, whatever the count; no width = not wide.
+        assert_eq!(Voice::stack(Wave::Sine, 0.0, 0.0, 1.0, 7).oscillators(), 1);
+        assert!(!Voice::wide(Wave::Sine, 0.0, 5.0, 0.0).is_wide());
+        assert_eq!(Voice::wide(Wave::Sine, 0.0, 5.0, 0.0).oscillators(), 2);
+        assert_eq!(Voice::mono(Wave::Sine).oscillators(), 1);
+        assert_eq!(MELODIC.len(), NUM_VOICES);
+        assert_eq!(CHANNEL_NAMES[KEYS], "KEYS");
     }
 
     #[test]
@@ -1997,9 +2176,33 @@ mod tests {
                 assert!((-1.0..=1.0).contains(&v.pan), "{}: pan", song.name);
                 assert!((0.0..=1.0).contains(&v.width), "{}: width", song.name);
                 assert!(v.detune >= 0.0, "{}: detune", song.name);
+                assert!((1..=7).contains(&v.unison), "{}: unison", song.name);
+                assert!((0.0..=1.0).contains(&v.drive), "{}: drive", song.name);
+                if let Some(e) = v.env {
+                    assert!(e.attack >= 0.0 && e.gate > 0.0, "{}: env", song.name);
+                }
+                if let Some(f) = v.filter {
+                    assert!(
+                        f.cutoff >= 20.0 && f.peak >= f.cutoff,
+                        "{}: filter",
+                        song.name
+                    );
+                    assert!(
+                        f.attack >= 0.0 && f.decay >= 0.0 && f.q > 0.0,
+                        "{}",
+                        song.name
+                    );
+                }
+                if let Some(vb) = v.vibrato {
+                    assert!(
+                        vb.rate > 0.0 && vb.depth >= 0.0 && vb.delay >= 0.0,
+                        "{}",
+                        song.name
+                    );
+                }
             }
             for sec in song.sections {
-                for lane in [BASS, LEAD, PAD, ARP] {
+                for lane in MELODIC {
                     let p = sec.lane(lane);
                     // An all-REST lane is fine (it pads the section's
                     // length); a HOLD with no note anywhere to hold is a typo.
@@ -2051,7 +2254,7 @@ mod tests {
                 assert!(!keys[..i].contains(k), "{}: duplicate {:?}", song.name, k);
             }
             for sec in song.sections {
-                for lane in [BASS, LEAD, PAD, ARP] {
+                for lane in MELODIC {
                     let p = sec.lane(lane);
                     for step in 0..p.len() {
                         if let Some(n) = note_at(p, step) {
