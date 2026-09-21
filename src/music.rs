@@ -611,6 +611,15 @@ pub struct SongSpec {
     pub echo: Echo,
 }
 
+/// A shared PERC ride for the driving songs' refrains: closed hats on the
+/// off sixteenths (between the drum lane's own even-step hats — never
+/// doubling them) and an open hat pushing into the next bar.
+const PERC_RIDE: &[Drum] = &[
+    Silent, Hat, Silent, Hat, Silent, Hat, Silent, Hat, Silent, Hat, Silent, Hat, Silent, Hat,
+    Silent, OpenHat,
+];
+const PERC_RIDE_VEL: &[u8] = &[0, 4, 0, 3, 0, 4, 0, 3, 0, 4, 0, 3, 0, 4, 0, 5];
+
 // ---------------------------------------------------------------------------
 // SONG 1 — "Insert Coin" (WAVY): ominous, dreamy title theme. A-minor, slow,
 // soft triangle/sine voices, lush pad, sparse falling arp. The calm before it.
@@ -712,11 +721,22 @@ const INSERT_COIN: SongSpec = SongSpec {
     bpm: 84.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Triangle),                     // bass
-        Voice::panned(Wave::Sine, 0.2),                  // lead
-        Voice::wide(Wave::Triangle, 0.0, 7.0, 0.7),      // pad
-        Voice::panned(Wave::Sine, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                       // keys
+        // bass: a soft triangle sub
+        Voice::mono(Wave::Triangle),
+        // lead: a sine with a slow, late vibrato, echoing into the hall
+        Voice::panned(Wave::Sine, 0.2)
+            .with_vibrato(4.5, 8.0, 0.4)
+            .with_echo(0.3)
+            .with_reverb(0.35),
+        // pad: three soft triangles blooming open over a second and a half
+        Voice::stack(Wave::Triangle, 0.0, 7.0, 0.8, 3)
+            .with_filter(600.0, 1800.0, 1.5, 0.0, 0.9)
+            .with_reverb(0.5),
+        // arp: a sine falling through dotted-eighth echoes
+        Voice::panned(Wave::Sine, -0.3)
+            .with_echo(0.4)
+            .with_reverb(0.2),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         INSERT_INTRO,
@@ -835,11 +855,20 @@ const NEON_LOUNGE: SongSpec = SongSpec {
     bpm: 108.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Triangle),                         // bass
-        Voice::panned(Wave::Triangle, 0.2),                  // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),          // pad
-        Voice::panned(Wave::Triangle, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                           // keys
+        // bass: a triangle with a soft, round pluck
+        Voice::mono(Wave::Triangle).with_filter(200.0, 700.0, 0.0, 0.15, 2.0),
+        // lead: a mellow triangle, light vibrato, a touch of echo and room
+        Voice::panned(Wave::Triangle, 0.2)
+            .with_vibrato(5.0, 10.0, 0.3)
+            .with_echo(0.3)
+            .with_reverb(0.2),
+        // pad: a warm three-saw bed opening over a second
+        Voice::stack(Wave::Sawtooth, 0.0, 8.0, 0.8, 3)
+            .with_filter(500.0, 1600.0, 0.9, 0.0, 1.0)
+            .with_reverb(0.4),
+        // arp: a triangle with dotted-eighth echoes
+        Voice::panned(Wave::Triangle, -0.3).with_echo(0.3),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         NEON_INTRO,
@@ -853,7 +882,7 @@ const NEON_LOUNGE: SongSpec = SongSpec {
     ],
     intensity: 0.55,
     swing: 0.0,
-    sidechain: Sidechain::OFF,
+    sidechain: Sidechain::new(0.25, 0.8),
     echo: Echo::DOTTED,
 };
 
@@ -926,6 +955,8 @@ const CHROME_REFRAIN: Section = Section {
         Kick, Hat, Hat, Silent, Snare, Silent, Hat, Kick, Kick, Hat, Hat, Kick, Snare, Silent, Hat,
         Snare,
     ],
+    perc: PERC_RIDE,
+    perc_vel: PERC_RIDE_VEL,
     ..Section::EMPTY
 };
 const CHROME_BRIDGE: Section = Section {
@@ -958,11 +989,22 @@ const CHROME_VEINS: SongSpec = SongSpec {
     bpm: 118.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Square),                         // bass
-        Voice::panned(Wave::Sawtooth, 0.2),                // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
-        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                         // keys
+        // bass: a square with a resonant pluck and a little grit
+        Voice::mono(Wave::Square)
+            .with_filter(260.0, 1400.0, 0.0, 0.1, 3.5)
+            .with_drive(0.25),
+        // lead: a doubled saw with a filter wow, vibrato and echo
+        Voice::wide(Wave::Sawtooth, 0.2, 8.0, 0.4)
+            .with_filter(1500.0, 5000.0, 0.0, 0.2, 2.0)
+            .with_vibrato(5.5, 10.0, 0.25)
+            .with_echo(0.3),
+        // pad: a five-saw supersaw blooming over most of a second
+        Voice::stack(Wave::Sawtooth, 0.0, 10.0, 0.85, 5)
+            .with_filter(650.0, 2200.0, 0.8, 0.0, 1.1)
+            .with_reverb(0.4),
+        // arp: a bright square with dotted-eighth echoes
+        Voice::panned(Wave::Square, -0.3).with_echo(0.35),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         CHROME_INTRO,
@@ -976,7 +1018,7 @@ const CHROME_VEINS: SongSpec = SongSpec {
     ],
     intensity: 0.72,
     swing: 0.0,
-    sidechain: Sidechain::OFF,
+    sidechain: Sidechain::new(0.4, 0.8),
     echo: Echo::DOTTED,
 };
 
@@ -1048,6 +1090,8 @@ const DESCENT_REFRAIN: Section = Section {
         Kick, Hat, Snare, Hat, Kick, Hat, Snare, Hat, Kick, Kick, Snare, Hat, Kick, Snare, Snare,
         Hat,
     ],
+    perc: PERC_RIDE,
+    perc_vel: PERC_RIDE_VEL,
     ..Section::EMPTY
 };
 const DESCENT_BRIDGE: Section = Section {
@@ -1080,11 +1124,23 @@ const DESCENT: SongSpec = SongSpec {
     bpm: 132.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Square),                         // bass
-        Voice::panned(Wave::Sawtooth, 0.2),                // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
-        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                         // keys
+        // bass: a hammering square, tight resonant pluck, driven
+        Voice::mono(Wave::Square)
+            .with_filter(220.0, 1600.0, 0.0, 0.09, 4.0)
+            .with_drive(0.35),
+        // lead: a doubled saw, fast wow, nervous vibrato, a little drive
+        Voice::wide(Wave::Sawtooth, 0.2, 9.0, 0.4)
+            .with_filter(1200.0, 5500.0, 0.0, 0.15, 2.5)
+            .with_vibrato(6.0, 14.0, 0.2)
+            .with_echo(0.3)
+            .with_drive(0.2),
+        // pad: a wide supersaw, darker, opening over ~0.7 s
+        Voice::stack(Wave::Sawtooth, 0.0, 12.0, 0.9, 5)
+            .with_filter(500.0, 2000.0, 0.7, 0.0, 1.2)
+            .with_reverb(0.45),
+        // arp: a restless saw with echoes
+        Voice::panned(Wave::Sawtooth, -0.3).with_echo(0.35),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         DESCENT_INTRO,
@@ -1098,7 +1154,7 @@ const DESCENT: SongSpec = SongSpec {
     ],
     intensity: 0.85,
     swing: 0.0,
-    sidechain: Sidechain::OFF,
+    sidechain: Sidechain::new(0.5, 0.7),
     echo: Echo::DOTTED,
 };
 
@@ -1169,6 +1225,8 @@ const BLOOD_REFRAIN: Section = Section {
         Kick, Kick, Snare, Hat, Kick, Kick, Snare, Kick, Kick, Kick, Snare, Hat, Kick, Snare,
         Snare, Snare,
     ],
+    perc: PERC_RIDE,
+    perc_vel: PERC_RIDE_VEL,
     ..Section::EMPTY
 };
 const BLOOD_BRIDGE: Section = Section {
@@ -1201,11 +1259,23 @@ const BLOOD_RUSH: SongSpec = SongSpec {
     bpm: 140.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                         // bass
-        Voice::panned(Wave::Square, 0.2),                    // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),          // pad
-        Voice::panned(Wave::Sawtooth, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                           // keys
+        // bass: a jagged saw, sharp pluck, driven hard
+        Voice::mono(Wave::Sawtooth)
+            .with_filter(240.0, 1800.0, 0.0, 0.08, 4.5)
+            .with_drive(0.45),
+        // lead: three squares wailing — wide vibrato, wow, drive, echo
+        Voice::stack(Wave::Square, 0.2, 9.0, 0.5, 3)
+            .with_filter(1400.0, 6000.0, 0.0, 0.14, 2.5)
+            .with_vibrato(6.5, 18.0, 0.15)
+            .with_echo(0.3)
+            .with_drive(0.3),
+        // pad: a supersaw bed with a quick half-second bloom
+        Voice::stack(Wave::Sawtooth, 0.0, 12.0, 0.9, 5)
+            .with_filter(550.0, 2400.0, 0.5, 0.0, 1.3)
+            .with_reverb(0.4),
+        // arp: a stabbing saw with echoes
+        Voice::panned(Wave::Sawtooth, -0.3).with_echo(0.4),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         BLOOD_INTRO,
@@ -1219,7 +1289,7 @@ const BLOOD_RUSH: SongSpec = SongSpec {
     ],
     intensity: 0.95,
     swing: 0.0,
-    sidechain: Sidechain::OFF,
+    sidechain: Sidechain::new(0.5, 0.6),
     echo: Echo::DOTTED,
 };
 
@@ -1290,6 +1360,8 @@ const DEEP_REFRAIN: Section = Section {
         Kick, Kick, Kick, Snare, Snare, Kick, Kick, Kick, Kick, Kick, Kick, Snare, Snare, Kick,
         Kick, Snare,
     ],
+    perc: PERC_RIDE,
+    perc_vel: PERC_RIDE_VEL,
     ..Section::EMPTY
 };
 const DEEP_BRIDGE: Section = Section {
@@ -1322,11 +1394,25 @@ const DEEP_STATIC: SongSpec = SongSpec {
     bpm: 144.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                       // bass
-        Voice::panned(Wave::Sawtooth, 0.2),                // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
-        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                         // keys
+        // bass: a relentless saw sub, tight and heavily driven
+        Voice::mono(Wave::Sawtooth)
+            .with_filter(180.0, 1200.0, 0.0, 0.07, 5.0)
+            .with_drive(0.55),
+        // lead: a three-saw stack with a screaming resonant wow
+        Voice::stack(Wave::Sawtooth, 0.2, 10.0, 0.5, 3)
+            .with_filter(1000.0, 5000.0, 0.0, 0.12, 3.0)
+            .with_vibrato(6.0, 16.0, 0.2)
+            .with_echo(0.25)
+            .with_drive(0.35),
+        // pad: a dark, wide supersaw pressure bed
+        Voice::stack(Wave::Sawtooth, 0.0, 14.0, 0.9, 5)
+            .with_filter(400.0, 1800.0, 0.6, 0.0, 1.4)
+            .with_reverb(0.45),
+        // arp: dissonant square stabs, a little grit, echoes
+        Voice::panned(Wave::Square, -0.3)
+            .with_echo(0.35)
+            .with_drive(0.2),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         DEEP_INTRO,
@@ -1340,7 +1426,7 @@ const DEEP_STATIC: SongSpec = SongSpec {
     ],
     intensity: 1.0,
     swing: 0.0,
-    sidechain: Sidechain::OFF,
+    sidechain: Sidechain::new(0.55, 0.6),
     echo: Echo::DOTTED,
 };
 
@@ -1446,11 +1532,22 @@ const STATIC_PRAYER: SongSpec = SongSpec {
     bpm: 92.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                         // bass
-        Voice::panned(Wave::Triangle, 0.2),                  // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),          // pad
-        Voice::panned(Wave::Triangle, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                           // keys
+        // bass: a slow, dull saw lurch
+        Voice::mono(Wave::Sawtooth).with_filter(150.0, 600.0, 0.0, 0.3, 1.5),
+        // lead: a detuned, wide triangle wail with a slow deep vibrato
+        Voice::wide(Wave::Triangle, 0.2, 10.0, 0.6)
+            .with_vibrato(4.5, 20.0, 0.5)
+            .with_echo(0.4)
+            .with_reverb(0.5),
+        // pad: a mournful supersaw drone taking two seconds to open
+        Voice::stack(Wave::Sawtooth, 0.0, 15.0, 0.9, 5)
+            .with_filter(350.0, 1200.0, 2.0, 0.0, 1.0)
+            .with_reverb(0.6),
+        // arp: sparse triangle wails drowning in echo and hall
+        Voice::panned(Wave::Triangle, -0.3)
+            .with_echo(0.45)
+            .with_reverb(0.3),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         PRAYER_INTRO,
@@ -1464,7 +1561,7 @@ const STATIC_PRAYER: SongSpec = SongSpec {
     ],
     intensity: 0.8,
     swing: 0.0,
-    sidechain: Sidechain::OFF,
+    sidechain: Sidechain::new(0.2, 1.2),
     echo: Echo::DOTTED,
 };
 
@@ -1539,6 +1636,8 @@ const MASK_REFRAIN: Section = Section {
         Kick, Silent, Kick, Silent, Snare, Silent, Kick, Silent, Kick, Silent, Kick, Kick, Snare,
         Silent, Snare, Snare,
     ],
+    perc: PERC_RIDE,
+    perc_vel: PERC_RIDE_VEL,
     ..Section::EMPTY
 };
 const MASK_BRIDGE: Section = Section {
@@ -1571,11 +1670,27 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
     bpm: 100.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                       // bass
-        Voice::panned(Wave::Square, 0.2),                  // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
-        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
-        Voice::mono(Wave::Square),                         // keys
+        // bass: a doubled saw, slow resonant bite, crushed
+        Voice::wide(Wave::Sawtooth, 0.0, 6.0, 0.3)
+            .with_filter(160.0, 900.0, 0.0, 0.2, 3.0)
+            .with_drive(0.6),
+        // lead: three high squares, huge vibrato, driven, echoing in the hall
+        Voice::stack(Wave::Square, 0.2, 12.0, 0.6, 3)
+            .with_filter(900.0, 4500.0, 0.0, 0.25, 2.5)
+            .with_vibrato(5.0, 25.0, 0.3)
+            .with_echo(0.3)
+            .with_reverb(0.3)
+            .with_drive(0.35),
+        // pad: a seven-saw wall opening over a second, gritty, deep in the hall
+        Voice::stack(Wave::Sawtooth, 0.0, 16.0, 0.9, 7)
+            .with_filter(300.0, 1500.0, 1.2, 0.0, 1.3)
+            .with_reverb(0.55)
+            .with_drive(0.2),
+        // arp: driven square stabs with echoes
+        Voice::panned(Wave::Square, -0.3)
+            .with_echo(0.4)
+            .with_drive(0.2),
+        Voice::mono(Wave::Square), // keys: unused
     ],
     sections: &[
         MASK_INTRO,
@@ -1589,7 +1704,7 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
     ],
     intensity: 1.15,
     swing: 0.0,
-    sidechain: Sidechain::OFF,
+    sidechain: Sidechain::new(0.5, 0.9),
     echo: Echo::DOTTED,
 };
 
@@ -1824,6 +1939,200 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
     echo: Echo::new(3.0, 0.42, 2800.0),
 };
 
+// ---------------------------------------------------------------------------
+// SONG 10 — "Blood Engine" (AGGRESSIVE / darksynth): the chase. E harmonic
+// minor, i–VI–iv–V in power chords, 126 bpm. A driven saw bass hammering
+// sixteenths with octave jumps, KEYS power-chord stabs with a resonant wow,
+// a three-square lead wailing over a five-saw fifths pad, octave arps in
+// dotted-eighth echoes, double-kick refrains, a tom fill into the drop.
+// ---------------------------------------------------------------------------
+
+/// The bass per bar: root / octave hammer in sixteenths, one bar per chord
+/// (E, C, A, B — the C, A and B below the root).
+const ENGINE_BASS: &[i32] = &[
+    0, 0, 7, 0, 0, 0, 7, 0, 0, 7, 0, 0, 0, 0, 7, 7, -2, -2, 5, -2, -2, -2, 5, -2, -2, 5, -2, -2,
+    -2, -2, 5, 5, -4, -4, 3, -4, -4, -4, 3, -4, -4, 3, -4, -4, -4, -4, 3, 3, -3, -3, 4, -3, -3, -3,
+    4, -3, -3, 4, -3, -3, -3, -3, 4, 4,
+];
+const ENGINE_BASS_VEL: &[u8] = &[9, 6, 7, 6, 9, 6, 7, 6, 9, 7, 6, 6, 9, 6, 8, 8];
+/// Off-beat power-chord stabs on the chord roots (E3, C3, A3, B3).
+const ENGINE_KEYS: &[i32] = &[
+    REST, REST, 7, REST, REST, 7, REST, REST, 7, REST, REST, 7, REST, REST, 7, REST, REST, REST, 5,
+    REST, REST, 5, REST, REST, 5, REST, REST, 5, REST, REST, 5, REST, REST, REST, 10, REST, REST,
+    10, REST, REST, 10, REST, REST, 10, REST, REST, 10, REST, REST, REST, 11, REST, REST, 11, REST,
+    REST, 11, REST, REST, 11, REST, REST, 11, REST,
+];
+const ENGINE_KEYS_VEL: &[u8] = &[0, 0, 9, 0, 0, 7, 0, 0, 8, 0, 0, 7, 0, 0, 9, 0];
+/// A bar of fifths per chord, struck once and held twelve steps.
+const ENGINE_PAD: &[i32] = &[
+    7, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, REST, REST, REST, REST, 5,
+    HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, REST, REST, REST, REST, 10,
+    HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, REST, REST, REST, REST, 11,
+    HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, REST, REST, REST, REST,
+];
+const ENGINE_PAD_CHORDS: &[Chord] = &[Chord::Power];
+/// Root / octave / fifth / octave arps on each chord (E4, C4, A4, B4).
+const ENGINE_ARP: &[i32] = &[
+    14, 21, 18, 21, 14, 21, 18, 21, 14, 21, 18, 21, 14, 21, 18, 21, 12, 19, 16, 19, 12, 19, 16, 19,
+    12, 19, 16, 19, 12, 19, 16, 19, 17, 24, 21, 24, 17, 24, 21, 24, 17, 24, 21, 24, 17, 24, 21, 24,
+    18, 25, 22, 25, 18, 25, 22, 25, 18, 25, 22, 25, 18, 25, 22, 25,
+];
+const ENGINE_ARP_VEL: &[u8] = &[9, 5, 7, 5];
+const ENGINE_DRUMS: &[Drum] = &[
+    Kick, Silent, Silent, Silent, Snare, Silent, Silent, Silent, Kick, Silent, Kick, Silent, Snare,
+    Silent, Silent, Silent,
+];
+const ENGINE_DRUMS_DOUBLE: &[Drum] = &[
+    Kick, Silent, Silent, Kick, Snare, Silent, Silent, Silent, Kick, Kick, Silent, Silent, Snare,
+    Silent, Silent, Kick,
+];
+/// Sixteenth hats with claps under the snares and an open hat into the bar.
+const ENGINE_PERC: &[Drum] = &[
+    Hat, Hat, Hat, Hat, Clap, Hat, Hat, Hat, Hat, Hat, Hat, Hat, Clap, Hat, OpenHat, Hat,
+];
+const ENGINE_PERC_VEL: &[u8] = &[7, 3, 5, 3, 9, 3, 5, 3, 7, 3, 5, 3, 9, 3, 7, 3];
+
+const ENGINE_INTRO: Section = Section {
+    label: "intro",
+    pad: ENGINE_PAD,
+    pad_chord: ENGINE_PAD_CHORDS,
+    arp: ENGINE_ARP,
+    arp_vel: &[7, 3, 5, 3],
+    perc: &[
+        Crash, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent,
+        Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent,
+        Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent,
+        Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent,
+        Silent, Silent, Silent, Silent, Hat, Silent, Hat, Silent, Hat, Silent, Hat, Silent, Hat,
+        Hat, Hat, Hat, Hat, Hat, Hat, Hat,
+    ],
+    perc_vel: &[
+        8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 4, 0, 5, 0, 5, 0, 5, 4, 6, 5,
+        7, 6, 8, 8,
+    ],
+    ..Section::EMPTY
+};
+const ENGINE_VERSE: Section = Section {
+    label: "verse",
+    bass: ENGINE_BASS,
+    bass_vel: ENGINE_BASS_VEL,
+    keys: ENGINE_KEYS,
+    keys_vel: ENGINE_KEYS_VEL,
+    keys_chord: &[Chord::Power],
+    pad: ENGINE_PAD,
+    pad_chord: ENGINE_PAD_CHORDS,
+    drums: ENGINE_DRUMS,
+    perc: ENGINE_PERC,
+    perc_vel: ENGINE_PERC_VEL,
+    ..Section::EMPTY
+};
+const ENGINE_REFRAIN: Section = Section {
+    label: "refrain",
+    bass: ENGINE_BASS,
+    bass_vel: ENGINE_BASS_VEL,
+    lead: &[
+        14, HOLD, HOLD, HOLD, HOLD, HOLD, 13, HOLD, 12, HOLD, HOLD, HOLD, 11, HOLD, HOLD, HOLD, 12,
+        HOLD, HOLD, HOLD, HOLD, HOLD, 11, HOLD, 9, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, 11,
+        HOLD, HOLD, HOLD, 12, HOLD, HOLD, HOLD, 13, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, 14,
+        HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, 16, HOLD, HOLD, HOLD, 13, HOLD, HOLD, HOLD,
+    ],
+    lead_vel: &[9, 9, 9, 9, 9, 9, 7, 9, 8, 9, 9, 9, 7, 9, 9, 9],
+    keys: ENGINE_KEYS,
+    keys_vel: ENGINE_KEYS_VEL,
+    keys_chord: &[Chord::Power],
+    pad: ENGINE_PAD,
+    pad_chord: ENGINE_PAD_CHORDS,
+    arp: ENGINE_ARP,
+    arp_vel: ENGINE_ARP_VEL,
+    drums: ENGINE_DRUMS_DOUBLE,
+    perc: ENGINE_PERC,
+    perc_vel: ENGINE_PERC_VEL,
+    ..Section::EMPTY
+};
+const ENGINE_BREAK: Section = Section {
+    label: "break",
+    bass: &[
+        0, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD,
+        HOLD, -2, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD,
+        HOLD, HOLD,
+    ],
+    lead: &[
+        REST, REST, REST, REST, 7, HOLD, HOLD, HOLD, 9, HOLD, HOLD, HOLD, 11, HOLD, HOLD, HOLD, 12,
+        HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, 13, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD,
+    ],
+    lead_vel: &[7],
+    pad: &[
+        7, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD,
+        HOLD, 5, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD, HOLD,
+        HOLD, HOLD,
+    ],
+    pad_chord: &[Chord::Sus2],
+    drums: &[
+        Kick, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
+        Silent, Silent, Silent, Silent, Kick, Silent, Silent, Silent, Tom, Silent, Tom, Silent,
+        Tom, Silent, Tom, Tom, Snare, Snare, Snare, Snare,
+    ],
+    drums_vel: &[
+        8, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 7, 0, 7, 0, 8, 0, 8, 8, 6, 7,
+        8, 9,
+    ],
+    perc: &[
+        Crash, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent,
+        Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent,
+        Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent,
+    ],
+    perc_vel: &[7],
+    ..Section::EMPTY
+};
+
+const BLOOD_ENGINE: SongSpec = SongSpec {
+    name: "Blood Engine",
+    root: 82.41, // E2
+    scale: HARMONIC_MINOR,
+    bpm: 126.0,
+    steps_per_beat: 4,
+    voices: [
+        // bass: a driven saw with a fast resonant snap on every sixteenth
+        Voice::mono(Wave::Sawtooth)
+            .with_filter(200.0, 1500.0, 0.0, 0.07, 4.5)
+            .with_drive(0.55),
+        // lead: three squares, wide vibrato, a resonant wow, drive, echo
+        Voice::stack(Wave::Square, 0.2, 9.0, 0.5, 3)
+            .with_filter(1300.0, 6000.0, 0.0, 0.16, 2.8)
+            .with_vibrato(6.0, 18.0, 0.2)
+            .with_echo(0.3)
+            .with_reverb(0.2)
+            .with_drive(0.35),
+        // pad: five saws in fifths, blooming over 0.6 s, back in the hall
+        Voice::stack(Wave::Sawtooth, 0.0, 14.0, 0.9, 5)
+            .with_filter(450.0, 2200.0, 0.6, 0.0, 1.3)
+            .with_reverb(0.5),
+        // arp: a square in dotted-eighth echoes, left
+        Voice::panned(Wave::Square, -0.35).with_echo(0.45),
+        // keys: short power-chord stabs — three saws, a big wow, crushed
+        Voice::stack(Wave::Sawtooth, 0.15, 10.0, 0.6, 3)
+            .with_env(0.003, 0.5)
+            .with_filter(500.0, 3500.0, 0.0, 0.15, 2.5)
+            .with_drive(0.5)
+            .with_echo(0.15),
+    ],
+    sections: &[
+        ENGINE_INTRO,
+        ENGINE_VERSE,
+        ENGINE_REFRAIN,
+        ENGINE_VERSE,
+        ENGINE_REFRAIN,
+        ENGINE_BREAK,
+        ENGINE_REFRAIN,
+        ENGINE_REFRAIN,
+    ],
+    intensity: 1.05,
+    swing: 0.0,
+    sidechain: Sidechain::new(0.45, 0.7),
+    echo: Echo::new(3.0, 0.3, 2400.0),
+};
+
 /// All songs, in ascending darkness (intro first). Index into this with
 /// `play_song`, or map a floor number through `song_for_floor`.
 pub const SONGS: &[SongSpec] = &[
@@ -1834,6 +2143,7 @@ pub const SONGS: &[SongSpec] = &[
     DESCENT,
     BLOOD_RUSH,
     DEEP_STATIC,
+    BLOOD_ENGINE,
     STATIC_PRAYER,
     MASK_OF_DREAD,
 ];
@@ -1843,11 +2153,13 @@ pub const SONGS: &[SongSpec] = &[
 pub fn song_for_floor(level: usize) -> SongSpec {
     match level {
         0..=1 => NEON_LOUNGE,
-        2..=3 => CHROME_VEINS,
-        4..=5 => DESCENT,
-        6..=7 => BLOOD_RUSH,
-        8..=9 => DEEP_STATIC,
-        10..=12 => STATIC_PRAYER,
+        2..=3 => SODIUM_LIGHTS,
+        4..=5 => CHROME_VEINS,
+        6..=7 => DESCENT,
+        8..=9 => BLOOD_RUSH,
+        10 => DEEP_STATIC,
+        11..=12 => BLOOD_ENGINE,
+        13 => STATIC_PRAYER,
         _ => MASK_OF_DREAD,
     }
 }
@@ -2362,13 +2674,14 @@ mod tests {
             }
             let count = |f: fn(&MusicKey) -> bool| keys.iter().filter(|k| f(k)).count();
             println!(
-                "{:14} {:2} voices (drums {} bass {:2} lead {:2} arp {:2} pad {:2})",
+                "{:14} {:2} voices (drums {} bass {:2} lead {:2} arp {:2} keys {:2} pad {:2})",
                 song.name,
                 keys.len(),
                 count(|k| matches!(k, MusicKey::Drum(_))),
                 count(|k| matches!(k, MusicKey::Note { lane: BASS, .. })),
                 count(|k| matches!(k, MusicKey::Note { lane: LEAD, .. })),
                 count(|k| matches!(k, MusicKey::Note { lane: ARP, .. })),
+                count(|k| matches!(k, MusicKey::Note { lane: KEYS, .. })),
                 count(|k| matches!(k, MusicKey::Note { lane: PAD, .. })),
             );
         }
