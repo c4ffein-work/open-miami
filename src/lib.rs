@@ -1,5 +1,6 @@
 // Core modules
 pub mod math;
+pub mod music;
 
 // WASM-only modules for browser integration
 #[cfg(target_arch = "wasm32")]
@@ -53,7 +54,7 @@ mod wasm_entry {
     use wasm_bindgen::JsCast;
 
     // Import game modules
-    use crate::audio::{song_for_floor, AudioEngine, SONGS};
+    use crate::audio::AudioEngine;
     use crate::camera::Camera;
     use crate::ecs::{System, World};
     use crate::ending::{self, Ending, Outro, EXTRACT_CARD_SECS};
@@ -65,6 +66,7 @@ mod wasm_entry {
         floor_def, floor_title, level_index_for_floor_id, BOSS_LEVEL, LEVEL_COUNT,
     };
     use crate::math::{Color, Vec2};
+    use crate::music::{song_for_floor, Cell as GridCell, SONGS};
     use crate::props::{
         draw_prop_ex, family_range, largest_family, prop_family, prop_layers, prop_modes, prop_px,
         settings_json, snap_size, PixelMode, PropDrawOpts, MAX_LAYERS, MAX_PX, PROP_COUNT,
@@ -2057,7 +2059,7 @@ mod wasm_entry {
             // --- song select -----------------------------------------------
             graphics.draw_text("SONGS", Vec2::new(40.0, 108.0), 16.0, coral);
             let cur_name = self.audio.current_song().name;
-            let songs = crate::audio::SONGS;
+            let songs = SONGS;
             for (i, song) in songs.iter().enumerate() {
                 let x = 40.0 + (i % 4) as f32 * 168.0;
                 let y = 118.0 + (i / 4) as f32 * 46.0;
@@ -2103,24 +2105,34 @@ mod wasm_entry {
                 // Miniature pattern: the section's cells squeezed into the card.
                 let s_len = self.audio.section_pattern_len(sec).max(1);
                 let cw_m = (mw - 6.0) / s_len as f32;
-                let rh_m = (mh - 6.0) / crate::audio::NUM_CHANNELS as f32;
-                for r in 0..crate::audio::NUM_CHANNELS {
+                let rh_m = (mh - 6.0) / crate::music::NUM_CHANNELS as f32;
+                for r in 0..crate::music::NUM_CHANNELS {
                     for s in 0..s_len {
-                        if self.audio.section_cell(sec, r, s) {
-                            graphics.draw_rectangle(
-                                Vec2::new(
-                                    mx + 3.0 + s as f32 * cw_m,
-                                    strip_top + 3.0 + r as f32 * rh_m,
-                                ),
-                                cw_m.max(1.0),
-                                rh_m.max(1.0),
-                                if is_cur {
-                                    Color::new(1.0, 0.75, 0.6, 0.95)
-                                } else {
-                                    Color::new(0.62, 0.5, 0.72, 0.9)
-                                },
-                            );
-                        }
+                        // Ties draw as a thinner continuation of the note.
+                        let (on, tie) = match self.audio.section_cell(sec, r, s) {
+                            GridCell::Off => continue,
+                            GridCell::On(_) => (true, false),
+                            GridCell::Hold => (false, true),
+                        };
+                        let h = if on {
+                            rh_m.max(1.0)
+                        } else {
+                            (rh_m * 0.5).max(1.0)
+                        };
+                        let c = if is_cur {
+                            Color::new(1.0, 0.75, 0.6, if tie { 0.6 } else { 0.95 })
+                        } else {
+                            Color::new(0.62, 0.5, 0.72, if tie { 0.55 } else { 0.9 })
+                        };
+                        graphics.draw_rectangle(
+                            Vec2::new(
+                                mx + 3.0 + s as f32 * cw_m,
+                                strip_top + 3.0 + r as f32 * rh_m + (rh_m.max(1.0) - h) * 0.5,
+                            ),
+                            cw_m.max(1.0),
+                            h,
+                            c,
+                        );
                     }
                 }
                 let border = if is_cur {
@@ -2155,8 +2167,8 @@ mod wasm_entry {
             let steps = self.audio.pattern_len().max(1);
             let cur_step = self.audio.current_step();
             let playing = self.audio.is_playing();
-            let rows = crate::audio::NUM_CHANNELS;
-            let names = crate::audio::CHANNEL_NAMES;
+            let rows = crate::music::NUM_CHANNELS;
+            let names = crate::music::CHANNEL_NAMES;
             let chan_col = [
                 Color::from_rgba(217, 119, 87, 255), // bass
                 Color::from_rgba(80, 200, 240, 255), // lead
@@ -2215,13 +2227,27 @@ mod wasm_entry {
                         Color::new(0.10, 0.09, 0.13, 1.0)
                     };
                     graphics.draw_rectangle(Vec2::new(cx + 1.0, ry + 2.0), cw - 2.0, rh - 4.0, bg);
-                    if self.audio.channel_active(r, s) {
-                        let c = if muted {
-                            Color::new(col.r * 0.4, col.g * 0.4, col.b * 0.4, 1.0)
-                        } else {
-                            col
-                        };
-                        let inset = if playing && s == cur_step { 2.0 } else { 4.0 };
+                    // A note fills the cell (brightness = velocity); a tie
+                    // continues it as a half-height bar joined to the note.
+                    let (vel, tie) = match self.audio.channel_cell(r, s) {
+                        GridCell::Off => continue,
+                        GridCell::On(v) => (v, false),
+                        GridCell::Hold => (crate::music::MAX_VEL, true),
+                    };
+                    let dim = if muted { 0.4 } else { 1.0 };
+                    let lum = dim * (0.45 + 0.55 * vel as f32 / crate::music::MAX_VEL as f32);
+                    let c = Color::new(col.r * lum, col.g * lum, col.b * lum, 1.0);
+                    let inset = if playing && s == cur_step { 2.0 } else { 4.0 };
+                    if tie {
+                        // From the previous cell's note edge to this cell's.
+                        let h = (rh - inset * 2.0) * 0.5;
+                        graphics.draw_rectangle(
+                            Vec2::new(cx - inset, ry + inset + h * 0.5),
+                            cw.max(2.0),
+                            h,
+                            c,
+                        );
+                    } else {
                         graphics.draw_rectangle(
                             Vec2::new(cx + inset, ry + inset),
                             (cw - inset * 2.0).max(2.0),

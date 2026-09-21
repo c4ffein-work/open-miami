@@ -31,19 +31,33 @@
 //! The MUSIC notes get the same treatment (the tracker's oscillator+gain
 //! construction per note was the last measured stall source, 70–113 ms):
 //! a song's pitch set is finite pattern data, so every distinct voice ×
-//! pitch it can schedule is baked at its exact frequency into a short mono
-//! buffer by the identical note builders (see [`AudioEngine::music_keys`] /
-//! `BakedMusic`), and `schedule_step` then fires one buffer source per note
+//! pitch × length it can schedule is baked at its exact frequency into a
+//! short buffer by the identical note builders (see [`crate::music::music_keys`]
+//! / `BakedMusic`), and `schedule_step` then fires one buffer source per note
 //! into the same live music bus — the per-bar lowpass sweep is untouched.
-//! The bake queue is prioritized: combat SFX first, then the current
-//! song's voices, then the rare SFX; a song switch re-enumerates and bakes
-//! in the background while unbaked notes fall back to live synthesis.
+//! Per-note VELOCITY is a playback gain (a `GainNode` only on the notes
+//! that need one), so it never multiplies the bake set. The bake queue is
+//! prioritized: combat SFX first, then the current song's voices, then the
+//! rare SFX; a song switch re-enumerates and bakes in the background while
+//! unbaked notes fall back to live synthesis.
+//!
+//! The music is STEREO: each melodic lane owns a `StereoPannerNode` into the
+//! bus at its [`Voice::pan`], and a voice with unison `detune` + `width`
+//! spreads its detuned pair around that position (baked as a two-channel
+//! buffer). The song data itself — format, theory helpers, every song —
+//! lives in [`crate::music`], host-compiled and unit-tested.
 //!
 //! Robustness first: if the `AudioContext` (or any node) fails to build we
 //! silently degrade to silence. Nothing in here ever panics or unwraps a
 //! fallible Web Audio call — every `Result` is swallowed so the game runs fine
 //! even when audio is unavailable or blocked by the browser.
 
+use crate::music::Drum::{Hat, Kick, Silent, Snare};
+use crate::music::{
+    cell_at, degree_freq, drum_at, music_keys, note_at, section_len, vel_at, Cell as GridCell,
+    Drum, MusicKey, Section, SongSpec, Voice, Wave, ARP, BASS, DRUMS, LEAD, MAX_VEL, NUM_CHANNELS,
+    PAD, SONGS,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::closure::Closure;
@@ -51,6 +65,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
     AudioBuffer, AudioContext, AudioDestinationNode, BaseAudioContext, BiquadFilterNode,
     BiquadFilterType, GainNode, OfflineAudioContext, OscillatorType, OverSampleType,
+    StereoPannerNode,
 };
 
 /// Look-ahead window (seconds) for the music scheduler: we queue notes this far
@@ -115,1095 +130,6 @@ const NOISE_SECONDS: f64 = 2.0;
 /// SFX are scheduled this far ahead of the audio clock so their sub-ms
 /// transients are never dropped for being "in the past".
 const SFX_LEAD: f64 = 0.012;
-
-/// Sentinel used inside a pattern to mean "rest" (no note this step).
-const REST: i32 = i32::MIN;
-
-/// Number of sequenced channels (rows in the tracker view).
-pub const NUM_CHANNELS: usize = 5;
-
-/// Human-readable channel names, indexed 0..[`NUM_CHANNELS`].
-pub const CHANNEL_NAMES: [&str; NUM_CHANNELS] = ["BASS", "LEAD", "PAD", "ARP", "DRUMS"];
-
-// --- data-driven song format ----------------------------------------------
-//
-// A song is *plain, `const`-able data*: a key (root frequency + scale), a tempo,
-// a set of oscillator voices, and — the new part — an ordered list of SECTIONS.
-//
-// Each [`Section`] is its own multi-bar block of five step-sequenced channels
-// (bass, lead, pad, arp, drums). A [`SongSpec`] strings sections together into a
-// real arrangement — intro / verse / refrain / bridge / variation — so a full
-// play-through develops over time and the refrain *returns* instead of a single
-// bar looping forever. Sections are just `&'static` slices of patterns, so a
-// section can appear several times in the order (that is how a refrain comes
-// back) at zero extra cost.
-//
-// Melodic patterns are written as *scale degrees* (see `degree_freq`): `0` is
-// the root, `1` the next scale note up, `7` an octave up (for a 7-note scale),
-// negative degrees drop below the root. `REST` means silence for that step.
-// This keeps a song readable and in-key no matter which root/scale it uses.
-//
-// Lanes inside a section may differ in length: a short 16-step bass simply
-// repeats under a longer 32-step lead. A section's length is its longest lane,
-// so authoring a 2-bar section only means writing one lane at 32 steps.
-//
-// The `pad` lane is special: each note blooms into a full triad (root + third +
-// fifth taken from the scale) with a slow attack, for sustained chord beds.
-
-/// Scale = semitone offsets from the root, one octave's worth. Darker modes
-/// (flat 2nd, tritone) read as more menacing — we escalate them across floors.
-type Scale = &'static [i32];
-
-/// Aeolian / natural minor — the classic neon-noir minor key.
-const MINOR: Scale = &[0, 2, 3, 5, 7, 8, 10];
-/// Dorian — minor with a raised 6th; cool, driving, a touch hopeful.
-const DORIAN: Scale = &[0, 2, 3, 5, 7, 9, 10];
-/// Harmonic minor — minor with a raised 7th; a sharp, gothic bite.
-const HARMONIC_MINOR: Scale = &[0, 2, 3, 5, 7, 8, 11];
-/// Phrygian — natural minor with a flat 2nd; tense and claustrophobic.
-const PHRYGIAN: Scale = &[0, 1, 3, 5, 7, 8, 10];
-/// Phrygian dominant — flat 2nd + major 3rd; exotic, aggressive, menacing.
-const PHRYGIAN_DOMINANT: Scale = &[0, 1, 4, 5, 7, 8, 10];
-/// Locrian — flat 2nd *and* a diminished 5th (tritone); maximally unstable.
-const LOCRIAN: Scale = &[0, 1, 3, 5, 6, 8, 10];
-
-/// One step of the drum lane. Rendered from synthesized noise/tones only.
-#[derive(Clone, Copy)]
-pub enum Drum {
-    /// No percussion this step.
-    Silent,
-    /// Pitched sine thump + a lick of low noise.
-    Kick,
-    /// Very short high-passed noise tick.
-    Hat,
-    /// Noise burst + a short body tone on the backbeat.
-    Snare,
-}
-use Drum::{Hat, Kick, Silent, Snare};
-
-/// One block of an arrangement: a self-contained, multi-bar pattern across all
-/// five channels. Songs are built by ordering these (a refrain section can be
-/// listed several times so the hook comes back). A section's playable length is
-/// the length of its longest lane; shorter lanes loop within it.
-#[derive(Clone, Copy)]
-pub struct Section {
-    /// Human-readable role (intro / verse / refrain / bridge / outro). Purely
-    /// documentation + exposed via the tracker API; the scheduler ignores it.
-    pub label: &'static str,
-    /// Bass lane, one scale-degree (or `REST`) per step.
-    pub bass: &'static [i32],
-    /// Lead/melody lane, one scale-degree (or `REST`) per step.
-    pub lead: &'static [i32],
-    /// Pad/chord lane: each note blooms into a slow triad. `REST` sustains.
-    pub pad: &'static [i32],
-    /// Arp lane — a faster, higher counter-melody.
-    pub arp: &'static [i32],
-    /// Percussion lane, one `Drum` per step.
-    pub drums: &'static [Drum],
-}
-
-/// A whole song as copyable data. Author one, drop it in `SONGS`, done.
-///
-/// The key/tempo/voices live here; the *notes* live in the ordered `sections`.
-#[derive(Clone, Copy)]
-pub struct SongSpec {
-    /// Human-readable name (shown in the `?viz` "Musics" tracker).
-    pub name: &'static str,
-    /// Root/tonic frequency in Hz (e.g. `55.0` = A1). Lower == darker/deeper.
-    pub root: f64,
-    /// The key/mode: semitone offsets from `root`.
-    pub scale: Scale,
-    /// Tempo in beats per minute.
-    pub bpm: f64,
-    /// Sequencer resolution: steps per beat (`4` = sixteenth notes).
-    pub steps_per_beat: u32,
-    /// Oscillator shape for the bass voice.
-    pub bass_wave: OscillatorType,
-    /// Oscillator shape for the lead voice.
-    pub lead_wave: OscillatorType,
-    /// Oscillator shape for the pad voice.
-    pub pad_wave: OscillatorType,
-    /// Oscillator shape for the arp voice.
-    pub arp_wave: OscillatorType,
-    /// The arrangement: an ordered list of sections played back to back, then
-    /// looped as a whole. This is what makes a song long and developing.
-    pub sections: &'static [Section],
-    /// Overall punch/loudness feel (~0.5 lounge .. ~1.2 boss).
-    pub intensity: f64,
-}
-
-// ---------------------------------------------------------------------------
-// SONG 1 — "Insert Coin" (WAVY): ominous, dreamy title theme. A-minor, slow,
-// soft triangle/sine voices, lush pad, sparse falling arp. The calm before it.
-// ---------------------------------------------------------------------------
-
-const INSERT_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, 14, REST, REST, REST, REST, REST, 12, REST, REST, REST,
-        REST, REST, REST, REST, REST, REST, 11, REST, REST, REST, REST, REST, 9, REST, REST, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, REST, REST, 7, REST, 9, REST, REST, REST, REST, REST, 11, REST, 9, REST, REST,
-        REST, REST, REST, 9, REST, 11, REST, REST, REST, REST, REST, 12, REST, 9, REST,
-    ],
-    drums: &[
-        Silent, Silent, Silent, Silent, Hat, Silent, Silent, Silent, Silent, Silent, Silent,
-        Silent, Hat, Silent, Silent, Silent,
-    ],
-};
-const INSERT_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 3, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, 14, REST, REST, REST, 12, REST, REST, REST, 11, REST, REST, REST, REST, REST,
-        REST, REST, 12, REST, REST, REST, 10, REST, REST, REST, 9, REST, REST, REST, 7, REST,
-    ],
-    pad: &[
-        7, REST, REST, REST, REST, REST, REST, REST, 10, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, REST, REST, 7, REST, 9, REST, REST, REST, REST, REST, 11, REST, 9, REST, REST,
-        REST, REST, REST, 9, REST, 11, REST, REST, REST, REST, REST, 12, REST, 9, REST,
-    ],
-    drums: &[
-        Silent, Silent, Silent, Silent, Hat, Silent, Silent, Silent, Silent, Silent, Silent,
-        Silent, Hat, Silent, Silent, Silent,
-    ],
-};
-const INSERT_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[
-        0, REST, REST, REST, 0, REST, 3, REST, 5, REST, REST, REST, 3, REST, 2, REST,
-    ],
-    lead: &[
-        7, REST, 9, REST, 11, REST, 12, REST, REST, 14, REST, 12, 11, REST, 9, REST, 7, REST, 9,
-        REST, 11, REST, 14, REST, REST, 16, REST, 14, 12, REST, 11, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 3, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        14, 16, 18, 16, 14, 16, 18, 21, 14, 16, 18, 16, 18, 16, 14, 11, 14, 16, 18, 21, 18, 16, 14,
-        16, 18, 21, 23, 21, 18, 16, 14, 12,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Silent, Silent, Silent, Hat, Silent, Kick, Silent, Hat, Silent, Snare,
-        Silent, Hat, Silent,
-    ],
-};
-const INSERT_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        5, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, REST, REST, 11, REST, REST, REST, 9, REST, 7, REST,
-        REST, REST, REST, REST, REST, REST, REST, REST, 12, REST, REST, REST, 10, REST, 9, REST,
-    ],
-    pad: &[
-        5, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        7, REST, 9, REST, 11, REST, 9, REST, 7, REST, 9, REST, 11, REST, 14, REST, 11, REST, 9,
-        REST, 7, REST, 9, REST, 11, REST, 9, REST, 7, REST, 4, REST,
-    ],
-    drums: &[
-        Silent, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Hat, Silent, Silent,
-        Silent, Silent, Silent, Silent, Silent,
-    ],
-};
-
-const INSERT_COIN: SongSpec = SongSpec {
-    name: "Insert Coin",
-    root: 55.0, // A1
-    scale: MINOR,
-    bpm: 84.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Triangle,
-    lead_wave: OscillatorType::Sine,
-    pad_wave: OscillatorType::Triangle,
-    arp_wave: OscillatorType::Sine,
-    sections: &[
-        INSERT_INTRO,
-        INSERT_VERSE,
-        INSERT_VERSE,
-        INSERT_REFRAIN,
-        INSERT_VERSE,
-        INSERT_BRIDGE,
-        INSERT_REFRAIN,
-        INSERT_REFRAIN,
-    ],
-    intensity: 0.5,
-};
-
-// ---------------------------------------------------------------------------
-// SONG 2 — "Neon Lounge" (WAVY): cool, loungey opening groove. A-minor,
-// laid-back, mellow syncopated lead over light hats — neon at dusk.
-// ---------------------------------------------------------------------------
-
-const NEON_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 3, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, 7, REST, 9, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-        REST, REST, REST, REST, 11, REST, 9, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 3, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, 14, REST, 16, REST, 14, REST, 11, REST, 14, REST, 16, REST, 18, REST, 16, REST, 14,
-        REST, 16, REST, 14, REST, 11, REST, 14, REST, 16, REST, 18, REST, 16,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Silent, Silent, Silent, Hat, Silent, Kick, Silent, Hat, Silent, Silent,
-        Silent, Hat, Silent,
-    ],
-};
-const NEON_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, REST, REST, REST, 0, REST, 4, REST, 3, REST, REST, REST, 2, REST, 2, REST,
-    ],
-    lead: &[
-        7, REST, 9, REST, REST, 11, REST, 7, REST, REST, 9, REST, 10, REST, REST, REST, 7, REST, 9,
-        REST, REST, 11, REST, 12, REST, REST, 10, REST, 9, REST, 7, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 3, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, 14, REST, 16, REST, 14, REST, 11, REST, 14, REST, 16, REST, 18, REST, 16, REST, 16,
-        REST, 18, REST, 16, REST, 14, REST, 16, REST, 18, REST, 21, REST, 18,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Silent, Silent, Silent, Hat, Silent, Kick, Silent, Hat, Silent, Silent,
-        Silent, Hat, Snare,
-    ],
-};
-const NEON_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[
-        0, REST, 0, REST, 4, REST, 4, REST, 3, REST, 3, REST, 2, REST, 5, REST,
-    ],
-    lead: &[
-        11, REST, 12, REST, 14, REST, 12, REST, 11, REST, 9, REST, 7, REST, 9, REST, 11, REST, 12,
-        REST, 14, REST, 16, REST, 14, REST, 12, REST, 11, REST, 9, REST,
-    ],
-    pad: &[
-        3, REST, REST, REST, REST, REST, REST, REST, 5, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        18, 16, 14, 16, 18, 16, 14, 11, 18, 16, 14, 16, 18, 21, 18, 16, 14, 16, 18, 21, 18, 16, 14,
-        16, 18, 21, 23, 21, 18, 16, 14, 12,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Snare, Silent, Silent, Hat, Silent, Kick, Silent, Hat, Snare, Silent,
-        Silent, Hat, Snare,
-    ],
-};
-const NEON_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        5, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, 9, REST, 7, REST, REST, REST, REST, REST, 11, REST, 9, REST, REST, REST, REST,
-        REST, 9, REST, 7, REST, REST, REST, REST, REST, 12, REST, 10, REST, 9, REST,
-    ],
-    pad: &[
-        5, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        14, REST, 16, REST, 18, REST, 16, REST, 14, REST, 16, REST, 18, REST, 21, REST, 18, REST,
-        16, REST, 14, REST, 16, REST, 14, REST, 11, REST, 9, REST, 7, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Silent, Silent, Hat, Silent, Kick, Silent, Silent, Silent,
-        Silent, Silent, Hat, Silent,
-    ],
-};
-
-const NEON_LOUNGE: SongSpec = SongSpec {
-    name: "Neon Lounge",
-    root: 55.0, // A1
-    scale: MINOR,
-    bpm: 108.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Triangle,
-    lead_wave: OscillatorType::Triangle,
-    pad_wave: OscillatorType::Sawtooth,
-    arp_wave: OscillatorType::Triangle,
-    sections: &[
-        NEON_INTRO,
-        NEON_VERSE,
-        NEON_VERSE,
-        NEON_REFRAIN,
-        NEON_VERSE,
-        NEON_BRIDGE,
-        NEON_REFRAIN,
-        NEON_REFRAIN,
-    ],
-    intensity: 0.55,
-};
-
-// ---------------------------------------------------------------------------
-// SONG 3 — "Chrome Veins" (AGGRESSIVE): chromed, forward-leaning drive. B
-// Dorian, pulsing square bass, bright square arp, warm saw pad. City blur.
-// ---------------------------------------------------------------------------
-
-const CHROME_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, 7, REST, REST, REST, 0, REST, REST, REST, 5, REST, 3, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, 7, REST, REST, REST, REST, REST, REST, REST, 9, REST,
-        REST, REST, REST, REST, REST, REST, 11, REST, REST, REST, REST, REST, REST, REST, 7, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        14, 16, 18, 16, 14, 16, 18, 21, 14, 16, 18, 16, 18, 16, 14, 11, 14, 16, 18, 16, 14, 16, 18,
-        21, 14, 16, 18, 16, 18, 16, 14, 11,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Silent, Silent, Silent, Hat, Silent, Kick, Silent, Hat, Silent, Silent,
-        Silent, Hat, Silent,
-    ],
-};
-const CHROME_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, REST, 0, REST, 7, REST, 0, REST, 0, REST, 0, REST, 5, REST, 3, REST,
-    ],
-    lead: &[
-        REST, REST, 7, REST, 9, REST, 11, REST, REST, 12, REST, 11, 9, REST, 7, REST, REST, REST,
-        7, REST, 9, REST, 12, REST, REST, 14, REST, 12, 11, REST, 9, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        14, 16, 18, 16, 14, 16, 18, 21, 14, 16, 18, 16, 18, 16, 14, 11, 14, 16, 18, 21, 18, 16, 14,
-        16, 18, 21, 23, 21, 18, 16, 14, 11,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Silent, Snare, Silent, Hat, Silent, Kick, Silent, Hat, Kick, Snare,
-        Silent, Hat, Silent,
-    ],
-};
-const CHROME_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[
-        0, REST, 0, 7, 0, REST, 0, 7, 5, REST, 5, REST, 3, REST, 3, REST,
-    ],
-    lead: &[
-        12, REST, 11, REST, 9, REST, 7, REST, 9, REST, 11, REST, 12, REST, 14, REST, 16, REST, 14,
-        REST, 12, REST, 11, REST, 9, REST, 11, REST, 12, REST, 14, REST,
-    ],
-    pad: &[
-        3, REST, REST, REST, REST, REST, REST, REST, 7, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        18, 16, 14, 16, 18, 21, 18, 16, 14, 16, 18, 21, 23, 21, 18, 16, 14, 16, 18, 21, 23, 21, 18,
-        16, 18, 21, 23, 26, 23, 21, 18, 16,
-    ],
-    drums: &[
-        Kick, Hat, Hat, Silent, Snare, Silent, Hat, Kick, Kick, Hat, Hat, Kick, Snare, Silent, Hat,
-        Snare,
-    ],
-};
-const CHROME_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        5, REST, REST, REST, 5, REST, REST, REST, 4, REST, REST, REST, 4, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, 12, REST, 11, REST, 9, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-        REST, REST, 14, REST, 12, REST, 11, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    pad: &[
-        5, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        14, REST, 16, REST, 18, REST, 16, REST, 14, REST, 16, REST, 18, REST, 21, REST, 18, REST,
-        16, REST, 14, REST, 16, REST, 18, REST, 14, REST, 11, REST, 9, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Snare, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
-        Snare, Silent, Hat, Silent,
-    ],
-};
-
-const CHROME_VEINS: SongSpec = SongSpec {
-    name: "Chrome Veins",
-    root: 61.74, // B1
-    scale: DORIAN,
-    bpm: 118.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Square,
-    lead_wave: OscillatorType::Sawtooth,
-    pad_wave: OscillatorType::Sawtooth,
-    arp_wave: OscillatorType::Square,
-    sections: &[
-        CHROME_INTRO,
-        CHROME_VERSE,
-        CHROME_VERSE,
-        CHROME_REFRAIN,
-        CHROME_VERSE,
-        CHROME_BRIDGE,
-        CHROME_REFRAIN,
-        CHROME_REFRAIN,
-    ],
-    intensity: 0.72,
-};
-
-// ---------------------------------------------------------------------------
-// SONG 4 — "Descent" (AGGRESSIVE): tense mid-descent. D Phrygian (flat 2nd),
-// driving square bass hammering the root, restless saw arp, four-on-the-floor.
-// ---------------------------------------------------------------------------
-
-const DESCENT_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, 0, REST, REST, REST, 0, REST, REST, REST, 0, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, REST, REST, 7, REST, 8, REST, 10, REST, 8, REST, REST,
-        REST, REST, REST, REST, REST, REST, REST, 7, REST, 10, REST, 8, REST, 7, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 5, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        14, REST, 15, REST, 17, REST, 15, REST, 14, REST, 17, REST, 19, REST, 17, REST, 14, REST,
-        15, REST, 17, REST, 15, REST, 14, REST, 17, REST, 19, REST, 17, REST,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Silent, Snare, Silent, Hat, Silent, Kick, Silent, Hat, Silent, Snare,
-        Silent, Hat, Silent,
-    ],
-};
-const DESCENT_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, REST, 0, REST, 0, REST, 0, REST, 0, REST, 0, REST, 5, REST, 4, REST,
-    ],
-    lead: &[
-        7, 8, 10, 8, 7, 10, 8, 10, 12, 11, 10, 8, 7, 8, 7, REST, 7, 8, 10, 8, 10, 11, 12, 10, 8,
-        10, 12, 11, 10, 8, 7, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 5, REST, REST, REST, 4, REST, REST, REST,
-    ],
-    arp: &[
-        14, REST, 15, REST, 17, REST, 15, REST, 14, REST, 17, REST, 19, REST, 17, REST, 14, REST,
-        17, REST, 19, REST, 17, REST, 15, REST, 17, REST, 15, REST, 14, REST,
-    ],
-    drums: &[
-        Kick, Hat, Hat, Hat, Snare, Hat, Hat, Hat, Kick, Hat, Kick, Hat, Snare, Hat, Hat, Hat,
-    ],
-};
-const DESCENT_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[
-        0, 0, REST, 0, 0, 0, REST, 0, 0, 0, REST, 0, 5, REST, 4, REST,
-    ],
-    lead: &[
-        12, REST, 11, REST, 10, REST, 8, REST, 7, REST, 8, REST, 10, REST, 12, REST, 14, REST, 12,
-        REST, 11, REST, 10, REST, 8, REST, 10, REST, 12, REST, 14, REST,
-    ],
-    pad: &[
-        5, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        17, REST, 19, REST, 21, REST, 19, REST, 17, REST, 19, REST, 22, REST, 19, REST, 21, REST,
-        22, REST, 24, REST, 22, REST, 19, REST, 17, REST, 15, REST, 14, REST,
-    ],
-    drums: &[
-        Kick, Hat, Snare, Hat, Kick, Hat, Snare, Hat, Kick, Kick, Snare, Hat, Kick, Snare, Snare,
-        Hat,
-    ],
-};
-const DESCENT_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        5, REST, REST, REST, 5, REST, REST, REST, 4, REST, REST, REST, 4, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, 10, REST, 8, REST, 7, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-        REST, REST, 12, REST, 10, REST, 8, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    pad: &[
-        5, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        14, REST, 15, REST, 17, REST, 15, REST, 14, REST, 15, REST, 17, REST, 19, REST, 17, REST,
-        15, REST, 14, REST, 12, REST, 10, REST, 8, REST, 7, REST, 5, REST,
-    ],
-    drums: &[
-        Kick, Silent, Hat, Silent, Snare, Silent, Hat, Silent, Kick, Silent, Hat, Silent, Snare,
-        Silent, Hat, Hat,
-    ],
-};
-
-const DESCENT: SongSpec = SongSpec {
-    name: "Descent",
-    root: 36.71, // D1
-    scale: PHRYGIAN,
-    bpm: 132.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Square,
-    lead_wave: OscillatorType::Sawtooth,
-    pad_wave: OscillatorType::Sawtooth,
-    arp_wave: OscillatorType::Square,
-    sections: &[
-        DESCENT_INTRO,
-        DESCENT_VERSE,
-        DESCENT_VERSE,
-        DESCENT_REFRAIN,
-        DESCENT_VERSE,
-        DESCENT_BRIDGE,
-        DESCENT_REFRAIN,
-        DESCENT_REFRAIN,
-    ],
-    intensity: 0.85,
-};
-
-// ---------------------------------------------------------------------------
-// SONG 5 — "Blood Rush" (AGGRESSIVE): feverish, blood-in-the-eyes rush. F#
-// harmonic minor, jagged saw bass, wailing square lead over a stabbing arp.
-// ---------------------------------------------------------------------------
-
-const BLOOD_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, 0, REST, REST, REST, 0, REST, REST, REST, 4, REST, 6, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, 11, REST, REST, REST, REST, REST, REST, REST, 12, REST,
-        REST, REST, REST, REST, REST, REST, 14, REST, REST, REST, REST, REST, REST, REST, 11, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        7, 9, 11, 9, 7, 9, 11, 14, 7, 9, 11, 9, 11, 9, 7, 4, 7, 9, 11, 9, 7, 9, 11, 14, 7, 9, 11,
-        9, 11, 9, 7, 4,
-    ],
-    drums: &[
-        Kick, Hat, Snare, Hat, Kick, Silent, Snare, Hat, Kick, Hat, Snare, Hat, Kick, Silent,
-        Snare, Hat,
-    ],
-};
-const BLOOD_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, 0, REST, 0, 6, REST, 0, 0, 0, 0, REST, 0, 4, REST, 6, REST,
-    ],
-    lead: &[
-        11, REST, 12, 11, 9, REST, 11, REST, 12, REST, 14, 12, 11, 9, 11, REST, 12, REST, 14, 12,
-        11, REST, 12, REST, 14, REST, 16, 14, 12, 11, 9, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, 6, REST, REST, REST,
-    ],
-    arp: &[
-        7, 9, 11, 9, 7, 9, 11, 14, 7, 9, 11, 9, 11, 9, 7, 4, 9, 11, 14, 11, 9, 11, 14, 16, 9, 11,
-        14, 11, 14, 11, 9, 7,
-    ],
-    drums: &[
-        Kick, Hat, Snare, Hat, Kick, Kick, Snare, Hat, Kick, Hat, Snare, Hat, Kick, Snare, Snare,
-        Hat,
-    ],
-};
-const BLOOD_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 0, 0, 4, 4, 6, 6],
-    lead: &[
-        14, REST, 16, 14, 12, REST, 14, REST, 16, REST, 18, 16, 14, 12, 11, REST, 16, REST, 18, 16,
-        14, REST, 16, REST, 18, REST, 19, 18, 16, 14, 12, REST,
-    ],
-    pad: &[
-        4, REST, REST, REST, REST, REST, REST, REST, 6, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        11, 14, 16, 14, 11, 14, 16, 19, 11, 14, 16, 14, 16, 14, 11, 7, 14, 16, 19, 16, 14, 16, 19,
-        21, 14, 16, 19, 16, 19, 16, 14, 11,
-    ],
-    drums: &[
-        Kick, Kick, Snare, Hat, Kick, Kick, Snare, Kick, Kick, Kick, Snare, Hat, Kick, Snare,
-        Snare, Snare,
-    ],
-};
-const BLOOD_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        4, REST, REST, REST, 4, REST, REST, REST, 6, REST, REST, REST, 6, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, 12, 11, 9, REST, REST, REST, REST, REST, 11, 9, 7, REST, REST, REST, REST,
-        REST, 14, 12, 11, REST, REST, REST, REST, REST, 12, 11, 9, REST, REST, REST,
-    ],
-    pad: &[
-        4, REST, REST, REST, REST, REST, REST, REST, 6, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        7, 9, 11, 9, 7, 9, 11, 14, 7, 9, 11, 9, 11, 9, 7, 4, 11, 9, 7, 9, 11, 14, 11, 9, 7, 9, 11,
-        9, 7, 4, 2, 0,
-    ],
-    drums: &[
-        Kick, Silent, Snare, Silent, Kick, Silent, Snare, Silent, Kick, Hat, Snare, Hat, Kick, Hat,
-        Snare, Hat,
-    ],
-};
-
-const BLOOD_RUSH: SongSpec = SongSpec {
-    name: "Blood Rush",
-    root: 46.25, // F#1
-    scale: HARMONIC_MINOR,
-    bpm: 140.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Sawtooth,
-    lead_wave: OscillatorType::Square,
-    pad_wave: OscillatorType::Sawtooth,
-    arp_wave: OscillatorType::Sawtooth,
-    sections: &[
-        BLOOD_INTRO,
-        BLOOD_VERSE,
-        BLOOD_VERSE,
-        BLOOD_REFRAIN,
-        BLOOD_VERSE,
-        BLOOD_BRIDGE,
-        BLOOD_REFRAIN,
-        BLOOD_REFRAIN,
-    ],
-    intensity: 0.95,
-};
-
-// ---------------------------------------------------------------------------
-// SONG 6 — "Deep Static" (AGGRESSIVE): menacing deep-floor pressure. E
-// Phrygian-dominant, relentless saw sub-bass in 16ths, dissonant stabs.
-// ---------------------------------------------------------------------------
-
-const DEEP_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, 0, REST, REST, REST, 0, REST, REST, REST, 4, REST, 1, 0,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, 7, REST, REST, REST, REST, REST, REST, REST, 8, REST,
-        REST, REST, REST, REST, REST, REST, 7, REST, REST, REST, REST, REST, REST, REST, 11, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, 1, REST, REST, REST, 0, REST, REST, REST, 4, REST, REST, REST,
-    ],
-    arp: &[
-        REST, 14, 15, REST, 14, REST, 18, REST, REST, 14, 15, REST, 18, REST, 15, 14, REST, 14, 15,
-        REST, 14, REST, 18, REST, REST, 14, 15, REST, 18, REST, 15, 14,
-    ],
-    drums: &[
-        Kick, Silent, Kick, Silent, Snare, Silent, Kick, Silent, Kick, Silent, Kick, Silent, Snare,
-        Silent, Kick, Silent,
-    ],
-};
-const DEEP_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, 0, 0, REST, 1, REST, 0, REST, 0, 0, 0, REST, 4, REST, 1, 0,
-    ],
-    lead: &[
-        REST, REST, 7, REST, 8, REST, REST, 7, REST, 11, REST, REST, 8, REST, 7, REST, REST, REST,
-        8, REST, 7, REST, REST, 8, REST, 11, REST, REST, 7, REST, 8, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, 1, REST, REST, REST, 0, REST, REST, REST, 4, REST, REST, REST,
-    ],
-    arp: &[
-        REST, 14, 15, REST, 14, REST, 18, REST, REST, 14, 15, REST, 18, REST, 15, 14, 14, REST, 15,
-        REST, 18, REST, 15, REST, 14, REST, 18, REST, 21, REST, 18, 15,
-    ],
-    drums: &[
-        Kick, Silent, Kick, Silent, Snare, Silent, Kick, Kick, Kick, Silent, Kick, Silent, Snare,
-        Hat, Kick, Snare,
-    ],
-};
-const DEEP_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 4, 4, 1, 0],
-    lead: &[
-        11, REST, 8, REST, 7, REST, 8, REST, 11, REST, 12, REST, 11, REST, 8, REST, 14, REST, 11,
-        REST, 8, REST, 7, REST, 8, REST, 11, REST, 14, REST, 11, REST,
-    ],
-    pad: &[
-        4, REST, REST, REST, 1, REST, REST, REST, 0, REST, REST, REST, 4, REST, REST, REST,
-    ],
-    arp: &[
-        14, 15, 18, 15, 14, 15, 18, 21, 14, 15, 18, 15, 18, 15, 14, 11, 18, 15, 14, 15, 18, 21, 18,
-        15, 14, 15, 18, 21, 22, 21, 18, 15,
-    ],
-    drums: &[
-        Kick, Kick, Kick, Snare, Snare, Kick, Kick, Kick, Kick, Kick, Kick, Snare, Snare, Kick,
-        Kick, Snare,
-    ],
-};
-const DEEP_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        4, REST, REST, REST, 4, REST, REST, REST, 1, REST, REST, REST, 1, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, 8, REST, 7, REST, REST, REST, REST, REST, 11, REST, 8, REST, REST, REST, REST,
-        REST, 7, REST, 8, REST, REST, REST, REST, REST, 11, REST, 12, REST, REST, REST,
-    ],
-    pad: &[
-        4, REST, REST, REST, REST, REST, REST, REST, 1, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, 14, 15, REST, 14, REST, 18, REST, REST, 14, 15, REST, 18, REST, 15, 14, 18, REST, 15,
-        REST, 14, REST, 11, REST, 8, REST, 7, REST, 4, REST, 1, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Snare, Silent, Kick, Silent, Kick, Silent, Silent, Silent,
-        Snare, Silent, Kick, Kick,
-    ],
-};
-
-const DEEP_STATIC: SongSpec = SongSpec {
-    name: "Deep Static",
-    root: 41.20, // E1
-    scale: PHRYGIAN_DOMINANT,
-    bpm: 144.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Sawtooth,
-    lead_wave: OscillatorType::Sawtooth,
-    pad_wave: OscillatorType::Sawtooth,
-    arp_wave: OscillatorType::Square,
-    sections: &[
-        DEEP_INTRO,
-        DEEP_VERSE,
-        DEEP_VERSE,
-        DEEP_REFRAIN,
-        DEEP_VERSE,
-        DEEP_BRIDGE,
-        DEEP_REFRAIN,
-        DEEP_REFRAIN,
-    ],
-    intensity: 1.0,
-};
-
-// ---------------------------------------------------------------------------
-// SONG 7 — "Static Prayer" (WAVY): a crawling, hopeless dirge. G Locrian
-// (tritone), slow lurching bass, mournful pad drone, sparse detuned wails.
-// ---------------------------------------------------------------------------
-
-const PRAYER_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 0, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-        REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-        REST, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, REST, REST, REST, REST, 14, REST, REST, REST, REST, REST, REST, REST, 15, REST,
-        REST, REST, REST, REST, REST, REST, 18, REST, REST, REST, REST, REST, REST, REST, 15, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
-        Silent, Silent, Hat, Silent,
-    ],
-};
-const PRAYER_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, REST, REST, REST, 0, REST, REST, 4, 0, REST, REST, REST, 1, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, 8, REST, REST, REST, REST, REST, 7, REST, REST, REST, REST, REST,
-        REST, REST, REST, REST, 7, REST, REST, REST, REST, REST, 8, REST, REST, REST, REST, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, 14, REST, REST, REST, 15, REST, REST, REST, 18, REST, REST, REST, 15, REST,
-        REST, REST, 15, REST, REST, REST, 18, REST, REST, REST, 14, REST, REST, REST, 11, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Silent, Silent, Snare, Silent, Kick, Silent, Silent, Silent,
-        Snare, Silent, Hat, Silent,
-    ],
-};
-const PRAYER_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[
-        0, REST, REST, REST, 4, REST, REST, REST, 1, REST, REST, REST, 4, REST, REST, REST,
-    ],
-    lead: &[
-        8, REST, REST, REST, 7, REST, REST, REST, 8, REST, REST, REST, 11, REST, REST, REST, 12,
-        REST, REST, REST, 11, REST, REST, REST, 8, REST, REST, REST, 7, REST, REST, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, 1, REST, REST, REST,
-    ],
-    arp: &[
-        REST, 14, REST, 15, REST, 18, REST, 15, REST, 14, REST, 15, REST, 18, REST, 21, REST, 18,
-        REST, 15, REST, 14, REST, 11, REST, 14, REST, 15, REST, 18, REST, 15,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Snare, Silent, Silent, Snare, Silent, Kick, Silent, Silent, Snare,
-        Silent, Silent, Hat, Snare,
-    ],
-};
-const PRAYER_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        4, REST, REST, REST, REST, REST, REST, REST, 1, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, REST, REST, REST, REST, 11, REST, REST, REST, 8, REST, 7, REST,
-        REST, REST, REST, REST, REST, REST, REST, REST, 12, REST, REST, REST, 11, REST, 8, REST,
-    ],
-    pad: &[
-        4, REST, REST, REST, REST, REST, REST, REST, 1, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, 14, REST, REST, REST, 15, REST, REST, REST, 18, REST, REST, REST, 21, REST,
-        REST, REST, 18, REST, REST, REST, 15, REST, REST, REST, 14, REST, REST, REST, 11, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Silent, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
-        Snare, Silent, Silent, Silent,
-    ],
-};
-
-const STATIC_PRAYER: SongSpec = SongSpec {
-    name: "Static Prayer",
-    root: 49.00, // G1
-    scale: LOCRIAN,
-    bpm: 92.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Sawtooth,
-    lead_wave: OscillatorType::Triangle,
-    pad_wave: OscillatorType::Sawtooth,
-    arp_wave: OscillatorType::Triangle,
-    sections: &[
-        PRAYER_INTRO,
-        PRAYER_VERSE,
-        PRAYER_VERSE,
-        PRAYER_REFRAIN,
-        PRAYER_VERSE,
-        PRAYER_BRIDGE,
-        PRAYER_REFRAIN,
-        PRAYER_REFRAIN,
-    ],
-    intensity: 0.8,
-};
-
-// ---------------------------------------------------------------------------
-// SONG 8 — "Mask of Dread" (AGGRESSIVE / heavy BOSS): dread-filled and huge. C
-// Locrian (flat 2nd + tritone), slow but crushing; sustained saw bass lurching
-// to the tritone, high square wails, enormous slow kicks. The mask watches.
-// ---------------------------------------------------------------------------
-
-const MASK_INTRO: Section = Section {
-    label: "intro",
-    bass: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 0, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        7, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-        REST, 8, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST, REST,
-        REST, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, 14, REST, 15, REST, REST, REST, REST, REST, 18, REST, 15, REST, 14, REST, REST,
-        REST, 14, REST, 15, REST, REST, REST, REST, REST, 18, REST, 15, REST, 14, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Snare, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
-        Snare, Silent, Silent, Silent,
-    ],
-};
-const MASK_VERSE: Section = Section {
-    label: "verse",
-    bass: &[
-        0, REST, REST, REST, 0, REST, 4, REST, 0, REST, REST, REST, 4, REST, 3, REST,
-    ],
-    lead: &[
-        7, REST, REST, REST, REST, REST, REST, REST, 8, REST, REST, REST, REST, REST, 11, REST,
-        REST, REST, REST, REST, 7, REST, REST, REST, 8, REST, REST, REST, REST, REST, 4, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, 14, REST, 15, REST, REST, REST, REST, REST, 18, REST, 15, REST, 14, REST, REST,
-        REST, 15, REST, 18, REST, REST, REST, REST, REST, 14, REST, 11, REST, 14, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Snare, Silent, Silent, Silent, Kick, Silent, Silent, Kick,
-        Snare, Silent, Snare, Silent,
-    ],
-};
-const MASK_REFRAIN: Section = Section {
-    label: "refrain",
-    bass: &[
-        0, REST, 0, REST, 4, REST, 4, REST, 3, REST, 3, REST, 4, REST, 1, REST,
-    ],
-    lead: &[
-        11, REST, REST, REST, 8, REST, REST, REST, 7, REST, REST, REST, 8, REST, 11, REST, 12,
-        REST, REST, REST, 11, REST, REST, REST, 8, REST, REST, REST, 7, REST, 4, REST,
-    ],
-    pad: &[
-        0, REST, REST, REST, REST, REST, REST, REST, 4, REST, REST, REST, 1, REST, REST, REST,
-    ],
-    arp: &[
-        14, REST, 15, REST, 18, REST, 15, REST, 14, REST, 15, REST, 18, REST, 21, REST, 18, REST,
-        15, REST, 14, REST, 11, REST, 14, REST, 15, REST, 18, REST, 15, REST,
-    ],
-    drums: &[
-        Kick, Silent, Kick, Silent, Snare, Silent, Kick, Silent, Kick, Silent, Kick, Kick, Snare,
-        Silent, Snare, Snare,
-    ],
-};
-const MASK_BRIDGE: Section = Section {
-    label: "bridge",
-    bass: &[
-        4, REST, REST, REST, REST, REST, REST, REST, 3, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    lead: &[
-        REST, REST, REST, REST, 8, REST, REST, REST, REST, REST, REST, REST, 7, REST, REST, REST,
-        REST, REST, REST, REST, 11, REST, REST, REST, REST, REST, REST, REST, 8, REST, REST, REST,
-    ],
-    pad: &[
-        4, REST, REST, REST, REST, REST, REST, REST, 3, REST, REST, REST, REST, REST, REST, REST,
-    ],
-    arp: &[
-        REST, REST, 14, REST, REST, REST, 15, REST, REST, REST, 18, REST, REST, REST, 21, REST,
-        REST, REST, 18, REST, REST, REST, 15, REST, REST, REST, 14, REST, REST, REST, 11, REST,
-    ],
-    drums: &[
-        Kick, Silent, Silent, Silent, Snare, Silent, Silent, Silent, Kick, Silent, Silent, Silent,
-        Snare, Silent, Silent, Silent,
-    ],
-};
-
-const MASK_OF_DREAD: SongSpec = SongSpec {
-    name: "Mask of Dread",
-    root: 32.70, // C1
-    scale: LOCRIAN,
-    bpm: 100.0,
-    steps_per_beat: 4,
-    bass_wave: OscillatorType::Sawtooth,
-    lead_wave: OscillatorType::Square,
-    pad_wave: OscillatorType::Sawtooth,
-    arp_wave: OscillatorType::Square,
-    sections: &[
-        MASK_INTRO,
-        MASK_VERSE,
-        MASK_VERSE,
-        MASK_REFRAIN,
-        MASK_VERSE,
-        MASK_BRIDGE,
-        MASK_REFRAIN,
-        MASK_REFRAIN,
-    ],
-    intensity: 1.15,
-};
-
-/// All songs, in ascending darkness (intro first). Index into this with
-/// `play_song`, or map a floor number through `song_for_floor`.
-pub const SONGS: &[SongSpec] = &[
-    INSERT_COIN,
-    NEON_LOUNGE,
-    CHROME_VEINS,
-    DESCENT,
-    BLOOD_RUSH,
-    DEEP_STATIC,
-    STATIC_PRAYER,
-    MASK_OF_DREAD,
-];
-
-/// Resolve a scale-degree (root = 0, +1 = next scale note up, +scale.len() = an
-/// octave up, negatives drop below root) to a frequency in Hz, in-key.
-fn degree_freq(root: f64, scale: Scale, degree: i32) -> f64 {
-    if scale.is_empty() {
-        return root;
-    }
-    let n = scale.len() as i32;
-    let octave = degree.div_euclid(n);
-    let idx = degree.rem_euclid(n) as usize;
-    let semitones = octave * 12 + scale[idx];
-    root * 2f64.powf(semitones as f64 / 12.0)
-}
-
-/// Read a melodic lane at `step` (patterns loop). `None` = rest / empty lane.
-fn degree_at(pattern: &[i32], step: usize) -> Option<i32> {
-    if pattern.is_empty() {
-        return None;
-    }
-    match pattern[step % pattern.len()] {
-        REST => None,
-        d => Some(d),
-    }
-}
-
-/// Read the drum lane at `step` (loops). Empty lane == `Silent`.
-fn drum_at(pattern: &[Drum], step: usize) -> Drum {
-    if pattern.is_empty() {
-        return Silent;
-    }
-    pattern[step % pattern.len()]
-}
-
-/// The playable length of a section: its longest lane (shorter lanes loop
-/// inside it). Always at least 1 so the scheduler can never divide by zero.
-fn section_len(sec: &Section) -> usize {
-    sec.bass
-        .len()
-        .max(sec.lead.len())
-        .max(sec.pad.len())
-        .max(sec.arp.len())
-        .max(sec.drums.len())
-        .max(1)
-}
-
-/// Pick a song for a given floor, escalating darkness as you descend. Kept as a
-/// plain mapping so the integrator can call it per level.
-pub fn song_for_floor(level: usize) -> SongSpec {
-    match level {
-        0..=1 => NEON_LOUNGE,
-        2..=3 => CHROME_VEINS,
-        4..=5 => DESCENT,
-        6..=7 => BLOOD_RUSH,
-        8..=9 => DEEP_STATIC,
-        10..=12 => STATIC_PRAYER,
-        _ => MASK_OF_DREAD,
-    }
-}
 
 /// Recipe for one gunshot (see the attacks section comment): a bright
 /// crack, a mid-dominant body with a plateau, a low-mid layer, a faint
@@ -1827,28 +753,14 @@ struct BakedSfx {
 /// into one buffer). The set of keys a song can ever schedule is FINITE —
 /// its lanes are static pattern data — so [`AudioEngine::music_keys`]
 /// enumerates it exactly and each key is baked at its exact pitch (no
-/// `playback_rate` transposition: the timbre is untouched).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MusicKey {
-    /// Bass lane note at this scale degree.
-    Bass(i32),
-    /// Lead lane note at this scale degree.
-    Lead(i32),
-    /// Pad lane note: the full triad (root + third + fifth) in one buffer.
-    Pad(i32),
-    /// Arp lane note at this scale degree.
-    Arp(i32),
-    /// Drum lane kick.
-    Kick,
-    /// Drum lane hat.
-    Hat,
-    /// Drum lane snare.
-    Snare,
-}
-
+/// `playback_rate` transposition: the timbre is untouched). The key type
+/// itself is [`crate::music::MusicKey`]: a (lane, degree, length) note —
+/// the pad's full triad in one buffer — or one of the three drums.
+///
 /// One music voice's bake slot: `None` until its offline render lands, then
-/// the finished mono buffer (song gain and envelope baked in — velocity/mix
-/// are per-song constants, so playback needs no gain node at all).
+/// the finished buffer (song gain and envelope baked in; mono, or stereo
+/// for a wide unison voice). Velocity is applied at play time, so a
+/// full-velocity note still needs no gain node at all.
 struct MusicSlot {
     key: MusicKey,
     buf: Option<AudioBuffer>,
@@ -1937,6 +849,11 @@ pub struct AudioEngine {
     music_bus: Option<GainNode>,
     /// Lowpass filter on the music bus, cutoff swept once per bar (synthwave).
     music_filter: Option<BiquadFilterNode>,
+    /// One stereo panner per melodic lane (bass, lead, pad, arp), each into
+    /// `music_bus`, positioned from the current song's [`Voice::pan`]. Empty
+    /// when the nodes couldn't be built: lanes then connect to the bus
+    /// directly (mono, as before).
+    music_pan: Vec<StereoPannerNode>,
     music_playing: bool,
     /// Absolute audio-clock time of the next music step to schedule.
     next_note_time: f64,
@@ -1982,6 +899,10 @@ impl AudioEngine {
             .as_ref()
             .map(Self::make_music_bus)
             .unwrap_or((None, None));
+        let music_pan = match (&ctx, &music_bus) {
+            (Some(c), Some(bus)) => Self::make_lane_panners(c, bus),
+            _ => Vec::new(),
+        };
         let engine = Self {
             ctx,
             noise,
@@ -1990,6 +911,7 @@ impl AudioEngine {
             rng: Cell::new(0x2545_F491),
             music_bus,
             music_filter,
+            music_pan,
             music_playing: false,
             next_note_time: 0.0,
             section: 0,
@@ -2013,6 +935,7 @@ impl AudioEngine {
             render_dead: Cell::new(false),
             render: RefCell::new(None),
         };
+        engine.apply_pans();
         engine.rebuild_music_bake();
         engine
     }
@@ -3150,7 +2073,9 @@ impl AudioEngine {
         let sr = live.sample_rate();
         let frames = ((sr as f64) * self.music_key_len(key)).ceil().max(1.0) as u32;
         let off = match OfflineAudioContext::new_with_number_of_channels_and_length_and_sample_rate(
-            1, frames, sr,
+            self.music_key_channels(key),
+            frames,
+            sr,
         ) {
             Ok(o) => o,
             Err(_) => return false,
@@ -3160,7 +2085,7 @@ impl AudioEngine {
             ctx: AsRef::<BaseAudioContext>::as_ref(&off).clone(),
             sink,
         });
-        self.synth_music_note(key, 0.0);
+        self.synth_music_note(key, 0.0, MAX_VEL);
         *self.render.borrow_mut() = None;
         let promise = match off.start_rendering() {
             Ok(p) => p,
@@ -3844,7 +2769,16 @@ impl AudioEngine {
         self.section = 0;
         self.step = 0;
         if changed {
+            self.apply_pans();
             self.rebuild_music_bake();
+        }
+    }
+
+    /// Position each lane's panner from the current song's voices.
+    fn apply_pans(&self) {
+        for (lane, panner) in self.music_pan.iter().enumerate() {
+            let pan = self.song.voices.get(lane).map_or(0.0, |v| v.pan);
+            panner.pan().set_value(pan.clamp(-1.0, 1.0) as f32);
         }
     }
 
@@ -3916,12 +2850,12 @@ impl AudioEngine {
         (self.step + loop_len - ahead) % loop_len
     }
 
-    /// Does `channel` have a note/hit at `step` in the current section? Drives
-    /// the tracker grid cells.
-    pub fn channel_active(&self, channel: usize, step: usize) -> bool {
+    /// The tracker cell of `channel` at `step` in the current section: a note
+    /// start (with its velocity), a tie, or nothing. Drives the grid cells.
+    pub fn channel_cell(&self, channel: usize, step: usize) -> GridCell {
         match self.section_ref() {
-            Some(sec) => Self::cell_active(sec, channel, step),
-            None => false,
+            Some(sec) => cell_at(sec, channel, step),
+            None => GridCell::Off,
         }
     }
 
@@ -3942,13 +2876,13 @@ impl AudioEngine {
         self.song.sections.get(i).map(section_len).unwrap_or(0)
     }
 
-    /// Sample any section's grid: does `channel` have a note/hit at `step` in
-    /// section `section`? A per-section previewer for drawing the miniatures
-    /// (the `section == current_section()` one mirrors [`Self::channel_active`]).
-    pub fn section_cell(&self, section: usize, channel: usize, step: usize) -> bool {
+    /// Sample any section's grid: the cell of `channel` at `step` in section
+    /// `section`. A per-section previewer for drawing the miniatures (the
+    /// `section == current_section()` one mirrors [`Self::channel_cell`]).
+    pub fn section_cell(&self, section: usize, channel: usize, step: usize) -> GridCell {
         match self.song.sections.get(section) {
-            Some(sec) => Self::cell_active(sec, channel, step),
-            None => false,
+            Some(sec) => cell_at(sec, channel, step),
+            None => GridCell::Off,
         }
     }
 
@@ -3967,24 +2901,12 @@ impl AudioEngine {
         let mut active = 0usize;
         for step in 0..steps {
             for chan in 0..NUM_CHANNELS {
-                if Self::cell_active(sec, chan, step) {
+                if cell_at(sec, chan, step) != GridCell::Off {
                     active += 1;
                 }
             }
         }
         active as f32 / (steps * NUM_CHANNELS) as f32
-    }
-
-    /// Shared cell sampler: does `channel` fire at `step` within `sec`?
-    fn cell_active(sec: &Section, channel: usize, step: usize) -> bool {
-        match channel {
-            0 => degree_at(sec.bass, step).is_some(),
-            1 => degree_at(sec.lead, step).is_some(),
-            2 => degree_at(sec.pad, step).is_some(),
-            3 => degree_at(sec.arp, step).is_some(),
-            4 => !matches!(drum_at(sec.drums, step), Silent),
-            _ => false,
-        }
     }
 
     /// Jump the playhead to `step` within the current section (wrapped). Music
@@ -4147,49 +3069,64 @@ impl AudioEngine {
             Some(s) => s,
             None => return,
         };
-        if self.channel_audible(0) {
-            if let Some(d) = degree_at(sec.bass, step) {
-                self.music_note(MusicKey::Bass(d), t);
+        for lane in [BASS, LEAD, PAD, ARP] {
+            if !self.channel_audible(lane) {
+                continue;
+            }
+            if let Some(n) = note_at(sec.lane(lane), step) {
+                let key = MusicKey::Note {
+                    lane,
+                    degree: n.degree,
+                    len: n.len,
+                };
+                self.music_note(key, t, vel_at(sec.vel_lane(lane), step));
             }
         }
-        if self.channel_audible(1) {
-            if let Some(d) = degree_at(sec.lead, step) {
-                self.music_note(MusicKey::Lead(d), t);
-            }
-        }
-        if self.channel_audible(2) {
-            if let Some(d) = degree_at(sec.pad, step) {
-                self.music_note(MusicKey::Pad(d), t);
-            }
-        }
-        if self.channel_audible(3) {
-            if let Some(d) = degree_at(sec.arp, step) {
-                self.music_note(MusicKey::Arp(d), t);
-            }
-        }
-        if self.channel_audible(4) {
+        if self.channel_audible(DRUMS) {
+            let vel = vel_at(sec.drums_vel, step);
             match drum_at(sec.drums, step) {
                 Silent => {}
-                Kick => self.music_note(MusicKey::Kick, t),
-                Hat => self.music_note(MusicKey::Hat, t),
-                Snare => self.music_note(MusicKey::Snare, t),
+                Kick => self.music_note(MusicKey::Kick, t, vel),
+                Hat => self.music_note(MusicKey::Hat, t, vel),
+                Snare => self.music_note(MusicKey::Snare, t, vel),
             }
         }
     }
 
-    /// Play one music voice at absolute time `t`: the pre-baked buffer if it
-    /// landed (a single source node into the live music bus — the per-bar
-    /// filter sweep still shapes it downstream), else the live synthesis.
-    fn music_note(&self, key: MusicKey, t: f64) {
-        if self.play_music_baked(key, t) {
+    /// Play one music voice at absolute time `t` and velocity `vel`
+    /// (`0..=MAX_VEL`; 0 = skipped): the pre-baked buffer if it landed (a
+    /// single source node into the lane's panner — the per-bar filter sweep
+    /// still shapes it downstream), else the live synthesis.
+    fn music_note(&self, key: MusicKey, t: f64, vel: u8) {
+        if vel == 0 {
             return;
         }
-        self.synth_music_note(key, t);
+        if self.play_music_baked(key, t, vel) {
+            return;
+        }
+        self.synth_music_note(key, t, vel);
+    }
+
+    /// Linear amplitude of a velocity: `MAX_VEL` = 1.0.
+    fn vel_gain(vel: u8) -> f64 {
+        f64::from(vel.min(MAX_VEL)) / f64::from(MAX_VEL)
+    }
+
+    /// The channel of the music bus a key plays into: the lane's panner for
+    /// a melodic note, the bus itself for the drums.
+    fn key_out(&self, key: MusicKey) -> Option<web_sys::AudioNode> {
+        match key {
+            MusicKey::Note { lane, .. } => self.lane_out(lane),
+            _ => self.music_out(),
+        }
     }
 
     /// Fire `key` from its pre-rendered buffer at time `t`. `false` = not
     /// baked yet (or no context): the caller falls back to live synthesis.
-    fn play_music_baked(&self, key: MusicKey, t: f64) -> bool {
+    /// A full-velocity note is one source node straight into the lane; a
+    /// softer one goes through a constant `GainNode` (the only extra node
+    /// velocity ever costs).
+    fn play_music_baked(&self, key: MusicKey, t: f64, vel: u8) -> bool {
         let ctx = match &self.ctx {
             Some(c) => c,
             None => return false,
@@ -4203,7 +3140,7 @@ impl AudioEngine {
             Some(b) => b,
             None => return false,
         };
-        let out = match self.music_out() {
+        let out = match self.key_out(key) {
             Some(o) => o,
             None => return false,
         };
@@ -4212,7 +3149,19 @@ impl AudioEngine {
             Err(_) => return false,
         };
         src.set_buffer(Some(buf));
-        if src.connect_with_audio_node(&out).is_err() {
+        let connected = if vel >= MAX_VEL {
+            src.connect_with_audio_node(&out).is_ok()
+        } else {
+            match ctx.create_gain() {
+                Ok(g) => {
+                    g.gain().set_value(Self::vel_gain(vel) as f32);
+                    src.connect_with_audio_node(&g).is_ok()
+                        && g.connect_with_audio_node(&out).is_ok()
+                }
+                Err(_) => false,
+            }
+        };
+        if !connected {
             return false;
         }
         let sched: &web_sys::AudioScheduledSourceNode = src.as_ref();
@@ -4220,34 +3169,44 @@ impl AudioEngine {
         true
     }
 
-    /// The LIVE synthesis of one music voice at absolute time `t` — also
-    /// what the offline pre-render runs (at t = 0, see
-    /// [`Self::render_music_slot`]), so a baked note is the identical
-    /// signal, just rendered ahead of time.
-    fn synth_music_note(&self, key: MusicKey, t: f64) {
+    /// Per-lane note shaping: `(gate, level, attack)` — the fraction of a
+    /// step an untied note rings (its pluck), its mix level, and its attack
+    /// (seconds). A tied note holds at peak for its extra steps and then
+    /// plays the same pluck (see [`Self::lane_tone`]).
+    fn lane_shape(lane: usize) -> (f64, f64, f64) {
+        match lane {
+            BASS => (1.9, 1.3, 0.005),
+            LEAD => (0.9, 1.0, 0.005),
+            PAD => (4.0, 0.45, 0.06),
+            _ => (0.7, 0.7, 0.005),
+        }
+    }
+
+    /// The LIVE synthesis of one music voice at absolute time `t` and
+    /// velocity `vel` — also what the offline pre-render runs (at t = 0 and
+    /// full velocity, see [`Self::render_music_slot`]), so a baked note is
+    /// the identical signal, just rendered ahead of time.
+    fn synth_music_note(&self, key: MusicKey, t: f64, vel: u8) {
         let s = &self.song;
         let step_dur = self.step_dur();
-        let gain = MUSIC_GAIN * s.intensity;
+        let gain = MUSIC_GAIN * s.intensity * Self::vel_gain(vel);
         match key {
-            MusicKey::Bass(d) => {
-                let f = degree_freq(s.root, s.scale, d);
-                self.music_tone(f, f, t, step_dur * 1.9, gain * 1.3, s.bass_wave);
-            }
-            MusicKey::Lead(d) => {
-                let f = degree_freq(s.root, s.scale, d);
-                self.music_tone(f, f, t, step_dur * 0.9, gain, s.lead_wave);
-            }
-            MusicKey::Pad(d) => {
-                // Bloom the pad note into a triad (root + third + fifth), held
-                // across several steps with a slow attack for a chord bed.
-                for interval in [0, 2, 4] {
-                    let f = degree_freq(s.root, s.scale, d + interval);
-                    self.music_pad(f, t, step_dur * 4.0, gain * 0.45, s.pad_wave);
+            MusicKey::Note { lane, degree, len } => {
+                let (gate, level, attack) = Self::lane_shape(lane);
+                let voice = s
+                    .voices
+                    .get(lane)
+                    .copied()
+                    .unwrap_or(Voice::mono(Wave::Sine));
+                let hold = step_dur * f64::from(len.max(1) - 1);
+                let dur = step_dur * gate;
+                // The pad blooms into a triad (root + third + fifth) for a
+                // chord bed; the other lanes are one pitch.
+                let intervals: &[i32] = if lane == PAD { &[0, 2, 4] } else { &[0] };
+                for &interval in intervals {
+                    let f = degree_freq(s.root, s.scale, degree + interval);
+                    self.lane_tone(lane, &voice, f, t, attack, hold, dur, gain * level);
                 }
-            }
-            MusicKey::Arp(d) => {
-                let f = degree_freq(s.root, s.scale, d);
-                self.music_tone(f, f, t, step_dur * 0.7, gain * 0.7, s.arp_wave);
             }
             MusicKey::Kick => self.drum(Kick, t, gain),
             MusicKey::Hat => self.drum(Hat, t, gain),
@@ -4257,59 +3216,31 @@ impl AudioEngine {
 
     /// Seconds of dry signal one music voice needs when baked: the note
     /// duration its live envelope uses (a function of the song's step
-    /// length — see [`Self::synth_music_note`]) plus the builders' small
-    /// stop margin.
+    /// length and the note's tied length — see [`Self::synth_music_note`])
+    /// plus the builders' small stop margin.
     fn music_key_len(&self, key: MusicKey) -> f64 {
         let sd = self.step_dur();
         match key {
-            MusicKey::Bass(_) => sd * 1.9 + 0.03,
-            MusicKey::Lead(_) => sd * 0.9 + 0.03,
-            MusicKey::Pad(_) => sd * 4.0 + 0.03,
-            MusicKey::Arp(_) => sd * 0.7 + 0.03,
+            MusicKey::Note { lane, len, .. } => {
+                let (gate, _, _) = Self::lane_shape(lane);
+                sd * (gate + f64::from(len.max(1) - 1)) + 0.03
+            }
             MusicKey::Kick => 0.21, // 0.18 s tone + stop margin (noise is 0.05)
             MusicKey::Hat => 0.06,  // 0.03 s noise tick + margin
             MusicKey::Snare => 0.16, // 0.13 s noise + margin (tone is 0.10)
         }
     }
 
-    /// Enumerate the exact, finite voice set `song` can ever schedule: the
-    /// distinct scale degrees of each melodic lane across every section,
-    /// plus the up-to-three drum voices — in bake-priority order (drums
-    /// first, then bass, lead, arp, pad). Typically 30–45 keys per song.
-    fn music_keys(song: &SongSpec) -> Vec<MusicKey> {
-        fn add(keys: &mut Vec<MusicKey>, k: MusicKey) {
-            if !keys.contains(&k) {
-                keys.push(k);
-            }
+    /// Channels a key bakes to: 2 for a note of a WIDE unison voice (its
+    /// pair is spread left / right inside the buffer), 1 otherwise.
+    fn music_key_channels(&self, key: MusicKey) -> u32 {
+        match key {
+            MusicKey::Note { lane, .. } => match self.song.voices.get(lane) {
+                Some(v) if v.detune > 0.0 && v.width > 0.0 => 2,
+                _ => 1,
+            },
+            _ => 1,
         }
-        let mut keys = Vec::new();
-        for sec in song.sections {
-            for &d in sec.drums {
-                match d {
-                    Silent => {}
-                    Kick => add(&mut keys, MusicKey::Kick),
-                    Hat => add(&mut keys, MusicKey::Hat),
-                    Snare => add(&mut keys, MusicKey::Snare),
-                }
-            }
-        }
-        type Lane = (fn(&Section) -> &'static [i32], fn(i32) -> MusicKey);
-        const LANES: [Lane; 4] = [
-            (|s| s.bass, MusicKey::Bass),
-            (|s| s.lead, MusicKey::Lead),
-            (|s| s.arp, MusicKey::Arp),
-            (|s| s.pad, MusicKey::Pad),
-        ];
-        for (pattern, mk) in LANES {
-            for sec in song.sections {
-                for &d in pattern(sec) {
-                    if d != REST {
-                        add(&mut keys, mk(d));
-                    }
-                }
-            }
-        }
-        keys
     }
 
     /// Reset the music bake queue for the current song: enumerate its voice
@@ -4318,7 +3249,7 @@ impl AudioEngine {
     fn rebuild_music_bake(&self) {
         let m = &self.baked_music;
         m.gen.set(m.gen.get().wrapping_add(1));
-        *m.slots.borrow_mut() = Self::music_keys(&self.song)
+        *m.slots.borrow_mut() = music_keys(&self.song)
             .into_iter()
             .map(|key| MusicSlot { key, buf: None })
             .collect();
@@ -4400,6 +3331,18 @@ impl AudioEngine {
             self.destination()
                 .map(|d| AsRef::<web_sys::AudioNode>::as_ref(&d).clone())
         }
+    }
+
+    /// The node melodic lane `lane`'s notes connect to: its panner (into the
+    /// bus) when the panners exist, else [`Self::music_out`] — which also
+    /// covers the offline sink during a pre-render.
+    fn lane_out(&self, lane: usize) -> Option<web_sys::AudioNode> {
+        if self.render.borrow().is_none() {
+            if let Some(p) = self.music_pan.get(lane) {
+                return Some(AsRef::<web_sys::AudioNode>::as_ref(p).clone());
+            }
+        }
+        self.music_out()
     }
 
     /// Start time for a freshly-triggered SFX: a hair after "now" so that the
@@ -4569,10 +3512,65 @@ impl AudioEngine {
         }
     }
 
-    /// Music pad tone — slow attack, long release, into the filtered bus.
-    fn music_pad(&self, f: f64, start: f64, dur: f64, peak: f64, wave: OscillatorType) {
-        if let Some(out) = self.music_out() {
-            self.tone_out(&out, f, f, start, dur, peak, 0.06, wave);
+    /// One melodic-lane note through its [`Voice`]: a single oscillator, or
+    /// — with unison `detune` — a pair at `±detune` cents, each at 0.55 of
+    /// the level and, with `width`, panned to `∓width` around the lane (the
+    /// lane's own panner then places the whole image). Envelope: `attack`
+    /// to peak, held `hold` seconds (the tied steps), then the lane's
+    /// `dur`-long pluck. Live: into the lane's panner; baking: into the
+    /// offline sink (mono, or the stereo pair).
+    #[allow(clippy::too_many_arguments)]
+    fn lane_tone(
+        &self,
+        lane: usize,
+        voice: &Voice,
+        f: f64,
+        start: f64,
+        attack: f64,
+        hold: f64,
+        dur: f64,
+        peak: f64,
+    ) {
+        let out = match self.lane_out(lane) {
+            Some(o) => o,
+            None => return,
+        };
+        let wave = Self::osc_type(voice.wave);
+        if voice.detune <= 0.0 {
+            self.tone_env(&out, f, f, start, attack, hold, dur, peak, wave);
+            return;
+        }
+        let ratio = 2f64.powf(voice.detune / 1200.0);
+        let level = peak * 0.55;
+        for (f_i, side) in [(f / ratio, -1.0), (f * ratio, 1.0)] {
+            let target = if voice.width > 0.0 {
+                self.side_panner(&out, side * voice.width)
+            } else {
+                None
+            };
+            let dst = target.as_ref().unwrap_or(&out);
+            self.tone_env(dst, f_i, f_i, start, attack, hold, dur, level, wave);
+        }
+    }
+
+    /// A throwaway `StereoPannerNode` at `pan` into `out` (for the two
+    /// sides of a wide unison pair); `None` when it can't be built — the
+    /// caller then plays that side straight into `out`.
+    fn side_panner(&self, out: &web_sys::AudioNode, pan: f64) -> Option<web_sys::AudioNode> {
+        let ctx = self.bctx()?;
+        let p = ctx.create_stereo_panner().ok()?;
+        p.pan().set_value(pan.clamp(-1.0, 1.0) as f32);
+        p.connect_with_audio_node(out).ok()?;
+        Some(AsRef::<web_sys::AudioNode>::as_ref(&p).clone())
+    }
+
+    /// Map a song's [`Wave`] to the Web Audio oscillator type.
+    fn osc_type(wave: Wave) -> OscillatorType {
+        match wave {
+            Wave::Sine => OscillatorType::Sine,
+            Wave::Triangle => OscillatorType::Triangle,
+            Wave::Square => OscillatorType::Square,
+            Wave::Sawtooth => OscillatorType::Sawtooth,
         }
     }
 
@@ -4591,6 +3589,26 @@ impl AudioEngine {
         attack: f64,
         wave: OscillatorType,
     ) {
+        self.tone_env(out, f0, f1, start, attack, 0.0, dur, peak, wave);
+    }
+
+    /// The general enveloped oscillator: rises to `peak` over `attack`,
+    /// SUSTAINS there for `hold` seconds, then decays (exponentially) to
+    /// near-silence over `dur` — with `hold == 0` this is the plain pluck of
+    /// [`Self::tone_out`]. A pitch glide `f0 → f1` spans the whole note.
+    #[allow(clippy::too_many_arguments)]
+    fn tone_env(
+        &self,
+        out: &web_sys::AudioNode,
+        f0: f64,
+        f1: f64,
+        start: f64,
+        attack: f64,
+        hold: f64,
+        dur: f64,
+        peak: f64,
+        wave: OscillatorType,
+    ) {
         let ctx = match self.bctx() {
             Some(c) => c,
             None => return,
@@ -4599,21 +3617,26 @@ impl AudioEngine {
             (Ok(o), Ok(g)) => (o, g),
             _ => return,
         };
+        let total = hold + dur;
         osc.set_type(wave);
         let freq = osc.frequency();
         let _ = freq.set_value_at_time(f0 as f32, start);
         if (f1 - f0).abs() > 0.01 {
-            let _ = freq.exponential_ramp_to_value_at_time(f1.max(1.0) as f32, start + dur);
+            let _ = freq.exponential_ramp_to_value_at_time(f1.max(1.0) as f32, start + total);
         }
         let g = gain.gain();
+        let peak = peak.max(0.0002) as f32;
         let _ = g.set_value_at_time(0.0001, start);
-        let _ = g.exponential_ramp_to_value_at_time(peak.max(0.0002) as f32, start + attack);
-        let _ = g.exponential_ramp_to_value_at_time(0.0001, start + dur);
+        let _ = g.exponential_ramp_to_value_at_time(peak, start + attack);
+        if hold > 0.0 {
+            let _ = g.set_value_at_time(peak, start + attack + hold);
+        }
+        let _ = g.exponential_ramp_to_value_at_time(0.0001, start + total);
         let _ = osc.connect_with_audio_node(&gain);
         let _ = gain.connect_with_audio_node(out);
         let sched: &web_sys::AudioScheduledSourceNode = osc.as_ref();
         let _ = sched.start_with_when(start);
-        let _ = sched.stop_with_when(start + dur + 0.02);
+        let _ = sched.stop_with_when(start + total + 0.02);
     }
 
     /// SFX noise burst — into the SFX bus.
@@ -4801,6 +3824,23 @@ impl AudioEngine {
         let _ = gain.connect_with_audio_node(&filt);
         let _ = filt.connect_with_audio_node(&ctx.destination());
         (Some(gain), Some(filt))
+    }
+
+    /// One `StereoPannerNode` per melodic lane, each into the music bus.
+    /// All four or none: a partial set would silently mis-route a lane.
+    fn make_lane_panners(ctx: &AudioContext, bus: &GainNode) -> Vec<StereoPannerNode> {
+        let mut panners = Vec::with_capacity(4);
+        for _ in [BASS, LEAD, PAD, ARP] {
+            let p = match ctx.create_stereo_panner() {
+                Ok(p) => p,
+                Err(_) => return Vec::new(),
+            };
+            if p.connect_with_audio_node(bus).is_err() {
+                return Vec::new();
+            }
+            panners.push(p);
+        }
+        panners
     }
 
     /// Build ~0.5s of white noise into an `AudioBuffer` we can reuse forever.
@@ -5079,67 +4119,6 @@ impl Default for AudioEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every note any song can ever schedule must map to an enumerated
-    /// [`MusicKey`], and the per-song voice set must stay small enough that
-    /// baking each exact pitch (no `playback_rate` transposition) is cheap.
-    /// Run with `--nocapture` to see the per-song counts.
-    #[test]
-    fn music_voice_sets_are_small_and_complete() {
-        for song in SONGS {
-            let keys = AudioEngine::music_keys(song);
-            assert!(!keys.is_empty(), "{}: empty voice set", song.name);
-            assert!(
-                keys.len() <= 64,
-                "{}: {} voices — too many to bake each exact pitch",
-                song.name,
-                keys.len()
-            );
-            // No duplicates (the queue bakes each key exactly once).
-            for (i, k) in keys.iter().enumerate() {
-                assert!(!keys[..i].contains(k), "{}: duplicate {:?}", song.name, k);
-            }
-            // Completeness: every schedulable note has a key.
-            for sec in song.sections {
-                for &d in sec.bass {
-                    assert!(d == REST || keys.contains(&MusicKey::Bass(d)));
-                }
-                for &d in sec.lead {
-                    assert!(d == REST || keys.contains(&MusicKey::Lead(d)));
-                }
-                for &d in sec.pad {
-                    assert!(d == REST || keys.contains(&MusicKey::Pad(d)));
-                }
-                for &d in sec.arp {
-                    assert!(d == REST || keys.contains(&MusicKey::Arp(d)));
-                }
-                for &dr in sec.drums {
-                    let key = match dr {
-                        Silent => continue,
-                        Kick => MusicKey::Kick,
-                        Hat => MusicKey::Hat,
-                        Snare => MusicKey::Snare,
-                    };
-                    assert!(keys.contains(&key));
-                }
-            }
-            let drums = keys
-                .iter()
-                .filter(|k| matches!(k, MusicKey::Kick | MusicKey::Hat | MusicKey::Snare))
-                .count();
-            let count = |f: fn(&MusicKey) -> bool| keys.iter().filter(|k| f(k)).count();
-            println!(
-                "{:14} {:2} voices (drums {} bass {:2} lead {:2} arp {:2} pad {:2})",
-                song.name,
-                keys.len(),
-                drums,
-                count(|k| matches!(k, MusicKey::Bass(_))),
-                count(|k| matches!(k, MusicKey::Lead(_))),
-                count(|k| matches!(k, MusicKey::Arp(_))),
-                count(|k| matches!(k, MusicKey::Pad(_))),
-            );
-        }
-    }
 
     /// The bake-priority split must keep every attack and hit kind in the
     /// combat prefix that renders before the music voices.
