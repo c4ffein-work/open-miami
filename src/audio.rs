@@ -908,6 +908,8 @@ pub struct AudioEngine {
     /// `AudioContext` is suspended — music and SFX alike — and the autoplay
     /// unlock refuses to resume it. `Cell` because `play_*` take `&self`.
     enabled: Cell<bool>,
+    /// The SETTINGS music level (a trim on `music_bus`), `0.0` … `1.0`.
+    music_level: Cell<f64>,
     /// Pre-rendered white noise, reused (via cheap buffer-source nodes) for
     /// every percussive/whoosh sound.
     noise: Option<AudioBuffer>,
@@ -1009,6 +1011,7 @@ impl AudioEngine {
             noise,
             sfx,
             enabled: Cell::new(true),
+            music_level: Cell::new(1.0),
             rng: Cell::new(0x2545_F491),
             music_bus,
             music_filter,
@@ -1074,6 +1077,21 @@ impl AudioEngine {
     /// Whether sound is currently enabled (the SETTINGS checkbox state).
     pub fn is_enabled(&self) -> bool {
         self.enabled.get()
+    }
+
+    /// The SETTINGS music level, `0.0` … `1.0`: a trim on the music bus
+    /// (the SFX are untouched). `Cell` for the same reason as `enabled`.
+    pub fn set_music_level(&self, level: f64) {
+        let level = level.clamp(0.0, 1.0);
+        self.music_level.set(level);
+        if let Some(bus) = &self.music_bus {
+            bus.gain().set_value(level as f32);
+        }
+    }
+
+    /// The current SETTINGS music level.
+    pub fn music_level(&self) -> f64 {
+        self.music_level.get()
     }
 
     /// How many offline pre-renders may run concurrently (see `update`).
