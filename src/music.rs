@@ -219,6 +219,10 @@ pub struct Voice {
     pub filter: Option<Filter>,
     /// Pitch vibrato (`None` = none).
     pub vibrato: Option<Vibrato>,
+    /// Send level into the song's [`Echo`], `0.0` (dry) … `1.0`.
+    pub echo: f64,
+    /// Send level into the music hall reverb, `0.0` (dry) … `1.0`.
+    pub reverb: f64,
 }
 
 impl Voice {
@@ -234,6 +238,8 @@ impl Voice {
             env: None,
             filter: None,
             vibrato: None,
+            echo: 0.0,
+            reverb: 0.0,
         }
     }
 
@@ -308,6 +314,16 @@ impl Voice {
     /// With lane drive (see [`Voice::drive`]).
     pub const fn with_drive(self, drive: f64) -> Self {
         Self { drive, ..self }
+    }
+
+    /// With a send into the song's echo (see [`Echo`]).
+    pub const fn with_echo(self, echo: f64) -> Self {
+        Self { echo, ..self }
+    }
+
+    /// With a send into the hall reverb.
+    pub const fn with_reverb(self, reverb: f64) -> Self {
+        Self { reverb, ..self }
     }
 
     /// How many oscillators a note of this voice actually runs: the stack
@@ -530,6 +546,39 @@ pub fn swing_delay(swing: f64, step: usize, step_dur: f64) -> f64 {
     }
 }
 
+/// The song's tempo-synced ECHO: one shared stereo delay line the lanes send
+/// into ([`Voice::echo`]), its repeats fed back through a darkening
+/// lowpass. Dotted-eighth repeats (`steps: 3.0` at four steps a beat) are
+/// the synthwave lead / arp echo; a beat (`4.0`) the dub throw.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Echo {
+    /// Delay time in STEPS (fractional allowed; clamped to 2 s).
+    pub steps: f64,
+    /// Repeat feedback, `0.0` (one repeat) … `0.9` (long trails).
+    pub feedback: f64,
+    /// Lowpass on the repeats, Hz (each repeat darker than the last).
+    pub tone: f64,
+}
+
+impl Echo {
+    /// Dotted-eighth repeats, three of them or so, slightly dark. Inert
+    /// until a voice sends into it.
+    pub const DOTTED: Echo = Echo {
+        steps: 3.0,
+        feedback: 0.35,
+        tone: 3200.0,
+    };
+
+    /// A custom echo.
+    pub const fn new(steps: f64, feedback: f64, tone: f64) -> Self {
+        Self {
+            steps,
+            feedback,
+            tone,
+        }
+    }
+}
+
 /// A whole song as copyable data. Author one, drop it in `SONGS`, done.
 ///
 /// The key/tempo/voices live here; the *notes* live in the ordered `sections`.
@@ -558,6 +607,8 @@ pub struct SongSpec {
     pub swing: f64,
     /// The kick-driven ducker on the melodic lanes ([`Sidechain::OFF`] = none).
     pub sidechain: Sidechain,
+    /// The shared echo line the voices' `echo` sends feed.
+    pub echo: Echo,
 }
 
 // ---------------------------------------------------------------------------
@@ -661,11 +712,11 @@ const INSERT_COIN: SongSpec = SongSpec {
     bpm: 84.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Triangle),                // bass
-        Voice::panned(Wave::Sine, 0.2),             // lead
-        Voice::wide(Wave::Triangle, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Sine, -0.3),            // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Triangle),                     // bass
+        Voice::panned(Wave::Sine, 0.2),                  // lead
+        Voice::wide(Wave::Triangle, 0.0, 7.0, 0.7),      // pad
+        Voice::panned(Wave::Sine, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                       // keys
     ],
     sections: &[
         INSERT_INTRO,
@@ -680,6 +731,7 @@ const INSERT_COIN: SongSpec = SongSpec {
     intensity: 0.5,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -783,11 +835,11 @@ const NEON_LOUNGE: SongSpec = SongSpec {
     bpm: 108.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Triangle),                // bass
-        Voice::panned(Wave::Triangle, 0.2),         // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Triangle, -0.3),        // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Triangle),                         // bass
+        Voice::panned(Wave::Triangle, 0.2),                  // lead
+        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),          // pad
+        Voice::panned(Wave::Triangle, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                           // keys
     ],
     sections: &[
         NEON_INTRO,
@@ -802,6 +854,7 @@ const NEON_LOUNGE: SongSpec = SongSpec {
     intensity: 0.55,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -905,11 +958,11 @@ const CHROME_VEINS: SongSpec = SongSpec {
     bpm: 118.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Square),                  // bass
-        Voice::panned(Wave::Sawtooth, 0.2),         // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Square, -0.3),          // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Square),                         // bass
+        Voice::panned(Wave::Sawtooth, 0.2),                // lead
+        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
+        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                         // keys
     ],
     sections: &[
         CHROME_INTRO,
@@ -924,6 +977,7 @@ const CHROME_VEINS: SongSpec = SongSpec {
     intensity: 0.72,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -1026,11 +1080,11 @@ const DESCENT: SongSpec = SongSpec {
     bpm: 132.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Square),                  // bass
-        Voice::panned(Wave::Sawtooth, 0.2),         // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Square, -0.3),          // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Square),                         // bass
+        Voice::panned(Wave::Sawtooth, 0.2),                // lead
+        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
+        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                         // keys
     ],
     sections: &[
         DESCENT_INTRO,
@@ -1045,6 +1099,7 @@ const DESCENT: SongSpec = SongSpec {
     intensity: 0.85,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -1146,11 +1201,11 @@ const BLOOD_RUSH: SongSpec = SongSpec {
     bpm: 140.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                // bass
-        Voice::panned(Wave::Square, 0.2),           // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Sawtooth, -0.3),        // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Sawtooth),                         // bass
+        Voice::panned(Wave::Square, 0.2),                    // lead
+        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),          // pad
+        Voice::panned(Wave::Sawtooth, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                           // keys
     ],
     sections: &[
         BLOOD_INTRO,
@@ -1165,6 +1220,7 @@ const BLOOD_RUSH: SongSpec = SongSpec {
     intensity: 0.95,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -1266,11 +1322,11 @@ const DEEP_STATIC: SongSpec = SongSpec {
     bpm: 144.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                // bass
-        Voice::panned(Wave::Sawtooth, 0.2),         // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Square, -0.3),          // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Sawtooth),                       // bass
+        Voice::panned(Wave::Sawtooth, 0.2),                // lead
+        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
+        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                         // keys
     ],
     sections: &[
         DEEP_INTRO,
@@ -1285,6 +1341,7 @@ const DEEP_STATIC: SongSpec = SongSpec {
     intensity: 1.0,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -1389,11 +1446,11 @@ const STATIC_PRAYER: SongSpec = SongSpec {
     bpm: 92.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                // bass
-        Voice::panned(Wave::Triangle, 0.2),         // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Triangle, -0.3),        // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Sawtooth),                         // bass
+        Voice::panned(Wave::Triangle, 0.2),                  // lead
+        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),          // pad
+        Voice::panned(Wave::Triangle, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                           // keys
     ],
     sections: &[
         PRAYER_INTRO,
@@ -1408,6 +1465,7 @@ const STATIC_PRAYER: SongSpec = SongSpec {
     intensity: 0.8,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -1513,11 +1571,11 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
     bpm: 100.0,
     steps_per_beat: 4,
     voices: [
-        Voice::mono(Wave::Sawtooth),                // bass
-        Voice::panned(Wave::Square, 0.2),           // lead
-        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7), // pad
-        Voice::panned(Wave::Square, -0.3),          // arp
-        Voice::mono(Wave::Square),                  // keys
+        Voice::mono(Wave::Sawtooth),                       // bass
+        Voice::panned(Wave::Square, 0.2),                  // lead
+        Voice::wide(Wave::Sawtooth, 0.0, 7.0, 0.7),        // pad
+        Voice::panned(Wave::Square, -0.3).with_echo(0.22), // arp
+        Voice::mono(Wave::Square),                         // keys
     ],
     sections: &[
         MASK_INTRO,
@@ -1532,6 +1590,7 @@ const MASK_OF_DREAD: SongSpec = SongSpec {
     intensity: 1.15,
     swing: 0.0,
     sidechain: Sidechain::OFF,
+    echo: Echo::DOTTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -1733,14 +1792,20 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
     voices: [
         // bass: a centred saw sub with a fast resonant pluck on every hit
         Voice::mono(Wave::Sawtooth).with_filter(230.0, 1100.0, 0.0, 0.12, 3.0),
-        // lead: a doubled square, a little right, late vibrato, a soft wow
+        // lead: a doubled square, a little right, late vibrato, a soft wow,
+        // dotted-eighth echoes trailing into the hall
         Voice::wide(Wave::Square, 0.25, 6.0, 0.3)
             .with_vibrato(5.5, 12.0, 0.25)
-            .with_filter(1800.0, 5200.0, 0.0, 0.18, 1.6),
-        // pad: a five-saw supersaw that blooms open over a second
-        Voice::stack(Wave::Sawtooth, 0.0, 12.0, 0.85, 5).with_filter(700.0, 2600.0, 1.1, 0.0, 1.1),
-        // arp: a triangle answering from the left
-        Voice::panned(Wave::Triangle, -0.35),
+            .with_filter(1800.0, 5200.0, 0.0, 0.18, 1.6)
+            .with_echo(0.35)
+            .with_reverb(0.25),
+        // pad: a five-saw supersaw that blooms open over a second, deep in
+        // the hall
+        Voice::stack(Wave::Sawtooth, 0.0, 12.0, 0.85, 5)
+            .with_filter(700.0, 2600.0, 1.1, 0.0, 1.1)
+            .with_reverb(0.45),
+        // arp: a triangle answering from the left, echoing to the right
+        Voice::panned(Wave::Triangle, -0.35).with_echo(0.5),
         Voice::mono(Wave::Square), // keys: unused here
     ],
     sections: &[
@@ -1756,6 +1821,7 @@ const SODIUM_LIGHTS: SongSpec = SongSpec {
     intensity: 0.8,
     swing: 0.0,
     sidechain: Sidechain::new(0.55, 0.9),
+    echo: Echo::new(3.0, 0.42, 2800.0),
 };
 
 /// All songs, in ascending darkness (intro first). Index into this with
@@ -2054,6 +2120,9 @@ mod tests {
         assert_eq!(v.env.map(|e| e.gate), Some(2.0));
         assert_eq!(v.drive, 0.4);
         assert_eq!(v.pan, 0.1);
+        let w = v.with_echo(0.3).with_reverb(0.2);
+        assert_eq!((w.echo, w.reverb), (0.3, 0.2));
+        assert_eq!(Voice::mono(Wave::Sine).echo, 0.0);
         // No detune = no stack, whatever the count; no width = not wide.
         assert_eq!(Voice::stack(Wave::Sine, 0.0, 0.0, 1.0, 7).oscillators(), 1);
         assert!(!Voice::wide(Wave::Sine, 0.0, 5.0, 0.0).is_wide());
@@ -2172,12 +2241,24 @@ mod tests {
                 "{}: duck release",
                 song.name
             );
+            assert!(
+                song.echo.steps > 0.0 && song.echo.tone > 0.0,
+                "{}: echo",
+                song.name
+            );
+            assert!(
+                (0.0..0.95).contains(&song.echo.feedback),
+                "{}: echo fb",
+                song.name
+            );
             for v in song.voices {
                 assert!((-1.0..=1.0).contains(&v.pan), "{}: pan", song.name);
                 assert!((0.0..=1.0).contains(&v.width), "{}: width", song.name);
                 assert!(v.detune >= 0.0, "{}: detune", song.name);
                 assert!((1..=7).contains(&v.unison), "{}: unison", song.name);
                 assert!((0.0..=1.0).contains(&v.drive), "{}: drive", song.name);
+                assert!((0.0..=1.0).contains(&v.echo), "{}: echo", song.name);
+                assert!((0.0..=1.0).contains(&v.reverb), "{}: reverb", song.name);
                 if let Some(e) = v.env {
                     assert!(e.attack >= 0.0 && e.gate > 0.0, "{}: env", song.name);
                 }

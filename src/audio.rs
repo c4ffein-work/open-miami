@@ -65,7 +65,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
     AudioBuffer, AudioContext, AudioDestinationNode, BaseAudioContext, BiquadFilterNode,
-    BiquadFilterType, GainNode, OfflineAudioContext, OscillatorType, OverSampleType,
+    BiquadFilterType, DelayNode, GainNode, OfflineAudioContext, OscillatorType, OverSampleType,
     StereoPannerNode, WaveShaperNode,
 };
 
@@ -88,6 +88,13 @@ const IR_SECONDS: f64 = 1.1;
 
 /// Length of the gun / hit bus impulse response (seconds): RT ~1.5 s.
 const IR_REAL_SECONDS: f64 = 1.7;
+
+/// Length of the music hall impulse response (seconds): a long, dark tail
+/// for pads and lead throws.
+const IR_HALL_SECONDS: f64 = 2.6;
+
+/// Longest echo delay the music delay line allows (seconds).
+const ECHO_MAX_SECONDS: f64 = 2.0;
 
 /// Overall gain of a resynthesised (SMS) metal hit: the model's loudest
 /// track (a 1.0 sine partial) lands at this peak; the sub noise band, whose
@@ -788,6 +795,30 @@ struct BakedMusic {
     pending: RefCell<Vec<RenderCallback>>,
 }
 
+/// The music send effects: one tempo-synced echo line and one hall reverb,
+/// each fed by a per-lane send gain taken after the lane's drive (so a
+/// driven lead echoes driven) and returning into the ducker (echoes and
+/// tails pump with everything else). Built once; the echo's time /
+/// feedback / tone and every send level follow the song
+/// ([`AudioEngine::apply_voices`]).
+///
+/// ```text
+///  lane panner ─► drive ─┬────────────────────────────────► ducker ─► bus
+///                        ├─ echo send ─► delay ─► tone ─► return ──┤
+///                        │                 ▲           └─ feedback ─┘
+///                        └─ verb send ─► convolver (hall) ─► return ─┘
+/// ```
+struct MusicFx {
+    /// Per-lane send gains into the echo.
+    echo_send: Vec<GainNode>,
+    /// The delay line and its feedback loop.
+    delay: DelayNode,
+    feedback: GainNode,
+    tone: BiquadFilterNode,
+    /// Per-lane send gains into the hall.
+    verb_send: Vec<GainNode>,
+}
+
 /// One enveloped oscillator note for [`AudioEngine::tone_env`].
 struct Tone {
     /// Start and end pitch (a glide when they differ).
@@ -879,6 +910,8 @@ pub struct AudioEngine {
     /// curve = bypass). Empty when they couldn't be built (panners then
     /// feed the ducker directly).
     music_drive: Vec<WaveShaperNode>,
+    /// The echo + hall sends (`None` when they couldn't be built: dry).
+    music_fx: Option<MusicFx>,
     /// The side-chain ducker the lane panners sum into (then the bus): its
     /// gain is automated down on every kick per the song's [`Sidechain`].
     /// `None` = the panners feed the bus directly (no pumping).
@@ -945,6 +978,12 @@ impl AudioEngine {
             (Some(c), Some(into)) => Self::make_lane_panners(c, into, &music_drive),
             _ => Vec::new(),
         };
+        let music_fx = match (&ctx, lanes_into) {
+            (Some(c), Some(into)) if !music_pan.is_empty() => {
+                Self::make_music_fx(c, into, &music_pan, &music_drive)
+            }
+            _ => None,
+        };
         let engine = Self {
             ctx,
             noise,
@@ -955,6 +994,7 @@ impl AudioEngine {
             music_filter,
             music_pan,
             music_drive,
+            music_fx,
             music_duck,
             last_duck: Cell::new(f64::NEG_INFINITY),
             music_playing: false,
@@ -980,7 +1020,7 @@ impl AudioEngine {
             render_dead: Cell::new(false),
             render: RefCell::new(None),
         };
-        engine.apply_pans();
+        engine.apply_voices();
         engine.rebuild_music_bake();
         engine
     }
@@ -2814,17 +2854,37 @@ impl AudioEngine {
         self.section = 0;
         self.step = 0;
         if changed {
-            self.apply_pans();
+            self.apply_voices();
             self.rebuild_music_bake();
         }
     }
 
-    /// Position each lane's panner and set each lane's drive curve from the
-    /// current song's voices.
-    fn apply_pans(&self) {
+    /// Point the persistent lane nodes at the current song: each lane's
+    /// pan, drive curve, echo and reverb sends, and the echo line's time /
+    /// feedback / tone.
+    fn apply_voices(&self) {
         for (lane, panner) in self.music_pan.iter().enumerate() {
             let pan = self.song.voices.get(lane).map_or(0.0, |v| v.pan);
             panner.pan().set_value(pan.clamp(-1.0, 1.0) as f32);
+        }
+        if let Some(fx) = &self.music_fx {
+            for (lane, send) in fx.echo_send.iter().enumerate() {
+                let v = self.song.voices.get(lane).map_or(0.0, |v| v.echo);
+                send.gain().set_value(v.clamp(0.0, 1.0) as f32);
+            }
+            for (lane, send) in fx.verb_send.iter().enumerate() {
+                let v = self.song.voices.get(lane).map_or(0.0, |v| v.reverb);
+                send.gain().set_value(v.clamp(0.0, 1.0) as f32);
+            }
+            let e = self.song.echo;
+            let secs = (e.steps.max(0.0) * self.step_dur()).clamp(0.001, ECHO_MAX_SECONDS);
+            fx.delay.delay_time().set_value(secs as f32);
+            fx.feedback
+                .gain()
+                .set_value(e.feedback.clamp(0.0, 0.95) as f32);
+            fx.tone
+                .frequency()
+                .set_value(e.tone.clamp(200.0, 18000.0) as f32);
         }
         for (lane, shaper) in self.music_drive.iter().enumerate() {
             let drive = self.song.voices.get(lane).map_or(0.0, |v| v.drive);
@@ -4123,6 +4183,108 @@ impl AudioEngine {
         let _ = duck.gain().set_value_at_time(1.0, 0.0);
         duck.connect_with_audio_node(bus).ok()?;
         Some(duck)
+    }
+
+    /// The echo line and the hall, with a send gain per lane tapped after
+    /// its drive shaper (or its panner when there are none), both returning
+    /// into `into` (the ducker / bus). `None` if any node fails: dry.
+    fn make_music_fx(
+        ctx: &AudioContext,
+        into: &GainNode,
+        panners: &[StereoPannerNode],
+        drives: &[WaveShaperNode],
+    ) -> Option<MusicFx> {
+        let taps: Vec<web_sys::AudioNode> = (0..panners.len())
+            .map(|lane| match drives.get(lane) {
+                Some(d) => AsRef::<web_sys::AudioNode>::as_ref(d).clone(),
+                None => AsRef::<web_sys::AudioNode>::as_ref(&panners[lane]).clone(),
+            })
+            .collect();
+        // Echo: sends → delay → tone → (return, feedback → delay).
+        let delay = ctx
+            .create_delay_with_max_delay_time(ECHO_MAX_SECONDS)
+            .ok()?;
+        let tone = ctx.create_biquad_filter().ok()?;
+        tone.set_type(BiquadFilterType::Lowpass);
+        let _ = tone.frequency().set_value_at_time(3200.0, 0.0);
+        let feedback = ctx.create_gain().ok()?;
+        let _ = feedback.gain().set_value_at_time(0.35, 0.0);
+        let echo_return = ctx.create_gain().ok()?;
+        let _ = echo_return.gain().set_value_at_time(0.8, 0.0);
+        delay.connect_with_audio_node(&tone).ok()?;
+        tone.connect_with_audio_node(&feedback).ok()?;
+        feedback.connect_with_audio_node(&delay).ok()?;
+        tone.connect_with_audio_node(&echo_return).ok()?;
+        echo_return.connect_with_audio_node(into).ok()?;
+        // Hall: sends → convolver → return.
+        let conv = ctx.create_convolver().ok()?;
+        conv.set_normalize(true);
+        conv.set_buffer(Some(&Self::make_impulse_hall(ctx)?));
+        let verb_return = ctx.create_gain().ok()?;
+        let _ = verb_return.gain().set_value_at_time(1.4, 0.0);
+        conv.connect_with_audio_node(&verb_return).ok()?;
+        verb_return.connect_with_audio_node(into).ok()?;
+        let mut echo_send = Vec::with_capacity(taps.len());
+        let mut verb_send = Vec::with_capacity(taps.len());
+        for tap in &taps {
+            let e = ctx.create_gain().ok()?;
+            let _ = e.gain().set_value_at_time(0.0, 0.0);
+            tap.connect_with_audio_node(&e).ok()?;
+            e.connect_with_audio_node(&delay).ok()?;
+            echo_send.push(e);
+            let r = ctx.create_gain().ok()?;
+            let _ = r.gain().set_value_at_time(0.0, 0.0);
+            tap.connect_with_audio_node(&r).ok()?;
+            r.connect_with_audio_node(&conv).ok()?;
+            verb_send.push(r);
+        }
+        Some(MusicFx {
+            echo_send,
+            delay,
+            feedback,
+            tone,
+            verb_send,
+        })
+    }
+
+    /// The music hall impulse response: `IR_HALL_SECONDS` of stereo noise
+    /// under a slow exponential decay (RT60 ≈ 2.4 s), a 14 ms pre-delay, a
+    /// smooth (non-sparse) onset and a lowpass sliding from ~5 kHz to
+    /// ~900 Hz over the tail — a big dark room, not the SFX bus's concrete
+    /// one.
+    fn make_impulse_hall(ctx: &AudioContext) -> Option<AudioBuffer> {
+        let sr = ctx.sample_rate();
+        let len = (sr as f64 * IR_HALL_SECONDS) as u32;
+        if len == 0 {
+            return None;
+        }
+        let buf = ctx.create_buffer(2, len, sr).ok()?;
+        let predelay = (sr as f64 * 0.014) as usize;
+        let tau = 0.35f64;
+        let mut data = vec![0f32; len as usize];
+        for ch in 0..2u32 {
+            let mut state: u32 = 0x3C6E_F372 ^ (ch.wrapping_mul(0x1B87_3593) + 7);
+            let mut lp = 0f32;
+            for (i, x) in data.iter_mut().enumerate() {
+                if i < predelay {
+                    *x = 0.0;
+                    continue;
+                }
+                let t = (i - predelay) as f64 / sr as f64;
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                let white = (state as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                // A 30 ms build-up keeps the onset from reading as a slap.
+                let env = (-t / tau).exp() * (t / 0.03).min(1.0);
+                let fc = 5000.0 * (-t / 0.8).exp() + 900.0;
+                let a = (-2.0 * std::f64::consts::PI * fc / sr as f64).exp() as f32;
+                lp = a * lp + (1.0 - a) * white;
+                *x = lp * env as f32;
+            }
+            buf.copy_to_channel(&data, ch as i32).ok()?;
+        }
+        Some(buf)
     }
 
     /// One soft-clip `WaveShaperNode` per melodic lane, each into `into`
